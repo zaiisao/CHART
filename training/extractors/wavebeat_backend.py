@@ -1,0 +1,244 @@
+"""WaveBeat extractor backend for end-to-end CHART training."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+from training.dataset import (
+    AudioPhaseBridgeDataset,
+    MultiSourceAudioDataset,
+    discover_wavebeat_dataset_specs,
+)
+
+
+def _import_wavebeat_components(wavebeat_root: str) -> tuple[type, type]:
+    root = Path(wavebeat_root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"wavebeat_root not found: {root}")
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from wavebeat.data import DownbeatDataset  # type: ignore[import-not-found]
+    from wavebeat.dstcn import dsTCNModel  # type: ignore[import-not-found]
+
+    return DownbeatDataset, dsTCNModel
+
+
+def _center_crop_last_dim(x: torch.Tensor, length: int) -> torch.Tensor:
+    if x.shape[-1] == length:
+        return x
+    if x.shape[-1] < length:
+        raise ValueError(f"Cannot crop tensor of length {x.shape[-1]} to larger length {length}")
+    start = (x.shape[-1] - length) // 2
+    end = start + length
+    return x[..., start:end]
+
+
+class WaveBeatBackend:
+    name = "wavebeat"
+
+    def __init__(self) -> None:
+        self._criterion = torch.nn.BCEWithLogitsLoss()
+
+    def add_cli_args(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--wavebeat_root",
+            type=str,
+            default=None,
+            help="Optional override for extractor package path (default: extractors/<extractor>)",
+        )
+        parser.add_argument(
+            "--dataset_root",
+            type=str,
+            default=None,
+            help=(
+                "Root folder containing multiple dataset folders. "
+                "When set, auto-discovers known datasets and overrides "
+                "--audio_dir/--annot_dir/--wavebeat_dataset."
+            ),
+        )
+        parser.add_argument(
+            "--dataset_include",
+            type=str,
+            default="ballroom,beatles,gtzan,hains,rwc_popular",
+            help=(
+                "Comma-separated dataset keys to include when --dataset_root is set. "
+                "Use 'all' for every discovered dataset. "
+                "Supported keys: ballroom,beatles,beatles_old,gtzan,hains,rwc_popular"
+            ),
+        )
+        parser.add_argument("--audio_dir", type=str, default=None, help="WaveBeat audio directory")
+        parser.add_argument("--annot_dir", type=str, default=None, help="WaveBeat annotation directory")
+        parser.add_argument("--wavebeat_dataset", type=str, default="ballroom", help="WaveBeat dataset name")
+        parser.add_argument("--audio_sample_rate", type=int, default=44100)
+        parser.add_argument("--target_factor", type=int, default=256)
+        parser.add_argument("--train_length", type=int, default=65536)
+        parser.add_argument("--num_workers", type=int, default=0)
+        parser.add_argument("--examples_per_epoch", type=int, default=1000)
+        parser.add_argument("--preload", action="store_true")
+        parser.add_argument("--augment", action="store_true")
+        parser.add_argument("--dry_run", action="store_true")
+
+    def _resolve_extractor_root(self, args: argparse.Namespace) -> str:
+        if args.wavebeat_root is not None and str(args.wavebeat_root).strip() != "":
+            return str(args.wavebeat_root)
+        return str(Path("extractors") / self.name)
+
+    def build_dataloader(self, args: argparse.Namespace) -> DataLoader:
+        phases_dir = args.phases_dir
+        if phases_dir is None and args.dataset_root is not None:
+            phases_dir = args.dataset_root
+
+        if phases_dir is None:
+            raise ValueError("Provide --dataset_root (preferred) or --phases_dir for mode=end2end")
+
+        extractor_root = self._resolve_extractor_root(args)
+        DownbeatDataset, _ = _import_wavebeat_components(extractor_root)
+
+        if args.dataset_root is not None:
+            include_keys: set[str] | None
+            if args.dataset_include.strip().lower() == "all":
+                include_keys = None
+            else:
+                include_keys = {
+                    item.strip().lower() for item in args.dataset_include.split(",") if item.strip()
+                }
+
+            specs = discover_wavebeat_dataset_specs(
+                root_dir=args.dataset_root,
+                include_keys=include_keys,
+            )
+            if len(specs) == 0:
+                raise RuntimeError(
+                    "No known datasets were discovered from --dataset_root. "
+                    "Check folder structure or --dataset_include."
+                )
+
+            source_datasets: list[Dataset] = []
+            source_keys: list[str] = []
+            for spec in specs:
+                try:
+                    source_dataset_candidate = DownbeatDataset(
+                        audio_dir=str(spec.audio_dir),
+                        annot_dir=str(spec.annot_dir),
+                        dataset=spec.wavebeat_dataset,
+                        audio_sample_rate=args.audio_sample_rate,
+                        target_factor=args.target_factor,
+                        subset="train",
+                        length=args.train_length,
+                        preload=args.preload,
+                        augment=args.augment,
+                        examples_per_epoch=args.examples_per_epoch,
+                        half=False,
+                        dry_run=args.dry_run,
+                    )
+                except Exception as exc:
+                    print(f"Skipping dataset '{spec.key}': {exc}")
+                    continue
+
+                num_audio_files = len(getattr(source_dataset_candidate, "audio_files", []))
+                if num_audio_files == 0:
+                    print(f"Skipping dataset '{spec.key}': no train audio files selected")
+                    continue
+
+                try:
+                    _ = source_dataset_candidate[0]
+                except Exception as exc:
+                    print(f"Skipping dataset '{spec.key}': sample load failed ({exc})")
+                    continue
+
+                source_datasets.append(source_dataset_candidate)
+                source_keys.append(spec.key)
+
+            if len(source_datasets) == 0:
+                raise RuntimeError(
+                    "No usable datasets remained after initialization. "
+                    "Check annotation matching and dataset format consistency."
+                )
+
+            source_dataset: Dataset = MultiSourceAudioDataset(
+                source_datasets=source_datasets,
+                source_keys=source_keys,
+            )
+            print(f"Auto-discovered datasets: {', '.join(source_keys)}")
+        else:
+            if args.audio_dir is None or args.annot_dir is None:
+                raise ValueError(
+                    "--audio_dir and --annot_dir are required unless --dataset_root is provided"
+                )
+
+            source_dataset = DownbeatDataset(
+                audio_dir=args.audio_dir,
+                annot_dir=args.annot_dir,
+                dataset=args.wavebeat_dataset,
+                audio_sample_rate=args.audio_sample_rate,
+                target_factor=args.target_factor,
+                subset="train",
+                length=args.train_length,
+                preload=args.preload,
+                augment=args.augment,
+                examples_per_epoch=args.examples_per_epoch,
+                half=False,
+                dry_run=args.dry_run,
+            )
+
+        dataset = AudioPhaseBridgeDataset(
+            source_dataset=source_dataset,
+            phases_dir=phases_dir,
+        )
+
+        return DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+    def build_model(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
+        extractor_root = self._resolve_extractor_root(args)
+        _, dsTCNModel = _import_wavebeat_components(extractor_root)
+        return dsTCNModel().to(device)
+
+    def load_checkpoint(
+        self,
+        model: torch.nn.Module,
+        args: argparse.Namespace,
+        device: torch.device,
+    ) -> None:
+        if args.extractor_ckpt is None:
+            return
+
+        ckpt = torch.load(args.extractor_ckpt, map_location=device)
+        state_dict = ckpt.get("state_dict", ckpt)
+
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        except RuntimeError:
+            cleaned_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
+            for key, value in state_dict.items():
+                new_key = key
+                if new_key.startswith("model."):
+                    new_key = new_key[len("model.") :]
+                cleaned_state_dict[new_key] = value
+
+            model.load_state_dict(cleaned_state_dict, strict=False)
+
+    def compute_loss_and_activations(
+        self,
+        model: torch.nn.Module,
+        audio: torch.Tensor,
+        target: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = model(audio)
+        aligned_target = _center_crop_last_dim(target, logits.shape[-1])
+        loss = self._criterion(logits, aligned_target)
+        activations = torch.sigmoid(logits).transpose(1, 2)
+        return loss, activations
