@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import torch
-
+import math
 
 def compute_prior_energy_loss(z_t: torch.Tensor, z_t_minus_1: torch.Tensor) -> torch.Tensor:
     """Compute continuous cosine-energy prior penalties.
@@ -19,9 +19,21 @@ def compute_prior_energy_loss(z_t: torch.Tensor, z_t_minus_1: torch.Tensor) -> t
     Returns:
         Scalar prior energy loss tensor.
     """
-    # TODO: Add cosine-energy penalties for phase progression and tempo smoothness.
-    raise NotImplementedError("Implement prior energy loss.")
 
+    tempo_t, beat_phase_t, bar_phase_t = z_t[:, 0], z_t[:, 1], z_t[:, 2]
+    tempo_t_minus_1, beat_phase_t_minus_1, bar_phase_t_minus_1 = z_t_minus_1[:, 0], z_t_minus_1[:, 1], z_t_minus_1[:, 2]
+
+    expected_beat_phase = beat_phase_t_minus_1 + tempo_t_minus_1
+    beat_progression_loss = 1 - torch.cos(2 * math.pi * (beat_phase_t - expected_beat_phase))
+
+    expected_bar_phase = bar_phase_t_minus_1 + (tempo_t_minus_1 / 4.0)
+    bar_progression_loss = 1 - torch.cos(2 * math.pi * (bar_phase_t - expected_bar_phase))
+
+    boundary_weight = 1 - torch.cos(2 * math.pi * beat_phase_t_minus_1)
+    tempo_change_loss = boundary_weight * torch.abs(tempo_t - tempo_t_minus_1)
+
+    total_prior_energy = torch.mean(beat_progression_loss + bar_progression_loss + tempo_change_loss)
+    return total_prior_energy
 
 def compute_svt_loss(
     reconstructed: torch.Tensor,
@@ -30,6 +42,7 @@ def compute_svt_loss(
     logvar: torch.Tensor,
     z_t: torch.Tensor,
     z_t_minus_1: torch.Tensor,
+    lambda_prior: float = 1.0
 ) -> torch.Tensor:
     """Compute total SVT loss.
 
@@ -45,9 +58,22 @@ def compute_svt_loss(
         logvar: Latent posterior log-variance.
         z_t: Current latent phase variables.
         z_t_minus_1: Previous latent phase variables.
+        lambda_prior: Weighting factor for the prior energy term.
 
     Returns:
-        Scalar total loss tensor.
+        Tuple containing total loss, reconstruction loss, KL divergence, and prior energy.
     """
     # TODO: Compute and combine MSE, KL divergence, and prior energy terms.
-    raise NotImplementedError("Implement SVT total loss.")
+    # 1. Standard VAE Reconstruction (MSE matching the acoustic activations)
+    recon_loss = torch.nn.functional.mse_loss(reconstructed, targets)
+    
+    # 2. Standard VAE KL Divergence
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    
+    # 3. ADD: Our novel Domain-Structured Prior (The Bar Pointer rules)
+    prior_energy = compute_prior_energy_loss(z_t, z_t_minus_1)
+    
+    # The total loss forces the network to balance audio evidence with music theory
+    total_loss = recon_loss + kl_loss + (lambda_prior * prior_energy)
+    
+    return total_loss, recon_loss, kl_loss, prior_energy
