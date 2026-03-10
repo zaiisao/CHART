@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 import math
 
 def compute_prior_energy_loss(z_t: torch.Tensor, z_t_minus_1: torch.Tensor) -> torch.Tensor:
@@ -43,7 +44,7 @@ def compute_svt_loss(
     z_t: torch.Tensor,
     z_t_minus_1: torch.Tensor,
     lambda_prior: float = 1.0
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute total SVT loss.
 
     This placeholder should combine three components:
@@ -65,7 +66,7 @@ def compute_svt_loss(
     """
     # TODO: Compute and combine MSE, KL divergence, and prior energy terms.
     # 1. Standard VAE Reconstruction (MSE matching the acoustic activations)
-    recon_loss = torch.nn.functional.mse_loss(reconstructed, targets)
+    recon_loss = F.mse_loss(reconstructed, targets)
     
     # 2. Standard VAE KL Divergence
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
