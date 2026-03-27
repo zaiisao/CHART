@@ -77,16 +77,36 @@ def gumbel_softmax_sample(
 # Von Mises (phase)
 # ---------------------------------------------------------------------------
 
+def _von_mises_cdf_numerical(z: Tensor, kappa: Tensor, n_quad: int = 100) -> Tensor:
+    """CDF of vM(0, κ) evaluated at z via trapezoid quadrature.
+
+    Computes F(z; 0, κ) = ∫_{-π}^{z} exp(κ cos t) / (2π I0(κ)) dt.
+    Used by Algorithm 2 backward to differentiate F wrt κ.
+    """
+    z_u = z.unsqueeze(-1)        # [..., 1]
+    k_u = kappa.unsqueeze(-1)    # [..., 1]
+    j = torch.arange(n_quad + 1, device=z.device, dtype=z.dtype)  # [n_quad+1]
+    # Quadrature nodes from -π to z
+    t = -math.pi + j * (z_u + math.pi) / n_quad              # [..., n_quad+1]
+    log_p = k_u * torch.cos(t) - _log_i0(k_u) - math.log(TWO_PI)
+    p = log_p.exp()
+    dt = (z + math.pi) / n_quad                               # [...]
+    return (dt * (p[..., :-1] + p[..., 1:]).sum(dim=-1) / 2.0)
+
+
 class _VonMisesSampleFn(torch.autograd.Function):
     """Von Mises sampler with implicit reparameterization gradients.
 
-    Forward: Best-Fisher rejection algorithm (Algorithm 2 in paper).
-    Backward: implicit reparameterization (Figurnov et al. 2018).
+    Forward: Best-Fisher rejection algorithm (Algorithm 2, paper).
+    Backward: implicit reparameterization (Algorithm 2 / Figurnov et al. 2018).
+        ∂z/∂μ = 1
+        ∂z/∂κ = -∂F(z|κ)/∂κ / p(z|0,κ)
+    where ∂F/∂κ is approximated by central finite differences on the
+    numerical CDF (equivalent to ForwardModeAD on F as stated in Algorithm 2).
     """
 
     @staticmethod
     def forward(ctx, mu: Tensor, kappa: Tensor) -> Tensor:  # type: ignore[override]
-        # Best-Fisher rejection sampler
         kappa_safe = kappa.clamp(min=_KAPPA_MIN, max=_KAPPA_MAX)
 
         tau = 1.0 + torch.sqrt(1.0 + 4.0 * kappa_safe ** 2)
@@ -97,7 +117,6 @@ class _VonMisesSampleFn(torch.autograd.Function):
         device = mu.device
         dtype = mu.dtype
 
-        # Batched rejection sampling
         done = torch.zeros(shape, dtype=torch.bool, device=device)
         f_accepted = torch.zeros(shape, dtype=dtype, device=device)
         max_iter = 1000
@@ -107,18 +126,14 @@ class _VonMisesSampleFn(torch.autograd.Function):
                 break
             u1 = torch.rand(shape, dtype=dtype, device=device)
             u2 = torch.rand(shape, dtype=dtype, device=device)
-
             c = torch.cos(math.pi * u1)
             f = (1.0 + r * c) / (r + c)
-
             accept = (kappa_safe * (r - f) + torch.log(f) - torch.log(r)) >= torch.log(u2)
             newly_accepted = accept & ~done
             f_accepted = torch.where(newly_accepted, f, f_accepted)
             done = done | accept
 
-        # If some samples did not converge, use the last f (extremely rare)
         f_accepted = torch.where(done, f_accepted, f)
-
         u3 = torch.rand(shape, dtype=dtype, device=device)
         z = torch.where(u3 > 0.5, torch.acos(f_accepted), -torch.acos(f_accepted))
         sample = mu + z
@@ -130,22 +145,32 @@ class _VonMisesSampleFn(torch.autograd.Function):
     def backward(ctx, grad_output: Tensor):  # type: ignore[override]
         z, kappa = ctx.saved_tensors
 
-        # Implicit reparameterization gradients:
-        # d(sample)/d(mu) = 1
+        # Algorithm 2, line 22: ∂L/∂μ = ∂L/∂φ̂ · 1
         grad_mu = grad_output
 
-        # d(sample)/d(kappa) = cos(z) / (kappa * sin(z))
-        # Guard against sin(z) = 0
-        sin_z = torch.sin(z)
-        sin_z_safe = torch.where(sin_z.abs() < 1e-8, torch.ones_like(sin_z) * 1e-8, sin_z)
-        dz_dkappa = torch.cos(z) / (kappa * sin_z_safe)
+        # Algorithm 2, lines 19-21:
+        # p(z|0,κ) = exp(κ cos z) / (2π I0(κ))
+        log_p_z = kappa * torch.cos(z) - _log_i0(kappa) - math.log(TWO_PI)
+        p_z = log_p_z.exp().clamp(min=1e-10)
+
+        # ∂F(z|κ)/∂κ via central finite differences on the numerical CDF
+        # (Algorithm 2, line 20: ForwardModeAD(F(z|κ), κ))
+        eps = 1e-3
+        with torch.no_grad():
+            dF_dkappa = (
+                _von_mises_cdf_numerical(z, (kappa + eps).clamp(max=_KAPPA_MAX))
+                - _von_mises_cdf_numerical(z, (kappa - eps).clamp(min=_KAPPA_MIN))
+            ) / (2.0 * eps)
+
+        # Algorithm 2, line 21: ∂z/∂κ = -∂F/∂κ / p(z)
+        dz_dkappa = -dF_dkappa / p_z
         grad_kappa = grad_output * dz_dkappa
 
         return grad_mu, grad_kappa
 
 
 def von_mises_sample(mu: Tensor, kappa: Tensor) -> Tensor:
-    """Draw reparameterized samples from vM(mu, kappa).
+    """Draw reparameterized samples from vM(mu, kappa) per Algorithm 2.
 
     Args:
         mu: Mean direction, shape ``(...)``.
