@@ -15,7 +15,22 @@ placeholder interfaces and TODO markers for custom implementation.
 
 - `models/` – SVT model scaffold and loss function stubs
 - `training/` – dataset and training entrypoint stubs
-- `evaluation/` – inference, phase conversion, and scoring stubs
+- `evaluation/` – inference, phase conversion, and scoring utilities
+
+## Inference
+
+Run CHART phase inference from precomputed acoustic activations (`.npy`):
+
+```bash
+python -m evaluation.inference \
+	--checkpoint checkpoints/chart_end2end_smoke.pt \
+	--input_npy /path/to/activations.npy \
+	--output_npy /path/to/predicted_phase.npy
+```
+
+- Input shape: `[T, 2]` or `[B, T, 2]`
+- Output shape: `[T, 3]` or `[B, T, 3]`
+- Default mode is frame-wise autoregressive rollout; add `--non_autoregressive` for one-pass inference.
 
 ## Next Steps
 
