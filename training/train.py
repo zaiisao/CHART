@@ -90,6 +90,7 @@ def train_epoch(
     device: torch.device,
     temperature: float = 1.0,
     beta: float = 1.0,
+    pos_weight: float = 20.0,
     epoch: int = 1,
     num_epochs: int = 1,
     log_interval: int = 1,
@@ -113,7 +114,27 @@ def train_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        out = model(activations, z_prev, temperature=temperature)
+        # Algorithm 1 pass 1: rollout to get model samples for z_prev
+        with torch.no_grad():
+            out_rollout = model(activations, z_prev, temperature=temperature)
+            samp = out_rollout["samples"]
+            z_prev_sampled = {
+                "phase": torch.cat(
+                    [z_prev["phase"][:, :1, :],
+                     samp["phase"][:, :-1].unsqueeze(-1)], dim=1,
+                ),
+                "log_tempo": torch.cat(
+                    [z_prev["log_tempo"][:, :1, :],
+                     samp["log_tempo"][:, :-1].unsqueeze(-1)], dim=1,
+                ),
+                "meter_onehot": torch.cat(
+                    [z_prev["meter_onehot"][:, :1, :],
+                     samp["meter_onehot"][:, :-1, :]], dim=1,
+                ),
+            }
+
+        # Algorithm 1 pass 2: forward with sampled z_prev
+        out = model(activations, z_prev_sampled, temperature=temperature)
 
         total_loss, components = compute_elbo_loss(
             beat_logits=out["beat_logits"],
@@ -121,6 +142,7 @@ def train_epoch(
             posterior=out["posterior"],
             prior=out["prior"],
             beta=beta,
+            pos_weight=pos_weight,
         )
 
         total_loss.backward()
@@ -159,6 +181,8 @@ def train_epoch_end_to_end(
     device: torch.device,
     temperature: float = 1.0,
     beta: float = 1.0,
+    pos_weight: float = 20.0,
+    free_bits: float = 0.0,
     extractor_loss_weight: float = 1.0,
     svt_loss_weight: float = 1.0,
     epoch: int = 1,
@@ -196,28 +220,45 @@ def train_epoch_end_to_end(
         T_act = activations.shape[1]
         beat_targets_cropped = _center_crop_seq_dim(beat_targets.unsqueeze(-1), T_act).squeeze(-1)
 
-        z_prev = {}
-        for key in ("phase_prev", "log_tempo_prev", "meter_onehot_prev"):
-            val = batch[key].to(device)
-            z_prev_key = key  # phase_prev -> phase, etc.
-            z_prev[key.replace("_prev", "").replace("_onehot", "_onehot")] = _center_crop_seq_dim(
-                val if val.ndim == 3 else val.unsqueeze(-1), T_act
-            )
-        # Fix key naming
-        z_prev_fixed = {
+        # Ground-truth z_prev (used only for the initial frame seed)
+        z_prev_gt = {
             "phase": _center_crop_seq_dim(batch["phase_prev"].to(device), T_act),
             "log_tempo": _center_crop_seq_dim(batch["log_tempo_prev"].to(device), T_act),
             "meter_onehot": _center_crop_seq_dim(batch["meter_onehot_prev"].to(device), T_act),
         }
 
-        # Stage 2: SVT forward
-        out = svt_model(activations, z_prev_fixed, temperature=temperature)
+        # Algorithm 1: pass 1 — rollout under current parameters (no grad)
+        # to obtain model samples ẑ that will serve as z_prev for pass 2.
+        with torch.no_grad():
+            out_rollout = svt_model(activations.detach(), z_prev_gt, temperature=temperature)
+            samp = out_rollout["samples"]
+            # Build z_prev_sampled: z_prev_sampled[t] = ẑ[t-1].
+            # Frame 0 keeps the ground-truth seed (equivalent to f_init_ψ).
+            z_prev_sampled = {
+                "phase": torch.cat(
+                    [z_prev_gt["phase"][:, :1, :],
+                     samp["phase"][:, :-1].unsqueeze(-1)], dim=1,
+                ),
+                "log_tempo": torch.cat(
+                    [z_prev_gt["log_tempo"][:, :1, :],
+                     samp["log_tempo"][:, :-1].unsqueeze(-1)], dim=1,
+                ),
+                "meter_onehot": torch.cat(
+                    [z_prev_gt["meter_onehot"][:, :1, :],
+                     samp["meter_onehot"][:, :-1, :]], dim=1,
+                ),
+            }
+
+        # Algorithm 1: pass 2 — forward with sampled z_prev, compute ELBO
+        out = svt_model(activations, z_prev_sampled, temperature=temperature)
         svt_total, components = compute_elbo_loss(
             beat_logits=out["beat_logits"],
             beat_targets=beat_targets_cropped,
             posterior=out["posterior"],
             prior=out["prior"],
             beta=beta,
+            pos_weight=pos_weight,
+            free_bits=free_bits,
         )
 
         total_loss = extractor_loss_weight * extractor_loss + svt_loss_weight * svt_total
@@ -264,6 +305,8 @@ def val_epoch_end_to_end(
     device: torch.device,
     temperature: float = 1.0,
     beta: float = 1.0,
+    pos_weight: float = 20.0,
+    free_bits: float = 0.0,
     extractor_loss_weight: float = 1.0,
     svt_loss_weight: float = 1.0,
     fps: float = 172.265625,
@@ -300,21 +343,46 @@ def val_epoch_end_to_end(
         T_act = min(activations.shape[1], _MAX_VAL_FRAMES)
         activations = activations[:, :T_act, :]
 
-        beat_targets_cropped = _center_crop_seq_dim(beat_targets.unsqueeze(-1), T_act).squeeze(-1)
+        # Use first T_act frames of beat_targets (consistent with activations[:T_act]).
+        # Center-cropping would compare model output from song start to reference
+        # beats from song middle, giving spuriously low F-measure.
+        if beat_targets.shape[1] >= T_act:
+            beat_targets_cropped = beat_targets[:, :T_act]
+        else:
+            beat_targets_cropped = _center_crop_seq_dim(beat_targets.unsqueeze(-1), T_act).squeeze(-1)
 
-        z_prev_fixed = {
+        # Seed z_prev from GT initial frame, then roll out with model samples
+        # (same two-pass logic as training — Algorithm 1).
+        z_prev_gt = {
             "phase": _center_crop_seq_dim(batch["phase_prev"].to(device), T_act),
             "log_tempo": _center_crop_seq_dim(batch["log_tempo_prev"].to(device), T_act),
             "meter_onehot": _center_crop_seq_dim(batch["meter_onehot_prev"].to(device), T_act),
         }
-
-        out = svt_model(activations, z_prev_fixed, temperature=temperature)
+        out_rollout = svt_model(activations, z_prev_gt, temperature=temperature)
+        samp = out_rollout["samples"]
+        z_prev_sampled = {
+            "phase": torch.cat(
+                [z_prev_gt["phase"][:, :1, :],
+                 samp["phase"][:, :-1].unsqueeze(-1)], dim=1,
+            ),
+            "log_tempo": torch.cat(
+                [z_prev_gt["log_tempo"][:, :1, :],
+                 samp["log_tempo"][:, :-1].unsqueeze(-1)], dim=1,
+            ),
+            "meter_onehot": torch.cat(
+                [z_prev_gt["meter_onehot"][:, :1, :],
+                 samp["meter_onehot"][:, :-1, :]], dim=1,
+            ),
+        }
+        out = svt_model(activations, z_prev_sampled, temperature=temperature)
         svt_total, components = compute_elbo_loss(
             beat_logits=out["beat_logits"],
             beat_targets=beat_targets_cropped,
             posterior=out["posterior"],
             prior=out["prior"],
             beta=beta,
+            pos_weight=pos_weight,
+            free_bits=free_bits,
         )
 
         total_loss = extractor_loss_weight * extractor_loss + svt_loss_weight * svt_total
@@ -398,6 +466,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gumbel_temp_start", type=float, default=1.0)
     parser.add_argument("--gumbel_temp_end", type=float, default=0.1)
     parser.add_argument("--kl_anneal_epochs", type=int, default=10)
+    parser.add_argument(
+        "--bce_pos_weight",
+        type=float,
+        default=20.0,
+        help="BCE positive-class weight to compensate for beat-frame class imbalance (~1%% positive rate). Default: 20.0",
+    )
+    parser.add_argument(
+        "--free_bits",
+        type=float,
+        default=0.0,
+        help="Free-bits threshold λ (nats) applied per latent per sample. Prevents KL collapse. Default: 0.0 (disabled).",
+    )
 
     # End-to-end
     parser.add_argument("--extractor_ckpt", type=str, default=None)
@@ -467,6 +547,7 @@ def main() -> None:
                 device=device,
                 temperature=temp,
                 beta=beta,
+                pos_weight=args.bce_pos_weight,
                 epoch=epoch,
                 num_epochs=args.num_epochs,
                 log_interval=args.log_interval,
@@ -525,6 +606,8 @@ def main() -> None:
             device=device,
             temperature=temp,
             beta=beta,
+            pos_weight=args.bce_pos_weight,
+            free_bits=args.free_bits,
             extractor_loss_weight=args.extractor_loss_weight,
             svt_loss_weight=args.svt_loss_weight,
             epoch=epoch,
@@ -550,6 +633,8 @@ def main() -> None:
                 device=device,
                 temperature=temp,
                 beta=beta,
+                pos_weight=args.bce_pos_weight,
+                free_bits=args.free_bits,
                 extractor_loss_weight=args.extractor_loss_weight,
                 svt_loss_weight=args.svt_loss_weight,
                 fps=val_fps,
@@ -559,10 +644,9 @@ def main() -> None:
                 f"  [Val] total={v_total:.6f} | ext={v_ext:.6f} | svt={v_svt:.6f} | "
                 f"{v_comp_str}"
             )
-            if v_metrics:
-                m_str = " | ".join(f"{k}={v:.4f}" for k, v in v_metrics.items())
-                print(f"  [Val mir_eval] {m_str}")
-                val_f_measure = v_metrics.get("F-measure", 0.0)
+            val_f_measure = v_metrics.get("F-measure", 0.0)
+            m_str = " | ".join(f"{k}={v:.4f}" for k, v in v_metrics.items()) if v_metrics else "F-measure=0.0000"
+            print(f"  [Val mir_eval] {m_str}")
 
         # --- Save top-3 checkpoints by val beat F-measure ---
         if args.save_ckpt_path:
