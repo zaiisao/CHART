@@ -300,11 +300,17 @@ class AudioPhaseBridgeDataset(Dataset):
         structured = _phase_npy_to_structured(phase_np, self.num_meter_classes)
         prev = _build_prev_shifted(structured)
 
+        # Use WaveBeat's beat targets (channel 0) which are correctly time-aligned
+        # with the audio crop, rather than the phase-file-derived targets which are
+        # misaligned when WaveBeat uses a random crop position.
+        wavebeat_beat_targets = extractor_target[0].float()  # [T_ext] binary, aligned
+
         return {
             "audio": audio,
             "extractor_target": extractor_target,
             **structured,
             **prev,
+            "beat_targets": wavebeat_beat_targets,  # override phase-derived targets
             "audio_path": str(audio_path),
             "phase_path": str(phase_path),
         }
@@ -342,21 +348,38 @@ class AudioPhaseBridgeDataset(Dataset):
 
     @staticmethod
     def _fit_phase_length_np(phase_np: np.ndarray, target_len: int) -> np.ndarray:
-        """Center-crop or pad a phase numpy array to ``target_len``.
+        """Temporally resample a phase array to ``target_len`` frames.
 
-        Padding repeats the last row instead of zero-filling to avoid
-        spurious log(0) values in the tempo column.
+        Uses linear interpolation for continuous columns (tempo, beat_phase,
+        bar_phase) and nearest-neighbor for the discrete meter_class column.
+        The tempo column is rescaled to account for the change in frames-per-second
+        so that beats-per-second stays constant.
         """
         current_len = phase_np.shape[0]
         if current_len == target_len:
             return phase_np
-        if current_len > target_len:
-            start = (current_len - target_len) // 2
-            return phase_np[start : start + target_len]
-        pad_len = target_len - current_len
-        last_row = phase_np[-1:, :]  # [1, C]
-        padding = np.repeat(last_row, pad_len, axis=0)
-        return np.concatenate([phase_np, padding], axis=0)
+
+        x_src = np.arange(current_len, dtype=np.float64)
+        x_tgt = np.linspace(0.0, float(current_len - 1), target_len)
+
+        n_cols = phase_np.shape[1]
+        result = np.empty((target_len, n_cols), dtype=np.float32)
+
+        # Columns 0-2 (tempo, beat_phase, bar_phase): linear interpolation
+        for c in range(min(n_cols, 3)):
+            result[:, c] = np.interp(x_tgt, x_src, phase_np[:, c].astype(np.float64))
+
+        # Tempo column (0) is in beats/frame at source fps; rescale for target fps.
+        # beats/second = tempo_src * fps_src  →  tempo_tgt = tempo_src * (fps_src / fps_tgt)
+        # fps_src / fps_tgt ≈ current_len / target_len for the same audio duration.
+        result[:, 0] *= float(current_len) / float(target_len)
+
+        if n_cols >= 4:
+            # Column 3 (meter_class) is discrete: nearest-neighbor
+            idx = np.clip(np.round(x_tgt).astype(np.int64), 0, current_len - 1)
+            result[:, 3] = phase_np[idx, 3].astype(np.float32)
+
+        return result
 
 
 class WaveBeatPhaseDataset(AudioPhaseBridgeDataset):
