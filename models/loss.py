@@ -23,6 +23,8 @@ def compute_elbo_loss(
     posterior: dict[str, Tensor],
     prior: dict[str, Tensor],
     beta: float = 1.0,
+    pos_weight: float = 20.0,
+    free_bits: float = 0.0,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Compute the negative ELBO loss.
 
@@ -34,39 +36,51 @@ def compute_elbo_loss(
         prior: Dict with keys ``meter_logits``, ``phase_mu``,
             ``phase_kappa``, ``tempo_mu``, ``tempo_sigma``.
         beta: KL weight for annealing (0 = pure reconstruction, 1 = full ELBO).
+        pos_weight: Weight for positive beat frames in BCE loss. Compensates for
+            class imbalance (~1% positive rate). Default: 20.0.
+        free_bits: Minimum KL per latent per sample (nats). Prevents any single
+            latent from fully collapsing. Applied per-sample (mean over T) before
+            averaging over the batch. Default: 0.0 (disabled).
 
     Returns:
         Tuple of (total_loss, component_dict) where component_dict has
         keys ``bce``, ``kl_meter``, ``kl_phase``, ``kl_tempo``.
     """
     # --- Reconstruction: Binary Cross-Entropy ---
+    pw = torch.tensor([pos_weight], device=beat_logits.device, dtype=beat_logits.dtype)
     bce = F.binary_cross_entropy_with_logits(
-        beat_logits.squeeze(-1), beat_targets, reduction="mean",
+        beat_logits.squeeze(-1), beat_targets, pos_weight=pw, reduction="mean",
     )
 
+    def _kl_with_free_bits(kl: Tensor) -> Tensor:
+        # kl: [B, T] — mean over T per sample, clamp, then mean over B
+        if free_bits > 0.0:
+            return kl.mean(dim=-1).clamp(min=free_bits).mean()
+        return kl.mean()
+
     # --- KL: Meter (Categorical) ---
-    kl_m = categorical_kl(
+    kl_m = _kl_with_free_bits(categorical_kl(
         posterior["meter_logits"],
         prior["meter_logits"],
-    ).mean()
+    ))
 
     # --- KL: Phase (von Mises) ---
     kappa_q = posterior["phase_log_kappa"].exp()
-    kl_phi = von_mises_kl(
+    kl_phi = _kl_with_free_bits(von_mises_kl(
         posterior["phase_mu"],
         kappa_q,
         prior["phase_mu"],
         prior["phase_kappa"],
-    ).mean()
+    ))
 
     # --- KL: Tempo (Log-Normal / Gaussian in log-space) ---
     sigma_q = posterior["tempo_log_sigma"].exp()
-    kl_tempo = lognormal_kl(
+    kl_tempo = _kl_with_free_bits(lognormal_kl(
         posterior["tempo_mu"],
         sigma_q,
         prior["tempo_mu"],
         prior["tempo_sigma"],
-    ).mean()
+    ))
 
     # --- Total ---
     total = bce + beta * (kl_m + kl_phi + kl_tempo)
