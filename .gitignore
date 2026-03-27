@@ -176,3 +176,9 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 checkpoints/
+
+# Claude Code
+.claude/
+
+# Weights & Biases
+wandb/
