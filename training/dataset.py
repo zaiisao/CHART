@@ -1,8 +1,20 @@
-"""Dataset definitions for CHART training."""
+"""Dataset definitions for CHART training.
+
+Phase .npy files contain columns [tempo, beat_phase, bar_phase] (3-col legacy)
+or [tempo, beat_phase, bar_phase, meter_class] (4-col).  This module converts
+them to the paper's representation:
+
+- phase in radians [0, 2*pi)
+- log-tempo in log(radians/frame)
+- meter as one-hot vector
+
+and derives binary beat targets from phase wrap-arounds.
+"""
 
 from __future__ import annotations
 
 import bisect
+import math
 from collections.abc import Sized
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,28 +23,138 @@ from typing import cast
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
+
+TWO_PI = 2.0 * math.pi
+_DEFAULT_NUM_METER_CLASSES = 8
+
+
+def pad_collate(batch: list[dict]) -> dict:
+    """Collate variable-length samples by padding to the max length in the batch."""
+    keys = batch[0].keys()
+    result: dict = {}
+
+    for key in keys:
+        vals = [sample[key] for sample in batch]
+        if isinstance(vals[0], torch.Tensor):
+            # Pad along the last dim to the max length
+            max_len = max(v.shape[-1] for v in vals)
+            padded = []
+            for v in vals:
+                pad_size = max_len - v.shape[-1]
+                if pad_size > 0:
+                    padded.append(F.pad(v, (0, pad_size)))
+                else:
+                    padded.append(v)
+            result[key] = torch.stack(padded, dim=0)
+        elif isinstance(vals[0], str):
+            result[key] = vals
+        else:
+            result[key] = vals
+
+    return result
+
+
+def _phase_npy_to_structured(
+    phase_np: np.ndarray,
+    num_meter_classes: int = _DEFAULT_NUM_METER_CLASSES,
+) -> dict[str, torch.Tensor]:
+    """Convert a raw phase .npy array to the paper's structured representation.
+
+    Args:
+        phase_np: ``[T, 3]`` or ``[T, 4]`` array with columns
+            ``[tempo, beat_phase, bar_phase (, meter_class)]``.
+        num_meter_classes: Number of supported meter categories K.
+
+    Returns:
+        Dict with keys: ``phase`` [T,1], ``log_tempo`` [T,1],
+        ``meter_index`` [T], ``meter_onehot`` [T,K], ``beat_targets`` [T].
+    """
+    n_cols = phase_np.shape[1]
+
+    tempo_bpf = phase_np[:, 0]       # beats/frame
+    beat_phase_01 = phase_np[:, 1]   # [0, 1)
+    # bar_phase_01 = phase_np[:, 2]  # unused directly; meter is explicit
+
+    if n_cols >= 4:
+        meter_class = phase_np[:, 3].astype(np.int64)
+    else:
+        # Legacy 3-col: assume 4/4 (class index 2)
+        meter_class = np.full(phase_np.shape[0], 2, dtype=np.int64)
+
+    meter_class = np.clip(meter_class, 0, num_meter_classes - 1)
+
+    # Convert to paper's units
+    # tempo: beats/frame -> radians/frame (one beat = 2*pi radians)
+    tempo_rad = tempo_bpf * TWO_PI
+    log_tempo = np.log(np.maximum(tempo_rad, 1e-8))
+
+    # beat phase: [0, 1) -> [0, 2*pi)
+    phase_rad = beat_phase_01 * TWO_PI
+
+    # Binary beat targets: beat onset at phase wrap-around
+    beat_targets = np.zeros(phase_np.shape[0], dtype=np.float32)
+    beat_targets[1:] = (beat_phase_01[1:] < beat_phase_01[:-1]).astype(np.float32)
+
+    phase_t = torch.as_tensor(phase_rad, dtype=torch.float32).unsqueeze(-1)      # [T, 1]
+    log_tempo_t = torch.as_tensor(log_tempo, dtype=torch.float32).unsqueeze(-1)   # [T, 1]
+    meter_idx_t = torch.as_tensor(meter_class, dtype=torch.long)                  # [T]
+    meter_oh_t = F.one_hot(meter_idx_t, num_meter_classes).float()                # [T, K]
+    beat_t = torch.as_tensor(beat_targets, dtype=torch.float32)                   # [T]
+
+    return {
+        "phase": phase_t,
+        "log_tempo": log_tempo_t,
+        "meter_index": meter_idx_t,
+        "meter_onehot": meter_oh_t,
+        "beat_targets": beat_t,
+    }
+
+
+def _build_prev_shifted(structured: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Shift structured latent variables right by 1 for autoregressive input.
+
+    The first frame is zero-initialized.
+    """
+    T = structured["phase"].shape[0]
+
+    phase_prev = torch.zeros_like(structured["phase"])
+    phase_prev[1:] = structured["phase"][:-1]
+
+    log_tempo_prev = torch.zeros_like(structured["log_tempo"])
+    log_tempo_prev[1:] = structured["log_tempo"][:-1]
+
+    meter_oh_prev = torch.zeros_like(structured["meter_onehot"])
+    meter_oh_prev[1:] = structured["meter_onehot"][:-1]
+    # Default first frame to uniform meter
+    meter_oh_prev[0] = 1.0 / structured["meter_onehot"].shape[-1]
+
+    return {
+        "phase_prev": phase_prev,
+        "log_tempo_prev": log_tempo_prev,
+        "meter_onehot_prev": meter_oh_prev,
+    }
 
 
 class ActivationDataset(Dataset):
-    """Dataset for paired activation/phase `.npy` files used by CHART.
+    """Dataset for paired activation/phase ``.npy`` files used by CHART.
 
     The dataset scans two directories, matches files by basename, and yields
-    fixed-length training windows for autoregressive sequence-to-sequence
-    training.
+    fixed-length training windows with structured latent variable targets.
     """
 
-    def __init__(self, activations_dir: str | Path, phases_dir: str | Path, seq_len: int = 1024) -> None:
-        """Initialize dataset by matching `.npy` files across two directories.
-
-        Args:
-            activations_dir: Directory containing activation arrays with shape `[T, 2]`.
-            phases_dir: Directory containing phase arrays with shape `[T, 3]`.
-            seq_len: Fixed sequence length produced by each dataset item.
-        """
+    def __init__(
+        self,
+        activations_dir: str | Path,
+        phases_dir: str | Path,
+        seq_len: int = 1024,
+        num_meter_classes: int = _DEFAULT_NUM_METER_CLASSES,
+    ) -> None:
         self.activations_dir = Path(activations_dir)
         self.phases_dir = Path(phases_dir)
         self.seq_len = seq_len
+        self.num_meter_classes = num_meter_classes
 
         if seq_len <= 0:
             raise ValueError("seq_len must be a positive integer.")
@@ -56,80 +178,75 @@ class ActivationDataset(Dataset):
             )
 
     def __len__(self) -> int:
-        """Return total number of matched activation/phase files."""
         return len(self.matched_files)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        """Load, resize to fixed length, and build autoregressive history.
-
-        Args:
-            index: Dataset index.
+        """Load, window, convert units, and build autoregressive history.
 
         Returns:
-            Dictionary with:
-            - `activations`: `(seq_len, 2)` float32 tensor
-            - `z_target`: `(seq_len, 3)` float32 tensor
-            - `z_history`: `(seq_len, 3)` float32 tensor shifted right by 1
+            Dictionary with keys: ``activations`` [T,2], ``beat_targets`` [T],
+            ``phase`` [T,1], ``log_tempo`` [T,1], ``meter_index`` [T],
+            ``meter_onehot`` [T,K], ``phase_prev`` [T,1],
+            ``log_tempo_prev`` [T,1], ``meter_onehot_prev`` [T,K].
         """
         activation_path, phase_path = self.matched_files[index]
 
         activation_np = np.load(activation_path)
         phase_np = np.load(phase_path)
 
-        activations = torch.as_tensor(activation_np, dtype=torch.float32)
-        z_target = torch.as_tensor(phase_np, dtype=torch.float32)
-
-        if activations.ndim != 2 or activations.shape[1] != 2:
+        if activation_np.ndim != 2 or activation_np.shape[1] != 2:
             raise ValueError(
-                f"Expected activations shape [T, 2], got {tuple(activations.shape)} for {activation_path}"
+                f"Expected activations shape [T, 2], got {activation_np.shape} for {activation_path}"
             )
-        if z_target.ndim != 2 or z_target.shape[1] != 3:
+        if phase_np.ndim != 2 or phase_np.shape[1] not in (3, 4):
             raise ValueError(
-                f"Expected phases shape [T, 3], got {tuple(z_target.shape)} for {phase_path}"
-            )
-        if activations.shape[0] != z_target.shape[0]:
-            raise ValueError(
-                "Activation and phase lengths must match: "
-                f"{activations.shape[0]} vs {z_target.shape[0]} for {activation_path.stem}"
+                f"Expected phases shape [T, 3] or [T, 4], got {phase_np.shape} for {phase_path}"
             )
 
-        total_len = activations.shape[0]
+        min_len = min(activation_np.shape[0], phase_np.shape[0])
+        activation_np = activation_np[:min_len]
+        phase_np = phase_np[:min_len]
+        total_len = min_len
 
+        # Window to fixed seq_len
         if total_len < self.seq_len:
             pad_len = self.seq_len - total_len
-            activations = torch.cat(
-                [activations, torch.zeros(pad_len, 2, dtype=torch.float32)], dim=0
-            )
-            z_target = torch.cat(
-                [z_target, torch.zeros(pad_len, 3, dtype=torch.float32)], dim=0
-            )
+            activation_np = np.pad(activation_np, ((0, pad_len), (0, 0)))
+            pad_cols = phase_np.shape[1]
+            phase_np = np.pad(phase_np, ((0, pad_len), (0, 0)))
         elif total_len > self.seq_len:
             start = random.randint(0, total_len - self.seq_len)
             end = start + self.seq_len
-            activations = activations[start:end]
-            z_target = z_target[start:end]
+            activation_np = activation_np[start:end]
+            phase_np = phase_np[start:end]
 
-        z_history = torch.zeros_like(z_target)
-        z_history[1:] = z_target[:-1]
+        activations = torch.as_tensor(activation_np, dtype=torch.float32)
+        structured = _phase_npy_to_structured(phase_np, self.num_meter_classes)
+        prev = _build_prev_shifted(structured)
 
         return {
             "activations": activations,
-            "z_target": z_target,
-            "z_history": z_history,
+            **structured,
+            **prev,
         }
 
 
 class AudioPhaseBridgeDataset(Dataset):
     """Bridge dataset for end-to-end extractor -> CHART training.
 
-    This dataset wraps an audio-based extractor dataset (expected tuple output
-    `(audio, target, ...)` and `audio_files` metadata) and pairs each audio file
-    with a phase `.npy` file for CHART.
+    Wraps an audio-based extractor dataset and pairs each audio file with a
+    phase ``.npy`` file, converting to the paper's structured representation.
     """
 
-    def __init__(self, source_dataset: Dataset, phases_dir: str | Path) -> None:
+    def __init__(
+        self,
+        source_dataset: Dataset,
+        phases_dir: str | Path,
+        num_meter_classes: int = _DEFAULT_NUM_METER_CLASSES,
+    ) -> None:
         self.source_dataset = source_dataset
         self.phases_dir = Path(phases_dir)
+        self.num_meter_classes = num_meter_classes
 
         if not self.phases_dir.is_dir():
             raise FileNotFoundError(f"Phases directory not found: {self.phases_dir}")
@@ -170,24 +287,24 @@ class AudioPhaseBridgeDataset(Dataset):
         if phase_path is None:
             phase_path = self._resolve_phase_path_from_audio(audio_path)
             self.phase_path_by_audio_stem[audio_stem] = phase_path
-        z_target = torch.as_tensor(np.load(phase_path), dtype=torch.float32)
 
-        if z_target.ndim != 2 or z_target.shape[1] != 3:
+        phase_np = np.load(phase_path).astype(np.float32)
+        if phase_np.ndim != 2 or phase_np.shape[1] not in (3, 4):
             raise ValueError(
-                f"Expected phase shape [T, 3], got {tuple(z_target.shape)} for {phase_path}"
+                f"Expected phase shape [T, 3] or [T, 4], got {phase_np.shape} for {phase_path}"
             )
 
         target_len = extractor_target.shape[-1]
-        z_target = self._fit_phase_length(z_target, target_len)
+        phase_np = self._fit_phase_length_np(phase_np, target_len)
 
-        z_history = torch.zeros_like(z_target)
-        z_history[1:] = z_target[:-1]
+        structured = _phase_npy_to_structured(phase_np, self.num_meter_classes)
+        prev = _build_prev_shifted(structured)
 
         return {
             "audio": audio,
             "extractor_target": extractor_target,
-            "z_target": z_target,
-            "z_history": z_history,
+            **structured,
+            **prev,
             "audio_path": str(audio_path),
             "phase_path": str(phase_path),
         }
@@ -224,20 +341,22 @@ class AudioPhaseBridgeDataset(Dataset):
         )
 
     @staticmethod
-    def _fit_phase_length(z_target: torch.Tensor, target_len: int) -> torch.Tensor:
-        current_len = z_target.shape[0]
+    def _fit_phase_length_np(phase_np: np.ndarray, target_len: int) -> np.ndarray:
+        """Center-crop or pad a phase numpy array to ``target_len``.
 
+        Padding repeats the last row instead of zero-filling to avoid
+        spurious log(0) values in the tempo column.
+        """
+        current_len = phase_np.shape[0]
         if current_len == target_len:
-            return z_target
-
+            return phase_np
         if current_len > target_len:
             start = (current_len - target_len) // 2
-            end = start + target_len
-            return z_target[start:end]
-
+            return phase_np[start : start + target_len]
         pad_len = target_len - current_len
-        pad = torch.zeros(pad_len, z_target.shape[1], dtype=z_target.dtype)
-        return torch.cat([z_target, pad], dim=0)
+        last_row = phase_np[-1:, :]  # [1, C]
+        padding = np.repeat(last_row, pad_len, axis=0)
+        return np.concatenate([phase_np, padding], axis=0)
 
 
 class WaveBeatPhaseDataset(AudioPhaseBridgeDataset):
@@ -293,21 +412,6 @@ class BallroomSpecResolver(BaseWaveBeatSpecResolver):
             )
         return None
 
-
-class BallroomTestSpecResolver(BaseWaveBeatSpecResolver):
-    key = "ballroom_test"
-
-    def resolve(self, root_dir: Path) -> WaveBeatDatasetSpec | None:
-        resolved_dirs = _resolve_data_label_dirs(root_dir, "ballroom_test")
-        if resolved_dirs is not None:
-            audio_dir, annot_dir = resolved_dirs
-            return WaveBeatDatasetSpec(
-                key=self.key,
-                wavebeat_dataset="ballroom",
-                audio_dir=audio_dir,
-                annot_dir=annot_dir,
-            )
-        return None
 
 
 class BeatlesSpecResolver(BaseWaveBeatSpecResolver):
@@ -404,7 +508,6 @@ def discover_wavebeat_dataset_specs(
 
     resolvers: list[BaseWaveBeatSpecResolver] = [
         BallroomSpecResolver(),
-        BallroomTestSpecResolver(),
         BeatlesSpecResolver(),
         BeatlesOldSpecResolver(),
         GTZANSpecResolver(),

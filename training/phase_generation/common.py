@@ -76,7 +76,15 @@ def _build_phase_array(
     beat_base = (np.maximum(beat_ids[prev_idx], 1) - 1).astype(np.float64)
     bar_phase = np.mod((beat_base + beat_phase) / float(meter), 1.0)
 
-    phase = np.stack([tempo, beat_phase, bar_phase], axis=1).astype(np.float32)
+    # Meter class per frame (0-indexed), following the "Tracking the Odd"
+    # DBN paper's meter vocabulary plus standard 4/4:
+    #   beats/bar -> class:  2->0, 3->1, 4->2, 5->3, 7->4, 8->5, 9->6, 10->7
+    # Unsupported meters are mapped to the nearest supported class.
+    _METER_TO_CLASS = {2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 4, 8: 5, 9: 6, 10: 7}
+    meter_cls = _METER_TO_CLASS.get(meter, min(7, max(0, meter - 2)))
+    meter_class = np.full(n_frames, meter_cls, dtype=np.float32)
+
+    phase = np.stack([tempo, beat_phase, bar_phase, meter_class], axis=1).astype(np.float32)
     return phase
 
 
