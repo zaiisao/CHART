@@ -11,8 +11,16 @@ from collections.abc import Mapping, Sequence
 import heapq
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import Tensor, optim
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+
+try:
+    import wandb as _wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
 
 from models.svt_core import SVTModel
 from models.loss import compute_elbo_loss
@@ -175,7 +183,7 @@ def train_epoch(
 def train_epoch_end_to_end(
     extractor_model: torch.nn.Module,
     extractor_backend: ExtractorBackend,
-    svt_model: SVTModel,
+    svt_model: torch.nn.Module,
     dataloader: DataLoader,
     optimizer: optim.Optimizer,
     device: torch.device,
@@ -188,6 +196,7 @@ def train_epoch_end_to_end(
     epoch: int = 1,
     num_epochs: int = 1,
     log_interval: int = 1,
+    is_main: bool = True,
 ) -> tuple[float, float, float, dict[str, float]]:
     """Run one end-to-end training epoch.
 
@@ -272,7 +281,7 @@ def train_epoch_end_to_end(
             comp_sums[k] = comp_sums.get(k, 0.0) + float(v.item())
         num_batches += 1
 
-        if log_interval > 0 and (batch_idx % log_interval == 0 or batch_idx == num_total_batches):
+        if is_main and log_interval > 0 and (batch_idx % log_interval == 0 or batch_idx == num_total_batches):
             sys.stdout.write(
                 f"\r[Epoch {epoch:03d}/{num_epochs:03d}] "
                 f"step {batch_idx:04d}/{num_total_batches:04d} "
@@ -281,8 +290,19 @@ def train_epoch_end_to_end(
                 f"svt={svt_sum / num_batches:.6f}"
             )
             sys.stdout.flush()
+            if _WANDB_AVAILABLE and _wandb.run is not None:
+                global_step = (epoch - 1) * num_total_batches + batch_idx
+                step_log: dict = {
+                    "global_step": global_step,
+                    "train_step/total_loss": total_sum / num_batches,
+                    "train_step/ext_loss": extractor_sum / num_batches,
+                    "train_step/svt_loss": svt_sum / num_batches,
+                }
+                for k, v in comp_sums.items():
+                    step_log[f"train_step/{k}"] = v / num_batches
+                _wandb.log(step_log)
 
-    if num_batches > 0:
+    if is_main and num_batches > 0:
         sys.stdout.write("\n")
     if num_batches == 0:
         return 0.0, 0.0, 0.0, {}
@@ -492,6 +512,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--save_ckpt_path", type=str, default=None)
 
+    # Weights & Biases
+    parser.add_argument("--wandb_project", type=str, default="chart")
+    parser.add_argument("--wandb_name", type=str, default=None)
+    parser.add_argument("--no_wandb", action="store_true")
+
     known_args, _ = parser.parse_known_args()
     extractor_backend = get_extractor_backend(known_args.extractor)
     extractor_backend.add_cli_args(parser)
@@ -512,8 +537,47 @@ def main() -> None:
     args = parser.parse_args()
     _normalize_backward_compat_args(args)
 
-    device = _select_device()
-    print(f"Using device: {device}")
+    # --- Distributed setup ---
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_distributed = local_rank >= 0
+    if is_distributed:
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    else:
+        device = _select_device()
+        rank = 0
+        world_size = 1
+    is_main = rank == 0
+    args.dist_rank = rank
+    args.dist_world_size = world_size
+
+    if is_main:
+        print(f"Using device: {device}" + (f" (DDP world_size={world_size})" if is_distributed else ""))
+
+    # --- Weights & Biases init ---
+    use_wandb = is_main and _WANDB_AVAILABLE and not args.no_wandb
+    if use_wandb:
+        _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name,
+            config=vars(args),
+            resume="allow",
+        )
+        # Define custom x-axes so step-level and epoch-level metrics don't conflict.
+        _wandb.define_metric("global_step")
+        _wandb.define_metric("train_step/*", step_metric="global_step")
+        _wandb.define_metric("epoch")
+        _wandb.define_metric("train/*", step_metric="epoch")
+        _wandb.define_metric("val/*", step_metric="epoch")
+        _wandb.define_metric("ckpt/*", step_metric="epoch")
+    else:
+        if not _WANDB_AVAILABLE:
+            print("[wandb] not installed, skipping.")
+        elif args.no_wandb:
+            print("[wandb] disabled via --no_wandb.")
 
     K = args.num_meter_classes
 
@@ -558,9 +622,15 @@ def main() -> None:
                 f"[Epoch {epoch:03d}/{args.num_epochs:03d}] "
                 f"total={avg_total:.6f} | {comp_str} | tau={temp:.3f} beta={beta:.3f}"
             )
+            if use_wandb:
+                log = {"train/total_loss": avg_total, "train/gumbel_temp": temp, "train/kl_beta": beta}
+                log.update({f"train/{k}": v for k, v in avg_comps.items()})
+                _wandb.log(log, step=epoch)
 
         if args.save_ckpt_path:
             torch.save({"svt_model": model.state_dict(), "args": vars(args)}, args.save_ckpt_path)
+        if use_wandb:
+            _wandb.finish()
         return
 
     # --- End-to-end mode ---
@@ -578,6 +648,9 @@ def main() -> None:
         hidden_dim=128, nhead=4, num_layers=2, num_meter_classes=K,
     ).to(device)
 
+    if is_distributed:
+        svt_model = DDP(svt_model, device_ids=[local_rank], find_unused_parameters=False)
+
     trainable_parameters = [
         p for p in list(extractor_model.parameters()) + list(svt_model.parameters())
         if p.requires_grad
@@ -592,6 +665,10 @@ def main() -> None:
     os.makedirs(ckpt_dir or ".", exist_ok=True)
 
     for epoch in range(1, args.num_epochs + 1):
+        # Keep DistributedSampler in sync with epoch for proper shuffling
+        if is_distributed and hasattr(dataloader.sampler, "set_epoch"):
+            dataloader.sampler.set_epoch(epoch)
+
         temp = _gumbel_temperature(
             epoch - 1, args.num_epochs, args.gumbel_temp_start, args.gumbel_temp_end,
         )
@@ -613,17 +690,41 @@ def main() -> None:
             epoch=epoch,
             num_epochs=args.num_epochs,
             log_interval=args.log_interval,
+            is_main=is_main,
         )
 
-        comp_str = " | ".join(f"{k}={v:.6f}" for k, v in avg_comps.items())
-        print(
-            f"[Epoch {epoch:03d}/{args.num_epochs:03d}] "
-            f"total={avg_total:.6f} | ext={avg_ext:.6f} | svt={avg_svt:.6f} | "
-            f"{comp_str} | tau={temp:.3f} beta={beta:.3f}"
-        )
+        if is_main:
+            comp_str = " | ".join(f"{k}={v:.6f}" for k, v in avg_comps.items())
+            print(
+                f"[Epoch {epoch:03d}/{args.num_epochs:03d}] "
+                f"total={avg_total:.6f} | ext={avg_ext:.6f} | svt={avg_svt:.6f} | "
+                f"{comp_str} | tau={temp:.3f} beta={beta:.3f}"
+            )
+
+            # Gradient norm (computed over all trainable params after last backward)
+            grad_norm = 0.0
+            for p in trainable_parameters:
+                if p.grad is not None:
+                    grad_norm += p.grad.data.norm(2).item() ** 2
+            grad_norm = grad_norm ** 0.5
+
+            lr_current = optimizer.param_groups[0]["lr"]
+            if use_wandb:
+                train_log = {
+                    "epoch": epoch,
+                    "train/total_loss": avg_total,
+                    "train/ext_loss": avg_ext,
+                    "train/svt_loss": avg_svt,
+                    "train/grad_norm": grad_norm,
+                    "train/gumbel_temp": temp,
+                    "train/kl_beta": beta,
+                    "train/lr": lr_current,
+                }
+                train_log.update({f"train/{k}": v for k, v in avg_comps.items()})
+                _wandb.log(train_log)
 
         val_f_measure = 0.0
-        if val_dataloader is not None:
+        if is_main and val_dataloader is not None:
             val_fps = getattr(args, "audio_sample_rate", 44100) / getattr(args, "target_factor", 256)
             v_total, v_ext, v_svt, v_comps, v_metrics = val_epoch_end_to_end(
                 extractor_model=extractor_model,
@@ -648,15 +749,27 @@ def main() -> None:
             m_str = " | ".join(f"{k}={v:.4f}" for k, v in v_metrics.items()) if v_metrics else "F-measure=0.0000"
             print(f"  [Val mir_eval] {m_str}")
 
-        # --- Save top-3 checkpoints by val beat F-measure ---
-        if args.save_ckpt_path:
+            if use_wandb:
+                val_log = {
+                    "epoch": epoch,
+                    "val/total_loss": v_total,
+                    "val/ext_loss": v_ext,
+                    "val/svt_loss": v_svt,
+                }
+                val_log.update({f"val/{k}": v for k, v in v_comps.items()})
+                val_log.update({f"val/{k}": v for k, v in v_metrics.items()})
+                _wandb.log(val_log)
+
+        # --- Save top-3 checkpoints by val beat F-measure (rank 0 only) ---
+        if is_main and args.save_ckpt_path:
+            svt_state = svt_model.module.state_dict() if is_distributed else svt_model.state_dict()
             ckpt_path = os.path.join(ckpt_dir, f"{ckpt_stem}_ep{epoch:03d}_f{val_f_measure:.4f}.pt")
             ckpt_data = {
                 "epoch": epoch,
                 "val_f_measure": val_f_measure,
                 "extractor": args.extractor,
                 "extractor_model": extractor_model.state_dict(),
-                "svt_model": svt_model.state_dict(),
+                "svt_model": svt_state,
                 "optimizer": optimizer.state_dict(),
                 "args": vars(args),
             }
@@ -664,6 +777,8 @@ def main() -> None:
                 torch.save(ckpt_data, ckpt_path)
                 heapq.heappush(top_ckpts, (val_f_measure, epoch, ckpt_path))
                 print(f"  [Ckpt] saved {os.path.basename(ckpt_path)}")
+                if use_wandb:
+                    _wandb.log({"epoch": epoch, "ckpt/saved_epoch": epoch, "ckpt/val_f_measure": val_f_measure})
             elif val_f_measure > top_ckpts[0][0]:
                 # Better than the worst of top-3: evict it
                 _, _, old_path = heapq.heapreplace(top_ckpts, (val_f_measure, epoch, ckpt_path))
@@ -671,6 +786,14 @@ def main() -> None:
                 if os.path.exists(old_path):
                     os.remove(old_path)
                 print(f"  [Ckpt] saved {os.path.basename(ckpt_path)} (replaced {os.path.basename(old_path)})")
+                if use_wandb:
+                    _wandb.log({"epoch": epoch, "ckpt/saved_epoch": epoch, "ckpt/val_f_measure": val_f_measure})
+
+    if use_wandb:
+        _wandb.finish()
+
+    if is_distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
