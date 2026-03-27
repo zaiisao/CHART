@@ -18,7 +18,10 @@ class ExtractorBackend(Protocol):
         """Register extractor-specific CLI options."""
 
     def build_dataloader(self, args: argparse.Namespace) -> DataLoader:
-        """Build dataloader that yields audio/target + CHART phase tensors."""
+        """Build training dataloader that yields audio/target + CHART phase tensors."""
+
+    def build_val_dataloader(self, args: argparse.Namespace) -> DataLoader | None:
+        """Build validation dataloader. Returns None if no validation split is available."""
 
     def build_model(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
         """Build extractor model used for end-to-end training."""

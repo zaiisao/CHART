@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -202,10 +203,127 @@ class WaveBeatBackend:
             pin_memory=torch.cuda.is_available(),
         )
 
+    def build_val_dataloader(self, args: argparse.Namespace) -> DataLoader | None:
+        phases_dir = args.phases_dir
+        if phases_dir is None and args.dataset_root is not None:
+            phases_dir = args.dataset_root
+
+        if phases_dir is None:
+            return None
+
+        extractor_root = self._resolve_extractor_root(args)
+        DownbeatDataset, _ = _import_wavebeat_components(extractor_root)
+
+        if args.dataset_root is not None:
+            include_keys: set[str] | None
+            if args.dataset_include.strip().lower() == "all":
+                include_keys = None
+            else:
+                include_keys = {
+                    item.strip().lower() for item in args.dataset_include.split(",") if item.strip()
+                }
+
+            specs = discover_wavebeat_dataset_specs(
+                root_dir=args.dataset_root,
+                include_keys=include_keys,
+            )
+
+            source_datasets: list[Dataset] = []
+            source_keys: list[str] = []
+            for spec in specs:
+                try:
+                    ds = DownbeatDataset(
+                        audio_dir=str(spec.audio_dir),
+                        annot_dir=str(spec.annot_dir),
+                        dataset=spec.wavebeat_dataset,
+                        audio_sample_rate=args.audio_sample_rate,
+                        target_factor=args.target_factor,
+                        subset="val",
+                        length=args.train_length,
+                        preload=args.preload,
+                        augment=False,
+                        examples_per_epoch=args.examples_per_epoch,
+                        half=False,
+                        dry_run=args.dry_run,
+                    )
+                except Exception:
+                    continue
+
+                if len(getattr(ds, "audio_files", [])) == 0:
+                    continue
+                try:
+                    _ = ds[0]
+                except Exception:
+                    continue
+
+                source_datasets.append(ds)
+                source_keys.append(spec.key)
+
+            if len(source_datasets) == 0:
+                return None
+
+            source_dataset: Dataset = MultiSourceAudioDataset(
+                source_datasets=source_datasets,
+                source_keys=source_keys,
+            )
+            print(f"Validation datasets: {', '.join(source_keys)}")
+        else:
+            if args.audio_dir is None or args.annot_dir is None:
+                return None
+
+            source_dataset = DownbeatDataset(
+                audio_dir=args.audio_dir,
+                annot_dir=args.annot_dir,
+                dataset=args.wavebeat_dataset,
+                audio_sample_rate=args.audio_sample_rate,
+                target_factor=args.target_factor,
+                subset="val",
+                length=args.train_length,
+                preload=args.preload,
+                augment=False,
+                examples_per_epoch=args.examples_per_epoch,
+                half=False,
+                dry_run=args.dry_run,
+            )
+
+        dataset = AudioPhaseBridgeDataset(
+            source_dataset=source_dataset,
+            phases_dir=phases_dir,
+        )
+
+        # Val/test subsets return variable-length audio (no cropping),
+        # so batch_size must be 1 for collation to work.
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+
     def build_model(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
         extractor_root = self._resolve_extractor_root(args)
         _, dsTCNModel = _import_wavebeat_components(extractor_root)
-        return dsTCNModel().to(device)
+
+        # If a checkpoint is provided, try to read hyperparameters from it
+        hparams: dict[str, Any] = {}
+        if getattr(args, "extractor_ckpt", None) is not None:
+            ckpt = torch.load(args.extractor_ckpt, map_location="cpu", weights_only=False)
+            if isinstance(ckpt, dict) and "hyper_parameters" in ckpt:
+                hparams = ckpt["hyper_parameters"]
+
+        # Build model with checkpoint hparams or known defaults for WaveBeat
+        return dsTCNModel(
+            ninputs=hparams.get("ninputs", 1),
+            noutputs=hparams.get("noutputs", 2),
+            nblocks=hparams.get("nblocks", 8),
+            kernel_size=hparams.get("kernel_size", 15),
+            stride=hparams.get("stride", 2),
+            dilation_growth=hparams.get("dilation_growth", 8),
+            channel_growth=hparams.get("channel_growth", 32),
+            channel_width=hparams.get("channel_width", 32),
+            stack_size=hparams.get("stack_size", 4),
+        ).to(device)
 
     def load_checkpoint(
         self,
@@ -216,7 +334,7 @@ class WaveBeatBackend:
         if args.extractor_ckpt is None:
             return
 
-        ckpt = torch.load(args.extractor_ckpt, map_location=device)
+        ckpt = torch.load(args.extractor_ckpt, map_location=device, weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
 
         try:
