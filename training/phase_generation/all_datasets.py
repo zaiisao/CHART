@@ -24,7 +24,6 @@ def main() -> None:
 
     modules = [
         "training.phase_generation.ballroom",
-        "training.phase_generation.ballroom_test",
         "training.phase_generation.beatles",
         "training.phase_generation.gtzan",
         "training.phase_generation.hains",
