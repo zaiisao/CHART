@@ -4,12 +4,41 @@ from __future__ import annotations
 
 import argparse
 import sys
+import types
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+
+
+class _AnyAttrModule(types.ModuleType):
+    """Stub module that returns a no-op callable for every attribute access.
+
+    Used to satisfy pickle when loading PL 1.x checkpoints in a PL 2.x
+    environment: old module paths no longer exist but their names are
+    embedded in the checkpoint's pickle stream.
+    """
+
+    def __getattr__(self, name: str) -> object:
+        def _stub(*args: object, **kwargs: object) -> None:
+            pass
+        _stub.__name__ = name
+        _stub.__qualname__ = f"{self.__name__}.{name}"
+        setattr(self, name, _stub)
+        return _stub
+
+
+def _register_pl1_compat_stubs() -> None:
+    """Register catch-all stubs for pytorch_lightning 1.x modules missing in 2.x."""
+    missing = [
+        "pytorch_lightning.utilities.argparse_utils",
+        "pytorch_lightning.utilities.parsing",
+    ]
+    for mod_name in missing:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = _AnyAttrModule(mod_name)
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from training.dataset import (
     AudioPhaseBridgeDataset,
@@ -195,10 +224,22 @@ class WaveBeatBackend:
             phases_dir=phases_dir,
         )
 
+        dist_rank = getattr(args, "dist_rank", 0)
+        dist_world_size = getattr(args, "dist_world_size", 1)
+        if dist_world_size > 1:
+            sampler: DistributedSampler | None = DistributedSampler(
+                dataset, num_replicas=dist_world_size, rank=dist_rank, shuffle=True,
+            )
+            shuffle = False
+        else:
+            sampler = None
+            shuffle = True
+
         return DataLoader(
             dataset,
             batch_size=args.batch_size,
-            shuffle=True,
+            sampler=sampler,
+            shuffle=shuffle,
             num_workers=args.num_workers,
             pin_memory=torch.cuda.is_available(),
         )
@@ -305,24 +346,18 @@ class WaveBeatBackend:
         extractor_root = self._resolve_extractor_root(args)
         _, dsTCNModel = _import_wavebeat_components(extractor_root)
 
-        # If a checkpoint is provided, try to read hyperparameters from it
-        hparams: dict[str, Any] = {}
-        if getattr(args, "extractor_ckpt", None) is not None:
-            ckpt = torch.load(args.extractor_ckpt, map_location="cpu", weights_only=False)
-            if isinstance(ckpt, dict) and "hyper_parameters" in ckpt:
-                hparams = ckpt["hyper_parameters"]
-
-        # Build model with checkpoint hparams or known defaults for WaveBeat
+        # Use known WaveBeat defaults (checkpoint hparams are not read to avoid
+        # pytorch_lightning version incompatibilities during deserialization)
         return dsTCNModel(
-            ninputs=hparams.get("ninputs", 1),
-            noutputs=hparams.get("noutputs", 2),
-            nblocks=hparams.get("nblocks", 8),
-            kernel_size=hparams.get("kernel_size", 15),
-            stride=hparams.get("stride", 2),
-            dilation_growth=hparams.get("dilation_growth", 8),
-            channel_growth=hparams.get("channel_growth", 32),
-            channel_width=hparams.get("channel_width", 32),
-            stack_size=hparams.get("stack_size", 4),
+            ninputs=1,
+            noutputs=2,
+            nblocks=8,
+            kernel_size=15,
+            stride=2,
+            dilation_growth=8,
+            channel_growth=32,
+            channel_width=32,
+            stack_size=4,
         ).to(device)
 
     def load_checkpoint(
@@ -334,6 +369,7 @@ class WaveBeatBackend:
         if args.extractor_ckpt is None:
             return
 
+        _register_pl1_compat_stubs()
         ckpt = torch.load(args.extractor_ckpt, map_location=device, weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
 
