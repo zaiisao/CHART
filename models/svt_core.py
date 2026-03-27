@@ -217,7 +217,10 @@ class SVTModel(nn.Module):
         trans_log_probs = torch.log_softmax(trans_logits, dim=-1)  # normalize rows
 
         # Bar boundary detection: phi_{t-1} + phidot_{t-1} >= 2*pi
-        tempo_prev = torch.exp(log_tempo_prev)  # [B, T, 1]
+        # Clamp log_tempo before exponentiation to prevent inf (which causes
+        # torch.remainder to return nan). exp(10) ~ 22000 rad/frame is
+        # astronomically fast and will never occur in practice.
+        tempo_prev = torch.exp(log_tempo_prev.clamp(max=10.0))  # [B, T, 1]
         boundary = ((phase_prev + tempo_prev) >= TWO_PI).squeeze(-1)  # [B, T]
         boundary_mask = boundary.unsqueeze(-1).expand_as(meter_onehot_prev)  # [B, T, K]
 
