@@ -4,6 +4,10 @@ Provides closed-form KL divergences and reparameterized samplers for:
 - Categorical (meter) with Gumbel-Softmax relaxation
 - von Mises (phase) with Best-Fisher rejection sampling + implicit reparam
 - Log-Normal (tempo) via Gaussian reparameterization in log-space
+
+The von Mises backward pass follows the implicit reparameterization gradient
+formulation from Figurnov et al. (2018), ported from the TensorFlow Probability
+reference implementation (Hill 1977, Algorithm 518).
 """
 
 from __future__ import annotations
@@ -33,6 +37,14 @@ def _log_i0(kappa: Tensor) -> Tensor:
 def _A(kappa: Tensor) -> Tensor:
     """Mean resultant length A(kappa) = I_1(kappa) / I_0(kappa)."""
     return torch.special.i1e(kappa) / torch.special.i0e(kappa)
+
+
+def _cosxm1(x: Tensor) -> Tensor:
+    """Compute cos(x) - 1 in a numerically stable way: -2 * sin^2(x/2).
+
+    Avoids catastrophic cancellation when x is near 0.
+    """
+    return -2.0 * torch.sin(x / 2.0) ** 2
 
 
 # ---------------------------------------------------------------------------
@@ -74,44 +86,121 @@ def gumbel_softmax_sample(
 
 
 # ---------------------------------------------------------------------------
-# Von Mises (phase)
+# Von Mises (phase) — CDF helpers for implicit reparameterization backward
 # ---------------------------------------------------------------------------
 
-def _von_mises_cdf_numerical(z: Tensor, kappa: Tensor, n_quad: int = 100) -> Tensor:
-    """CDF of vM(0, κ) evaluated at z via trapezoid quadrature.
+def _von_mises_cdf_series(
+    z: Tensor, kappa: Tensor, n_terms: int = 20,
+) -> tuple[Tensor, Tensor]:
+    """Von Mises CDF and dcdf/dkappa via Fourier series with forward-mode tangent.
 
-    Computes F(z; 0, κ) = ∫_{-π}^{z} exp(κ cos t) / (2π I0(κ)) dt.
-    Used by Algorithm 2 backward to differentiate F wrt κ.
+    Implements Hill (1977) Algorithm 518, adapted from TensorFlow Probability.
+    Accurate for kappa < ~10.5.
+
+    Args:
+        z: Sample point (centered at mu=0), shape ``(...)``.
+        kappa: Concentration parameter, shape ``(...)``.
+        n_terms: Number of Fourier terms (default 20).
+
+    Returns:
+        Tuple of (cdf, dcdf_dkappa), each shape ``(...)``.
     """
-    z_u = z.unsqueeze(-1)        # [..., 1]
-    k_u = kappa.unsqueeze(-1)    # [..., 1]
-    j = torch.arange(n_quad + 1, device=z.device, dtype=z.dtype)  # [n_quad+1]
-    # Quadrature nodes from -π to z
-    t = -math.pi + j * (z_u + math.pi) / n_quad              # [..., n_quad+1]
-    log_p = k_u * torch.cos(t) - _log_i0(k_u) - math.log(TWO_PI)
-    p = log_p.exp()
-    dt = (z + math.pi) / n_quad                               # [...]
-    return (dt * (p[..., :-1] + p[..., 1:]).sum(dim=-1) / 2.0)
+    # Backward recurrence from n=n_terms down to n=1
+    rn = torch.zeros_like(kappa)
+    drn = torch.zeros_like(kappa)
+    vn = torch.zeros_like(kappa)
+    dvn = torch.zeros_like(kappa)
 
+    for i in range(n_terms, 0, -1):
+        n = float(i)
+        denominator = 2.0 * n / kappa + rn
+        ddenominator = -2.0 * n / (kappa ** 2) + drn
+        rn = 1.0 / denominator
+        drn = -ddenominator / (denominator ** 2)
+
+        multiplier = torch.sin(n * z) / n + vn
+        vn = rn * multiplier
+        dvn = drn * multiplier + rn * dvn
+
+    cdf = 0.5 + z / TWO_PI + vn / math.pi
+    dcdf = dvn / math.pi
+
+    # Clip CDF to [0, 1] and zero gradient where clipped (TFP convention)
+    valid = (cdf >= 0.0) & (cdf <= 1.0)
+    cdf = cdf.clamp(0.0, 1.0)
+    dcdf = dcdf * valid.float()
+
+    return cdf, dcdf
+
+
+def _von_mises_cdf_normal(z: Tensor, kappa: Tensor) -> Tensor:
+    """Von Mises CDF via corrected normal approximation (Hill 1977).
+
+    Accurate for kappa >= ~10.5. Adapted from TensorFlow Probability.
+    Must be called under torch.enable_grad() if gradient w.r.t. kappa is needed.
+
+    Args:
+        z: Sample point (centered at mu=0), shape ``(...)``.
+        kappa: Concentration parameter, shape ``(...)``.
+
+    Returns:
+        CDF values, shape ``(...)``.
+    """
+    s = math.sqrt(2.0 / math.pi) / torch.special.i0e(kappa) * torch.sin(0.5 * z)
+    s2 = s * s
+    s3 = s2 * s
+    s4 = s2 * s2
+    c = 24.0 * kappa
+    c1 = 56.0
+
+    xi = s - s3 / (
+        (c - 2.0 * s2 - 16.0) / 3.0
+        - (s4 + 1.75 * s2 + 83.5) / (c - c1 - s2 + 3.0)
+    ) ** 2
+
+    return 0.5 * (1.0 + torch.erf(xi * math.sqrt(0.5)))
+
+
+def _inv_prob(z: Tensor, kappa: Tensor) -> Tensor:
+    """Compute 1/p(z|0, kappa) stably using exponentially-scaled Bessel.
+
+    Identity: 1/p = 2*pi * I_0(kappa) * exp(-kappa*cos(z))
+            = 2*pi * i0e(kappa) * exp(kappa) * exp(-kappa*cos(z))
+            = 2*pi * i0e(kappa) * exp(-kappa*(cos(z)-1))
+            = 2*pi * i0e(kappa) * exp(-kappa*cosxm1(z))
+
+    The exp(kappa) terms cancel, preventing overflow.
+    """
+    return torch.exp(-kappa * _cosxm1(z)) * TWO_PI * torch.special.i0e(kappa)
+
+
+# ---------------------------------------------------------------------------
+# Von Mises sampler with implicit reparameterization
+# ---------------------------------------------------------------------------
 
 class _VonMisesSampleFn(torch.autograd.Function):
     """Von Mises sampler with implicit reparameterization gradients.
 
-    Forward: Best-Fisher rejection algorithm (Algorithm 2, paper).
-    Backward: implicit reparameterization (Algorithm 2 / Figurnov et al. 2018).
-        ∂z/∂μ = 1
-        ∂z/∂κ = -∂F(z|κ)/∂κ / p(z|0,κ)
-    where ∂F/∂κ is approximated by central finite differences on the
-    numerical CDF (equivalent to ForwardModeAD on F as stated in Algorithm 2).
+    Forward: Best-Fisher rejection algorithm.
+    Backward: implicit reparameterization (Figurnov et al. 2018),
+        ported from TensorFlow Probability.
+        dz/dmu = 1
+        dz/dkappa = -dF(z|kappa)/dkappa / p(z|0,kappa)
     """
 
     @staticmethod
     def forward(ctx, mu: Tensor, kappa: Tensor) -> Tensor:  # type: ignore[override]
         kappa_safe = kappa.clamp(min=_KAPPA_MIN, max=_KAPPA_MAX)
 
+        # Best-Fisher rejection algorithm setup.
+        # For small kappa, the exact rho computation is numerically unstable
+        # (tau - sqrt(2*tau) ≈ 0, causing 0/0). Use the approximation from TFP.
+        _SMALL_CUTOFF = 0.02
         tau = 1.0 + torch.sqrt(1.0 + 4.0 * kappa_safe ** 2)
         rho = (tau - torch.sqrt(2.0 * tau)) / (2.0 * kappa_safe)
-        r = (1.0 + rho ** 2) / (2.0 * rho)
+        r_exact = (1.0 + rho ** 2) / (2.0 * rho)
+        r_approx = 1.0 / kappa_safe + kappa_safe
+        r = torch.where(kappa_safe < _SMALL_CUTOFF, r_approx, r_exact)
 
         shape = mu.shape
         device = mu.device
@@ -128,12 +217,18 @@ class _VonMisesSampleFn(torch.autograd.Function):
             u2 = torch.rand(shape, dtype=dtype, device=device)
             c = torch.cos(math.pi * u1)
             f = (1.0 + r * c) / (r + c)
-            accept = (kappa_safe * (r - f) + torch.log(f) - torch.log(r)) >= torch.log(u2)
+            # Guard log(f) for f <= 0 (can happen when r is large / kappa small)
+            f_pos = f.clamp(min=1e-30)
+            accept = (kappa_safe * (r - f) + torch.log(f_pos) - torch.log(r)) >= torch.log(u2)
+            accept = accept & (f > 0)  # reject negative f
             newly_accepted = accept & ~done
             f_accepted = torch.where(newly_accepted, f, f_accepted)
             done = done | accept
 
-        f_accepted = torch.where(done, f_accepted, f)
+        # For elements that were never accepted (very small kappa → near-uniform),
+        # sample uniformly on [-pi, pi] via acos(uniform(-1,1)).
+        uniform_f = 2.0 * torch.rand(shape, dtype=dtype, device=device) - 1.0
+        f_accepted = torch.where(done, f_accepted, uniform_f)
         u3 = torch.rand(shape, dtype=dtype, device=device)
         z = torch.where(u3 > 0.5, torch.acos(f_accepted), -torch.acos(f_accepted))
         sample = mu + z
@@ -145,32 +240,46 @@ class _VonMisesSampleFn(torch.autograd.Function):
     def backward(ctx, grad_output: Tensor):  # type: ignore[override]
         z, kappa = ctx.saved_tensors
 
-        # Algorithm 2, line 22: ∂L/∂μ = ∂L/∂φ̂ · 1
+        # dz/dmu = 1
         grad_mu = grad_output
 
-        # Algorithm 2, lines 19-21:
-        # p(z|0,κ) = exp(κ cos z) / (2π I0(κ))
-        log_p_z = kappa * torch.cos(z) - _log_i0(kappa) - math.log(TWO_PI)
-        p_z = log_p_z.exp().clamp(min=1e-10)
+        # --- Compute dcdf/dkappa via two branches ---
+        # Series branch (kappa < 10.5): manual forward-mode tangent
+        _, dcdf_series = _von_mises_cdf_series(z, kappa)
 
-        # ∂F(z|κ)/∂κ via central finite differences on the numerical CDF
-        # (Algorithm 2, line 20: ForwardModeAD(F(z|κ), κ))
-        eps = 1e-3
-        with torch.no_grad():
-            dF_dkappa = (
-                _von_mises_cdf_numerical(z, (kappa + eps).clamp(max=_KAPPA_MAX))
-                - _von_mises_cdf_numerical(z, (kappa - eps).clamp(min=_KAPPA_MIN))
-            ) / (2.0 * eps)
+        # Normal branch (kappa >= 10.5): PyTorch autograd
+        with torch.enable_grad():
+            kappa_g = kappa.detach().requires_grad_(True)
+            cdf_normal = _von_mises_cdf_normal(z.detach(), kappa_g)
+            (dcdf_normal,) = torch.autograd.grad(
+                cdf_normal, kappa_g,
+                grad_outputs=torch.ones_like(cdf_normal),
+                create_graph=False,
+            )
 
-        # Algorithm 2, line 21: ∂z/∂κ = -∂F/∂κ / p(z)
-        dz_dkappa = -dF_dkappa / p_z
+        # Select branch
+        small = kappa < 10.5
+        dcdf_dkappa = torch.where(small, dcdf_series, dcdf_normal)
+
+        # Stable 1/p(z|0,kappa)
+        inv_p = _inv_prob(z, kappa)
+
+        # dz/dkappa = -dF/dkappa / p(z) = -dcdf_dkappa * inv_p
+        # Guard 0 * inf = nan: when CDF is saturated (dcdf=0), gradient is 0.
+        # Also guard rare inf from tiny*huge in extreme tails.
+        dz_dkappa = torch.where(
+            dcdf_dkappa == 0,
+            torch.zeros_like(dcdf_dkappa),
+            -dcdf_dkappa * inv_p,
+        )
+        dz_dkappa = torch.nan_to_num(dz_dkappa, nan=0.0, posinf=0.0, neginf=0.0)
         grad_kappa = grad_output * dz_dkappa
 
         return grad_mu, grad_kappa
 
 
 def von_mises_sample(mu: Tensor, kappa: Tensor) -> Tensor:
-    """Draw reparameterized samples from vM(mu, kappa) per Algorithm 2.
+    """Draw reparameterized samples from vM(mu, kappa).
 
     Args:
         mu: Mean direction, shape ``(...)``.
@@ -232,8 +341,8 @@ def lognormal_kl(
     Returns:
         KL divergence, same shape as inputs.
     """
-    sigma_q = sigma_q.clamp(min=1e-8)
-    sigma_p = sigma_p.clamp(min=1e-8)
+    sigma_q = sigma_q.clamp(min=1e-4)
+    sigma_p = sigma_p.clamp(min=1e-2)
 
     return (
         torch.log(sigma_p / sigma_q)
