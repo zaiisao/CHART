@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from torch import Tensor, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 try:
@@ -99,6 +100,7 @@ def train_epoch(
     temperature: float = 1.0,
     beta: float = 1.0,
     pos_weight: float = 20.0,
+    max_grad_norm: float = 1.0,
     epoch: int = 1,
     num_epochs: int = 1,
     log_interval: int = 1,
@@ -154,6 +156,7 @@ def train_epoch(
         )
 
         total_loss.backward()
+        clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
         total_sum += float(total_loss.detach().item())
@@ -191,6 +194,10 @@ def train_epoch_end_to_end(
     beta: float = 1.0,
     pos_weight: float = 20.0,
     free_bits: float = 0.0,
+    free_bits_meter: float | None = None,
+    free_bits_phase: float | None = None,
+    free_bits_tempo: float | None = None,
+    max_grad_norm: float = 1.0,
     extractor_loss_weight: float = 1.0,
     svt_loss_weight: float = 1.0,
     epoch: int = 1,
@@ -268,10 +275,23 @@ def train_epoch_end_to_end(
             beta=beta,
             pos_weight=pos_weight,
             free_bits=free_bits,
+            free_bits_meter=free_bits_meter,
+            free_bits_phase=free_bits_phase,
+            free_bits_tempo=free_bits_tempo,
         )
 
         total_loss = extractor_loss_weight * extractor_loss + svt_loss_weight * svt_total
+
+        # Guard against NaN — skip batch instead of corrupting model weights
+        if torch.isnan(total_loss):
+            optimizer.zero_grad(set_to_none=True)
+            if is_main:
+                sys.stdout.write(f"\n  [WARN] NaN loss at epoch {epoch} step {batch_idx}, skipping batch\n")
+            continue
+
         total_loss.backward()
+        all_params = list(extractor_model.parameters()) + list(svt_model.parameters())
+        clip_grad_norm_(all_params, max_grad_norm)
         optimizer.step()
 
         total_sum += float(total_loss.detach().item())
@@ -327,6 +347,9 @@ def val_epoch_end_to_end(
     beta: float = 1.0,
     pos_weight: float = 20.0,
     free_bits: float = 0.0,
+    free_bits_meter: float | None = None,
+    free_bits_phase: float | None = None,
+    free_bits_tempo: float | None = None,
     extractor_loss_weight: float = 1.0,
     svt_loss_weight: float = 1.0,
     fps: float = 172.265625,
@@ -373,10 +396,11 @@ def val_epoch_end_to_end(
 
         # Seed z_prev from GT initial frame, then roll out with model samples
         # (same two-pass logic as training — Algorithm 1).
+        # Use first T_act frames (matching activations[:T_act] and beat_targets[:T_act]).
         z_prev_gt = {
-            "phase": _center_crop_seq_dim(batch["phase_prev"].to(device), T_act),
-            "log_tempo": _center_crop_seq_dim(batch["log_tempo_prev"].to(device), T_act),
-            "meter_onehot": _center_crop_seq_dim(batch["meter_onehot_prev"].to(device), T_act),
+            "phase": batch["phase_prev"].to(device)[:, :T_act, :],
+            "log_tempo": batch["log_tempo_prev"].to(device)[:, :T_act, :],
+            "meter_onehot": batch["meter_onehot_prev"].to(device)[:, :T_act, :],
         }
         out_rollout = svt_model(activations, z_prev_gt, temperature=temperature)
         samp = out_rollout["samples"]
@@ -403,6 +427,9 @@ def val_epoch_end_to_end(
             beta=beta,
             pos_weight=pos_weight,
             free_bits=free_bits,
+            free_bits_meter=free_bits_meter,
+            free_bits_phase=free_bits_phase,
+            free_bits_tempo=free_bits_tempo,
         )
 
         total_loss = extractor_loss_weight * extractor_loss + svt_loss_weight * svt_total
@@ -439,9 +466,7 @@ def val_epoch_end_to_end(
             # Reference downbeats: phase near 0 at beat positions
             ref_downbeats = extract_downbeat_timestamps(
                 ref_beats,
-                _center_crop_seq_dim_1d(
-                    batch["phase"][b].squeeze(-1), T_act
-                ).numpy() / 1.0,  # already in radians
+                batch["phase"][b].squeeze(-1)[:T_act].numpy(),
                 fps=fps,
             )
             if len(ref_downbeats) >= 2 and len(est_downbeats) >= 2:
@@ -496,8 +521,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--free_bits",
         type=float,
         default=0.0,
-        help="Free-bits threshold λ (nats) applied per latent per sample. Prevents KL collapse. Default: 0.0 (disabled).",
+        help="Free-bits threshold λ (nats) applied per latent per sample. Default for all latents. Default: 0.0 (disabled).",
     )
+    parser.add_argument("--free_bits_meter", type=float, default=None,
+                        help="Per-latent free_bits override for meter KL. Default: use --free_bits.")
+    parser.add_argument("--free_bits_phase", type=float, default=None,
+                        help="Per-latent free_bits override for phase KL. Default: use --free_bits.")
+    parser.add_argument("--free_bits_tempo", type=float, default=None,
+                        help="Per-latent free_bits override for tempo KL. Default: use --free_bits.")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Max gradient norm for clipping. Default: 1.0.")
 
     # End-to-end
     parser.add_argument("--extractor_ckpt", type=str, default=None)
@@ -612,6 +645,7 @@ def main() -> None:
                 temperature=temp,
                 beta=beta,
                 pos_weight=args.bce_pos_weight,
+                max_grad_norm=args.max_grad_norm,
                 epoch=epoch,
                 num_epochs=args.num_epochs,
                 log_interval=args.log_interval,
@@ -685,6 +719,10 @@ def main() -> None:
             beta=beta,
             pos_weight=args.bce_pos_weight,
             free_bits=args.free_bits,
+            free_bits_meter=args.free_bits_meter,
+            free_bits_phase=args.free_bits_phase,
+            free_bits_tempo=args.free_bits_tempo,
+            max_grad_norm=args.max_grad_norm,
             extractor_loss_weight=args.extractor_loss_weight,
             svt_loss_weight=args.svt_loss_weight,
             epoch=epoch,
@@ -736,6 +774,9 @@ def main() -> None:
                 beta=beta,
                 pos_weight=args.bce_pos_weight,
                 free_bits=args.free_bits,
+                free_bits_meter=args.free_bits_meter,
+                free_bits_phase=args.free_bits_phase,
+                free_bits_tempo=args.free_bits_tempo,
                 extractor_loss_weight=args.extractor_loss_weight,
                 svt_loss_weight=args.svt_loss_weight,
                 fps=val_fps,
