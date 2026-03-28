@@ -25,6 +25,9 @@ def compute_elbo_loss(
     beta: float = 1.0,
     pos_weight: float = 20.0,
     free_bits: float = 0.0,
+    free_bits_meter: float | None = None,
+    free_bits_phase: float | None = None,
+    free_bits_tempo: float | None = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Compute the negative ELBO loss.
 
@@ -38,31 +41,37 @@ def compute_elbo_loss(
         beta: KL weight for annealing (0 = pure reconstruction, 1 = full ELBO).
         pos_weight: Weight for positive beat frames in BCE loss. Compensates for
             class imbalance (~1% positive rate). Default: 20.0.
-        free_bits: Minimum KL per latent per sample (nats). Prevents any single
-            latent from fully collapsing. Applied per-sample (mean over T) before
-            averaging over the batch. Default: 0.0 (disabled).
+        free_bits: Default minimum KL per latent per sample (nats). Used for any
+            latent that doesn't have a per-latent override. Default: 0.0.
+        free_bits_meter: Override free_bits for meter KL. Default: None (use free_bits).
+        free_bits_phase: Override free_bits for phase KL. Default: None (use free_bits).
+        free_bits_tempo: Override free_bits for tempo KL. Default: None (use free_bits).
 
     Returns:
         Tuple of (total_loss, component_dict) where component_dict has
         keys ``bce``, ``kl_meter``, ``kl_phase``, ``kl_tempo``.
     """
+    fb_meter = free_bits_meter if free_bits_meter is not None else free_bits
+    fb_phase = free_bits_phase if free_bits_phase is not None else free_bits
+    fb_tempo = free_bits_tempo if free_bits_tempo is not None else free_bits
+
     # --- Reconstruction: Binary Cross-Entropy ---
     pw = torch.tensor([pos_weight], device=beat_logits.device, dtype=beat_logits.dtype)
     bce = F.binary_cross_entropy_with_logits(
         beat_logits.squeeze(-1), beat_targets, pos_weight=pw, reduction="mean",
     )
 
-    def _kl_with_free_bits(kl: Tensor) -> Tensor:
+    def _kl_with_free_bits(kl: Tensor, fb: float) -> Tensor:
         # kl: [B, T] — mean over T per sample, clamp, then mean over B
-        if free_bits > 0.0:
-            return kl.mean(dim=-1).clamp(min=free_bits).mean()
+        if fb > 0.0:
+            return kl.mean(dim=-1).clamp(min=fb).mean()
         return kl.mean()
 
     # --- KL: Meter (Categorical) ---
     kl_m = _kl_with_free_bits(categorical_kl(
         posterior["meter_logits"],
         prior["meter_logits"],
-    ))
+    ), fb_meter)
 
     # --- KL: Phase (von Mises) ---
     kappa_q = posterior["phase_log_kappa"].exp()
@@ -71,7 +80,7 @@ def compute_elbo_loss(
         kappa_q,
         prior["phase_mu"],
         prior["phase_kappa"],
-    ))
+    ), fb_phase)
 
     # --- KL: Tempo (Log-Normal / Gaussian in log-space) ---
     sigma_q = posterior["tempo_log_sigma"].exp()
@@ -80,7 +89,7 @@ def compute_elbo_loss(
         sigma_q,
         prior["tempo_mu"],
         prior["tempo_sigma"],
-    ))
+    ), fb_tempo)
 
     # --- Total ---
     total = bce + beta * (kl_m + kl_phi + kl_tempo)
