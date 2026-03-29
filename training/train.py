@@ -25,7 +25,7 @@ except ImportError:
 
 from models.svt_core import SVTModel
 from models.loss import compute_elbo_loss
-from evaluation.phase_converter import extract_beat_timestamps, extract_downbeat_timestamps
+from evaluation.phase_converter import extract_beat_timestamps, extract_downbeat_timestamps, extract_beats_from_phase_trajectory
 from evaluation.score import evaluate_beats, evaluate_downbeats, frames_to_beat_times
 from training.dataset import ActivationDataset
 from training.extractors import get_extractor_backend, list_extractor_backends
@@ -587,27 +587,33 @@ def val_epoch_end_to_end(
             if len(ref_beats) < 2:
                 continue
 
+            # --- Decoder-based beat extraction ---
             est_beats = extract_beat_timestamps(beat_probs[b], fps=fps)
-            if len(est_beats) == 0:
-                continue
-
-            # Beat metrics
-            beat_scores = evaluate_beats(ref_beats, est_beats)
-            for k, v in beat_scores.items():
-                metric_sums[k] = metric_sums.get(k, 0.0) + v
-
-            # Downbeat metrics
-            est_downbeats = extract_downbeat_timestamps(est_beats, phase_np[b], fps=fps)
-            # Reference downbeats: phase near 0 at beat positions
-            ref_downbeats = extract_downbeat_timestamps(
-                ref_beats,
-                batch["phase"][b].squeeze(-1)[:T_act].numpy(),
-                fps=fps,
-            )
-            if len(ref_downbeats) >= 2 and len(est_downbeats) >= 2:
-                db_scores = evaluate_downbeats(ref_downbeats, est_downbeats)
-                for k, v in db_scores.items():
+            if len(est_beats) > 0:
+                beat_scores = evaluate_beats(ref_beats, est_beats)
+                for k, v in beat_scores.items():
                     metric_sums[k] = metric_sums.get(k, 0.0) + v
+
+                # Downbeat metrics
+                est_downbeats = extract_downbeat_timestamps(est_beats, phase_np[b], fps=fps)
+                ref_downbeats = extract_downbeat_timestamps(
+                    ref_beats,
+                    _center_crop_seq_dim_1d(
+                        batch["phase"][b].squeeze(-1), T_act
+                    ).numpy() / 1.0,
+                    fps=fps,
+                )
+                if len(ref_downbeats) >= 2 and len(est_downbeats) >= 2:
+                    db_scores = evaluate_downbeats(ref_downbeats, est_downbeats)
+                    for k, v in db_scores.items():
+                        metric_sums[k] = metric_sums.get(k, 0.0) + v
+
+            # --- Phase-based beat extraction (bar pointer wraps) ---
+            est_beats_phase = extract_beats_from_phase_trajectory(phase_np[b], fps=fps)
+            if len(est_beats_phase) > 0:
+                phase_beat_scores = evaluate_beats(ref_beats, est_beats_phase)
+                for k, v in phase_beat_scores.items():
+                    metric_sums[f"phase_{k}"] = metric_sums.get(f"phase_{k}", 0.0) + v
 
             num_eval_samples += 1
 
@@ -668,6 +674,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Max gradient norm for clipping. Default: 1.0.")
     parser.add_argument("--z_context", type=int, default=1,
                         help="Number of past z frames for posterior context. 1=Markov (paper), >1=extended context.")
+    parser.add_argument("--h_prior_bottleneck", type=int, default=0,
+                        help="Bottleneck dim for h_prior in decoder. 0=full (default), >0=compressed.")
 
     # End-to-end
     parser.add_argument("--extractor_ckpt", type=str, default=None)
@@ -764,7 +772,8 @@ def main() -> None:
         dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
         model = SVTModel(
-            hidden_dim=128, nhead=4, num_layers=2, num_meter_classes=K, z_context=args.z_context,
+            hidden_dim=128, nhead=4, num_layers=2, num_meter_classes=K,
+            z_context=args.z_context, h_prior_bottleneck=args.h_prior_bottleneck,
         ).to(device)
         optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 

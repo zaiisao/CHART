@@ -77,6 +77,7 @@ class SVTModel(nn.Module):
         num_layers: int = 2,
         num_meter_classes: int = 8,
         meter_delta: float = 0.001,
+        h_prior_bottleneck: int = 0,
         **kwargs,  # absorb extra args like z_context for backward compat
     ) -> None:
         super().__init__()
@@ -175,8 +176,16 @@ class SVTModel(nn.Module):
 
         # ================================================================
         # DECODER (emission model)
+        # p_θ(b_t | z_t, h_{1:T}) = Bern(σ(NN_θ(z_t, h_{1:T})))
         # ================================================================
-        decoder_input_dim = 2 + K + hidden_dim  # phase, log_tempo, meter_soft, h_prior
+        self.h_prior_bottleneck_dim = h_prior_bottleneck
+        if h_prior_bottleneck > 0:
+            self.h_prior_bottleneck_proj = nn.Linear(hidden_dim, h_prior_bottleneck)
+            h_dim_for_decoder = h_prior_bottleneck
+        else:
+            h_dim_for_decoder = hidden_dim
+
+        decoder_input_dim = 2 + K + h_dim_for_decoder
         self.emission_decoder = nn.Sequential(
             nn.Linear(decoder_input_dim, hidden_dim),
             nn.ReLU(),
@@ -401,11 +410,14 @@ class SVTModel(nn.Module):
         h_prior_t: Tensor,
     ) -> Tensor:
         """Decode beat logit at time t."""
+        h = h_prior_t
+        if self.h_prior_bottleneck_dim > 0:
+            h = self.h_prior_bottleneck_proj(h)
         decoder_input = torch.cat([
             samples["phase"].unsqueeze(-1),       # [B, 1]
             samples["log_tempo"].unsqueeze(-1),    # [B, 1]
             samples["meter_soft"],                 # [B, K]
-            h_prior_t,                             # [B, D]
+            h,                                     # [B, D'] or [B, D]
         ], dim=-1)
         return self.emission_decoder(decoder_input)  # [B, 1]
 

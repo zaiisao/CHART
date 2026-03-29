@@ -85,6 +85,47 @@ def extract_downbeat_timestamps(
     return np.array(downbeats, dtype=np.float64)
 
 
+def extract_beats_from_phase_trajectory(
+    phase: np.ndarray,
+    fps: float = 172.265625,
+    min_distance_sec: float = 0.15,
+) -> np.ndarray:
+    """Extract beat timestamps directly from a phase trajectory.
+
+    In the bar pointer model, a beat occurs when the phase wraps from
+    near 2*pi back to near 0. This function detects those wrap-around
+    points without using the decoder's beat probability output.
+
+    Args:
+        phase: 1-D array of phase values in radians, shape ``[T]``.
+        fps: Frames per second.
+        min_distance_sec: Minimum time between consecutive beats.
+
+    Returns:
+        1-D array of beat timestamps in seconds.
+    """
+    TWO_PI = 2.0 * math.pi
+    T = len(phase)
+    min_dist = max(1, int(min_distance_sec * fps))
+
+    # Detect phase wraps: large negative jump in phase (2*pi → 0)
+    phase_wrapped = phase % TWO_PI
+    diffs = np.diff(phase_wrapped)
+    # A wrap occurs when diff < -pi (phase dropped by more than half circle)
+    wrap_indices = np.where(diffs < -math.pi)[0] + 1  # +1 because diff shifts by 1
+
+    if len(wrap_indices) == 0:
+        return np.array([], dtype=np.float64)
+
+    # Enforce minimum distance
+    selected = [wrap_indices[0]]
+    for idx in wrap_indices[1:]:
+        if idx - selected[-1] >= min_dist:
+            selected.append(idx)
+
+    return np.array(selected, dtype=np.float64) / fps
+
+
 def extract_timestamps_from_phase(
     beat_probs: np.ndarray,
     phase: np.ndarray,
