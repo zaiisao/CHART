@@ -1,14 +1,23 @@
 """Core Sequential Variational Transformer (SVT) model for the bar pointer VAE.
 
-Implements the variational bar pointer model with three structured latent
-variables per timestep:
+Architecture per the pseudocode documents:
 
-- **Meter** m_t: Categorical(K) with Gumbel-Softmax relaxation.
-- **Phase** phi_t: von Mises on [0, 2*pi) with implicit reparameterization.
-- **Tempo** phidot_t: Log-Normal (Gaussian in log-space).
+Prior (transition_model_pseudocode.pdf):
+- Bidirectional Encoder Transformer on x_{1:T} → h_prior_{1:T}
+- FFN heads with Softplus for kappa/sigma, delta*Sigmoid for meter epsilon
+- All prior params computed in parallel from h_prior
+- Means are fixed (bar pointer dynamics), uncertainties are learned
 
-The architecture uses Transformers for both the acoustic encoder (bidirectional)
-and the causal prior (autoregressive via causal mask).
+Posterior (posterior_model_final.pdf):
+- Encoder-Decoder Transformer: encoder on x_{1:T}, decoder on b_{1:T}
+- Cross-attention: Q=b (beat targets), K=V=x (audio features)
+- FFN heads with Softplus for kappa/sigma, pi*tanh for phase mu
+- All posterior params computed in parallel (no z_{t-1} dependency)
+- Does NOT condition on z_{t-1} — purely from (x, b)
+
+Training (Algorithm 1):
+- Prior means depend on z_{t-1} (sequential), but prior uncertainties
+  and all posterior params are pre-computed in parallel.
 """
 
 from __future__ import annotations
@@ -17,6 +26,7 @@ import math
 from typing import cast
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from models.distributions import (
@@ -29,26 +39,18 @@ TWO_PI = 2.0 * math.pi
 
 
 class PositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding supporting batch-first tensors.
-
-    Args:
-        d_model: Embedding dimension.
-        max_len: Maximum supported sequence length.
-    """
+    """Sinusoidal positional encoding supporting batch-first tensors."""
 
     def __init__(self, d_model: int, max_len: int = 20000) -> None:
         super().__init__()
-
         position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2, dtype=torch.float32)
             * (-math.log(10000.0) / d_model)
         )
-
         pe = torch.zeros(max_len, d_model, dtype=torch.float32)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-
         self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -57,23 +59,15 @@ class PositionalEncoding(nn.Module):
         return x + pe[:, :seq_len, :]
 
 
-# ---------------------------------------------------------------------------
-# Main model
-# ---------------------------------------------------------------------------
-
-
 class SVTModel(nn.Module):
     """Sequential Variational Transformer for the bar pointer VAE.
-
-    Encodes acoustic features with a bidirectional Transformer, models latent
-    dynamics with a causal Transformer, and produces posterior / prior
-    parameters for each of the three structured latent variables.
 
     Args:
         hidden_dim: Transformer / MLP hidden dimensionality.
         nhead: Number of attention heads.
         num_layers: Number of Transformer layers per encoder.
         num_meter_classes: Number of discrete meter categories (K).
+        meter_delta: Upper bound for meter transition epsilon_ij.
     """
 
     def __init__(
@@ -82,65 +76,107 @@ class SVTModel(nn.Module):
         nhead: int = 4,
         num_layers: int = 2,
         num_meter_classes: int = 8,
+        meter_delta: float = 0.001,
+        **kwargs,  # absorb extra args like z_context for backward compat
     ) -> None:
         super().__init__()
 
         self.hidden_dim = hidden_dim
         self.num_meter_classes = num_meter_classes
+        self.meter_delta = meter_delta
+        K = num_meter_classes
         input_dim = 2  # beat activation + downbeat activation
 
-        # Prior input: [phase (1), log_tempo (1), meter_onehot (K)]
-        prior_input_dim = 2 + num_meter_classes
-
-        # --- Acoustic encoder (bidirectional) ---
-        self.acoustic_input_proj = nn.Linear(input_dim, hidden_dim)
-        self.pos_encoder_audio = PositionalEncoding(d_model=hidden_dim)
-        self.acoustic_encoder = nn.TransformerEncoder(
+        # ================================================================
+        # PRIOR: Encoder Transformer on x_{1:T} → h_prior_{1:T}
+        # (transition_model_pseudocode.pdf, Step 0)
+        # ================================================================
+        self.prior_input_proj = nn.Linear(input_dim, hidden_dim)
+        self.prior_pos_enc = PositionalEncoding(d_model=hidden_dim)
+        self.prior_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=hidden_dim, nhead=nhead, batch_first=True,
             ),
             num_layers=num_layers,
         )
 
-        # --- Causal prior encoder (autoregressive) ---
-        self.prior_input_proj = nn.Linear(prior_input_dim, hidden_dim)
-        self.pos_encoder_prior = PositionalEncoding(d_model=hidden_dim)
-        self.causal_prior = nn.TransformerEncoder(
+        # Prior FFN heads (applied position-wise to h_prior)
+        # Meter: epsilon_ij matrix — delta * sigmoid(FFN) → (0, delta)
+        self.prior_meter_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, K * K),
+        )
+        # Phase: concentration kappa — Softplus(FFN) > 0
+        self.prior_phase_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Tempo: std sigma — Softplus(FFN) > 0
+        self.prior_tempo_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Learnable initial tempo mean (for t=1)
+        self.prior_tempo_mu_init = nn.Parameter(torch.tensor(0.0))
+
+        # ================================================================
+        # POSTERIOR: Encoder-Decoder Transformer
+        # (posterior_model_final.pdf)
+        # Encoder: x_{1:T} → h_x (K, V for cross-attention)
+        # Decoder: b_{1:T} → h_post (Q drives cross-attention into h_x)
+        # ================================================================
+        # Posterior encoder (processes audio features x_{1:T})
+        self.post_enc_proj = nn.Linear(input_dim, hidden_dim)
+        self.post_enc_pos = PositionalEncoding(d_model=hidden_dim)
+        self.post_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=hidden_dim, nhead=nhead, batch_first=True,
             ),
             num_layers=num_layers,
         )
 
-        # --- Posterior heads (from fused h_audio + h_prior) ---
-        self.posterior_proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
+        # Posterior decoder (processes beat targets b_{1:T}, cross-attends to x)
+        # b_{1:T} is 1-dim (binary beat indicator per frame)
+        self.post_dec_proj = nn.Linear(1, hidden_dim)
+        self.post_dec_pos = PositionalEncoding(d_model=hidden_dim)
+        self.post_decoder = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(
+                d_model=hidden_dim, nhead=nhead, batch_first=True,
+            ),
+            num_layers=num_layers,
         )
-        # Meter posterior
-        self.posterior_meter = nn.Linear(hidden_dim, num_meter_classes)
-        # Phase posterior (mu and log_kappa)
-        self.posterior_phase_mu = nn.Linear(hidden_dim, 1)
-        self.posterior_phase_log_kappa = nn.Linear(hidden_dim, 1)
-        # Tempo posterior (mu and log_sigma in log-space)
-        self.posterior_tempo_mu = nn.Linear(hidden_dim, 1)
-        self.posterior_tempo_log_sigma = nn.Linear(hidden_dim, 1)
 
-        # --- Prior heads (from h_prior alone) ---
-        self.prior_proj = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+        # Posterior FFN heads (applied position-wise to h_post)
+        # Meter: softmax(FFN)
+        self.post_meter_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, K),
         )
-        # Meter prior: outputs K*K transition matrix logits
-        self.prior_meter_transition = nn.Linear(hidden_dim, num_meter_classes * num_meter_classes)
-        # Phase prior: context-dependent concentration
-        self.prior_phase_log_kappa = nn.Linear(hidden_dim, 1)
-        # Tempo prior: context-dependent std in log-space
-        self.prior_tempo_log_sigma = nn.Linear(hidden_dim, 1)
+        # Phase mu: pi * tanh(FFN) → [-pi, pi]
+        self.post_phase_mu_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Phase kappa: Softplus(FFN) > 0
+        self.post_phase_kappa_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Tempo mu: FFN (unconstrained, log-space)
+        self.post_tempo_mu_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Tempo sigma: Softplus(FFN) > 0
+        self.post_tempo_sigma_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
-        # --- Emission decoder ---
-        # Input: [phase (1), log_tempo (1), meter_soft (K), h_audio (hidden_dim)]
-        decoder_input_dim = 2 + num_meter_classes + hidden_dim
+        # ================================================================
+        # DECODER (emission model)
+        # ================================================================
+        decoder_input_dim = 2 + K + hidden_dim  # phase, log_tempo, meter_soft, h_prior
         self.emission_decoder = nn.Sequential(
             nn.Linear(decoder_input_dim, hidden_dim),
             nn.ReLU(),
@@ -148,318 +184,339 @@ class SVTModel(nn.Module):
         )
 
     # ------------------------------------------------------------------
-    # Public helpers
+    # Prior: encode and compute uncertainty params (parallel)
     # ------------------------------------------------------------------
 
-    def encode_acoustics(self, activations: Tensor) -> Tensor:
-        """Encode acoustic features (parallel, bidirectional).
+    def encode_prior(self, activations: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
+        """Encode audio and compute all prior uncertainty params in parallel.
+
+        Per transition_model_pseudocode.pdf Step 0.
 
         Args:
-            activations: ``[B, T, 2]`` acoustic activations.
+            activations: [B, T, 2] acoustic activations.
 
         Returns:
-            ``[B, T, hidden_dim]`` acoustic hidden states.
+            h_prior: [B, T, D] prior hidden states.
+            prior_params: Dict with pre-computed uncertainty params:
+                - epsilon_ij: [B, T, K, K] meter transition probs (0, delta)
+                - phase_kappa: [B, T] concentration
+                - tempo_sigma: [B, T] std in log-space
         """
-        x = self.acoustic_input_proj(activations)
-        x = self.pos_encoder_audio(x)
-        return self.acoustic_encoder(x)
+        x = self.prior_input_proj(activations)
+        x = self.prior_pos_enc(x)
+        h_prior = self.prior_encoder(x)  # [B, T, D]
 
-    def encode_prior(self, z_prev_cat: Tensor) -> Tensor:
-        """Encode latent history with causal masking.
+        K = self.num_meter_classes
+        B, T, _ = h_prior.shape
 
-        Args:
-            z_prev_cat: ``[B, T, 2+K]`` concatenated prior input
-                (phase, log_tempo, meter_onehot).
-
-        Returns:
-            ``[B, T, hidden_dim]`` causal prior hidden states.
-        """
-        x = self.prior_input_proj(z_prev_cat)
-        x = self.pos_encoder_prior(x)
-        seq_len = x.size(1)
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(
-            x.device
+        # Meter: delta * sigmoid(FFN) → epsilon_ij in (0, delta)
+        epsilon_ij = self.meter_delta * torch.sigmoid(
+            self.prior_meter_ffn(h_prior).view(B, T, K, K)
         )
-        return self.causal_prior(x, mask=causal_mask)
 
-    # ------------------------------------------------------------------
-    # Prior parameter computation
-    # ------------------------------------------------------------------
+        # Phase: kappa in [1, 200] — concentrated prior around predicted phase
+        phase_kappa = 1.0 + 199.0 * torch.sigmoid(
+            self.prior_phase_ffn(h_prior).squeeze(-1)
+        )
 
-    def compute_prior_params(
+        # Tempo: sigma in [0.01, 0.5] — bounded random walk variance
+        tempo_sigma = 0.01 + 0.49 * torch.sigmoid(
+            self.prior_tempo_ffn(h_prior).squeeze(-1)
+        )
+
+        return h_prior, {
+            "epsilon_ij": epsilon_ij,
+            "phase_kappa": phase_kappa,
+            "tempo_sigma": tempo_sigma,
+        }
+
+    def compute_prior_at_t(
         self,
-        h_prior: Tensor,
+        prior_params: dict[str, Tensor],
+        t: int,
         phase_prev: Tensor,
         log_tempo_prev: Tensor,
         meter_onehot_prev: Tensor,
     ) -> dict[str, Tensor]:
-        """Compute prior distribution parameters.
+        """Compute prior distribution params at time t using z_{t-1}.
+
+        Per transition_model_pseudocode.pdf Steps 1-2.
 
         Args:
-            h_prior: ``[B, T, hidden_dim]`` or ``[B, 1, hidden_dim]``.
-            phase_prev: ``[B, T, 1]`` or ``[B, 1, 1]`` previous phase (radians).
-            log_tempo_prev: ``[B, T, 1]`` or ``[B, 1, 1]`` previous log-tempo.
-            meter_onehot_prev: ``[B, T, K]`` or ``[B, 1, K]`` previous meter one-hot.
-
-        Returns:
-            Dict with keys: ``meter_logits``, ``phase_mu``, ``phase_kappa``,
-            ``tempo_mu``, ``tempo_sigma``.
+            prior_params: Pre-computed uncertainty params from encode_prior.
+            t: Current timestep (0-indexed).
+            phase_prev: [B, 1] previous phase.
+            log_tempo_prev: [B, 1] previous log-tempo.
+            meter_onehot_prev: [B, K] previous meter one-hot.
         """
-        h = self.prior_proj(h_prior)
-
         K = self.num_meter_classes
-        B = h.size(0)
-        T = h.size(1)
 
-        # --- Meter prior ---
-        # Transition matrix: [B, T, K, K]
-        trans_logits = self.prior_meter_transition(h).view(B, T, K, K)
-        trans_log_probs = torch.log_softmax(trans_logits, dim=-1)  # normalize rows
+        if t == 0:
+            # Step 1: Initial state
+            B = phase_prev.size(0)
+            device = phase_prev.device
+            meter_logits = torch.zeros(B, K, device=device)  # uniform
+            phase_mu = torch.zeros(B, device=device)
+            phase_kappa = prior_params["phase_kappa"][:, 0]
+            tempo_mu = self.prior_tempo_mu_init.expand(B)
+            tempo_sigma = prior_params["tempo_sigma"][:, 0]
+        else:
+            # Step 2: Transition
+            # Phase: mu = (phi_{t-1} + phidot_{t-1}) mod 2pi
+            tempo_prev = torch.exp(log_tempo_prev.clamp(max=10.0))
+            phase_mu = torch.remainder(
+                phase_prev.squeeze(-1) + tempo_prev.squeeze(-1), TWO_PI
+            )
 
-        # Bar boundary detection: phi_{t-1} + phidot_{t-1} >= 2*pi
-        # Clamp log_tempo before exponentiation to prevent inf (which causes
-        # torch.remainder to return nan). exp(10) ~ 22000 rad/frame is
-        # astronomically fast and will never occur in practice.
-        tempo_prev = torch.exp(log_tempo_prev.clamp(max=10.0))  # [B, T, 1]
-        boundary = ((phase_prev + tempo_prev) >= TWO_PI).squeeze(-1)  # [B, T]
-        boundary_mask = boundary.unsqueeze(-1).expand_as(meter_onehot_prev)  # [B, T, K]
+            # Phase kappa from pre-computed
+            phase_kappa = prior_params["phase_kappa"][:, t]
 
-        # Previous meter as probabilities (one-hot -> row vector)
-        # Apply same smoothing for the transition path
-        # meter_onehot_prev: [B, T, K] -> [B, T, 1, K]
-        meter_prev_smooth = meter_onehot_prev + 1e-3
-        meter_prev_smooth = meter_prev_smooth / meter_prev_smooth.sum(dim=-1, keepdim=True)
-        meter_row = meter_prev_smooth.unsqueeze(-2)
+            # Tempo: mu = log(phidot_{t-1}) = log_tempo_prev
+            tempo_mu = log_tempo_prev.squeeze(-1)
+            tempo_sigma = prior_params["tempo_sigma"][:, t]
 
-        # Transition: meter_row @ transition_matrix -> [B, T, 1, K] -> [B, T, K]
-        transitioned_log_probs = torch.logsumexp(
-            meter_row.log() + trans_log_probs, dim=-2
-        ).squeeze(-2)
+            # Meter: boundary-gated transition
+            wrap_t = (phase_prev.squeeze(-1) + tempo_prev.squeeze(-1)) >= TWO_PI  # [B]
+            eps_t = prior_params["epsilon_ij"][:, t]  # [B, K, K]
 
-        # If no boundary: strong preference for previous meter (soft, not hard delta)
-        # Add a small uniform floor to avoid infinite KL against a diffuse posterior
-        meter_prev_soft = meter_onehot_prev + 1e-3
-        meter_prev_soft = meter_prev_soft / meter_prev_soft.sum(dim=-1, keepdim=True)
-        no_boundary_log_probs = meter_prev_soft.log()
-        meter_prior_logits = torch.where(
-            boundary_mask,
-            transitioned_log_probs,
-            no_boundary_log_probs,
-        )
+            # Build transition: pi[i,j] = eps[i,j] * wrap, pi[i,i] = 1 - sum(eps[i,:]) * wrap
+            # For soft meter_onehot_prev, compute expected transition
+            diag_mask = torch.eye(K, device=eps_t.device).unsqueeze(0)  # [1, K, K]
+            off_diag_eps = eps_t * (1.0 - diag_mask)  # zero diagonal
+            row_sum = off_diag_eps.sum(dim=-1, keepdim=True)  # [B, K, 1]
+            stay_prob = 1.0 - row_sum  # [B, K, 1]
+            trans_matrix = off_diag_eps + stay_prob * diag_mask  # [B, K, K]
 
-        # --- Phase prior ---
-        # mu_p = (phi_{t-1} + phidot_{t-1}) mod 2*pi
-        phase_mu = torch.remainder(phase_prev + tempo_prev, TWO_PI).squeeze(-1)  # [B, T]
-        phase_kappa = self.prior_phase_log_kappa(h).squeeze(-1).exp()  # [B, T]
+            # Gate by wrap: if no wrap, stay in same meter
+            wrap_mask = wrap_t.unsqueeze(-1).unsqueeze(-1).float()  # [B, 1, 1]
+            trans_matrix = wrap_mask * trans_matrix + (1.0 - wrap_mask) * diag_mask.expand_as(trans_matrix)
 
-        # --- Tempo prior ---
-        # mu_p = log(phidot_{t-1}) = log_tempo_prev
-        tempo_mu = log_tempo_prev.squeeze(-1)  # [B, T]
-        tempo_sigma = self.prior_tempo_log_sigma(h).squeeze(-1).exp()  # [B, T]
+            # Apply: pi_t = meter_prev @ trans_matrix
+            meter_prev_prob = meter_onehot_prev + 1e-6
+            meter_prev_prob = meter_prev_prob / meter_prev_prob.sum(dim=-1, keepdim=True)
+            meter_logits = torch.log(
+                torch.bmm(meter_prev_prob.unsqueeze(1), trans_matrix).squeeze(1) + 1e-10
+            )
 
         return {
-            "meter_logits": meter_prior_logits,  # [B, T, K]
-            "phase_mu": phase_mu,                # [B, T]
-            "phase_kappa": phase_kappa,          # [B, T]
-            "tempo_mu": tempo_mu,                # [B, T]
-            "tempo_sigma": tempo_sigma,          # [B, T]
+            "meter_logits": meter_logits,       # [B, K]
+            "phase_mu": phase_mu,               # [B]
+            "phase_kappa": phase_kappa,          # [B]
+            "tempo_mu": tempo_mu,               # [B]
+            "tempo_sigma": tempo_sigma,          # [B]
         }
 
     # ------------------------------------------------------------------
-    # Posterior parameter computation
+    # Posterior: encode-decode and compute all params (parallel)
     # ------------------------------------------------------------------
 
-    def compute_posterior_params(self, h_fused: Tensor) -> dict[str, Tensor]:
-        """Compute posterior distribution parameters.
+    def encode_posterior(
+        self,
+        activations: Tensor,
+        beat_targets: Tensor,
+    ) -> dict[str, Tensor]:
+        """Compute all posterior params in parallel via encoder-decoder.
+
+        Per posterior_model_final.pdf.
 
         Args:
-            h_fused: ``[B, T, hidden_dim]`` fused hidden state.
+            activations: [B, T, 2] acoustic activations (x_{1:T}).
+            beat_targets: [B, T] binary beat indicators (b_{1:T}).
 
         Returns:
-            Dict with keys: ``meter_logits``, ``phase_mu``, ``phase_log_kappa``,
-            ``tempo_mu``, ``tempo_log_sigma``.
+            Dict with posterior params for all T timesteps:
+                - meter_logits: [B, T, K]
+                - phase_mu: [B, T]
+                - phase_kappa: [B, T]  (not log_kappa — direct Softplus output)
+                - tempo_mu: [B, T]
+                - tempo_sigma: [B, T]  (not log_sigma — direct Softplus output)
         """
-        h = self.posterior_proj(h_fused)
+        # Encoder: x_{1:T} → h_x
+        x_emb = self.post_enc_proj(activations)
+        x_emb = self.post_enc_pos(x_emb)
+        h_x = self.post_encoder(x_emb)  # [B, T, D]
 
+        # Decoder: b_{1:T} drives Q, h_x provides K,V
+        b_emb = self.post_dec_proj(beat_targets.unsqueeze(-1))  # [B, T, 1] → [B, T, D]
+        b_emb = self.post_dec_pos(b_emb)
+        h_post = self.post_decoder(b_emb, h_x)  # [B, T, D]
+
+        # FFN heads (position-wise, shared weights)
+        K = self.num_meter_classes
         return {
-            "meter_logits": self.posterior_meter(h),                      # [B, T, K]
-            "phase_mu": self.posterior_phase_mu(h).squeeze(-1),           # [B, T]
-            "phase_log_kappa": self.posterior_phase_log_kappa(h).squeeze(-1),  # [B, T]
-            "tempo_mu": self.posterior_tempo_mu(h).squeeze(-1),           # [B, T]
-            "tempo_log_sigma": self.posterior_tempo_log_sigma(h).squeeze(-1),  # [B, T]
+            "meter_logits": self.post_meter_ffn(h_post),                              # [B, T, K]
+            "phase_mu": math.pi * torch.tanh(self.post_phase_mu_ffn(h_post).squeeze(-1)),  # [B, T]
+            "phase_kappa": 0.1 + 299.9 * torch.sigmoid(                                 # [B, T] in [0.1, 300]
+                self.post_phase_kappa_ffn(h_post).squeeze(-1)),
+            "tempo_mu": self.post_tempo_mu_ffn(h_post).squeeze(-1),                   # [B, T]
+            "tempo_sigma": 0.01 + 1.99 * torch.sigmoid(                               # [B, T] in [0.01, 2.0]
+                self.post_tempo_sigma_ffn(h_post).squeeze(-1)),
         }
 
     # ------------------------------------------------------------------
     # Sampling
     # ------------------------------------------------------------------
 
-    def sample_latent(
+    def sample_latent_at_t(
         self,
         posterior: dict[str, Tensor],
+        t: int,
         temperature: float = 1.0,
     ) -> dict[str, Tensor]:
-        """Draw reparameterized samples from the posterior.
+        """Sample z_t from posterior at timestep t.
 
         Args:
-            posterior: Dict of posterior parameters (from ``compute_posterior_params``).
-            temperature: Gumbel-Softmax temperature for meter.
+            posterior: Full posterior params [B, T, ...] from encode_posterior.
+            t: Timestep index.
+            temperature: Gumbel-Softmax temperature.
 
         Returns:
-            Dict with keys: ``meter_soft`` (K-dim), ``meter_onehot`` (K-dim, hard),
-            ``phase`` (scalar, radians), ``log_tempo`` (scalar, log-space).
+            Dict with samples at time t (each [B] or [B, K]).
         """
-        # Meter: Gumbel-Softmax
-        meter_soft = gumbel_softmax_sample(
-            posterior["meter_logits"], temperature=temperature, hard=False,
-        )
-        meter_hard = gumbel_softmax_sample(
-            posterior["meter_logits"], temperature=temperature, hard=True,
-        )
+        meter_logits_t = posterior["meter_logits"][:, t, :]  # [B, K]
+        meter_soft = gumbel_softmax_sample(meter_logits_t, temperature=temperature, hard=False)
+        meter_hard = gumbel_softmax_sample(meter_logits_t, temperature=temperature, hard=True)
 
-        # Phase: von Mises
-        kappa_q = posterior["phase_log_kappa"].exp()
-        phase = von_mises_sample(posterior["phase_mu"], kappa_q)
-        phase = torch.remainder(phase, TWO_PI)  # wrap to [0, 2*pi)
+        phase = von_mises_sample(posterior["phase_mu"][:, t], posterior["phase_kappa"][:, t])
+        phase = torch.remainder(phase, TWO_PI)
 
-        # Tempo: Log-Normal (sample in log-space)
-        sigma_q = posterior["tempo_log_sigma"].exp()
-        log_tempo = lognormal_sample_logspace(posterior["tempo_mu"], sigma_q)
+        log_tempo = lognormal_sample_logspace(
+            posterior["tempo_mu"][:, t], posterior["tempo_sigma"][:, t],
+        )
 
         return {
-            "meter_soft": meter_soft,    # [B, T, K]
-            "meter_onehot": meter_hard,  # [B, T, K] (straight-through)
-            "phase": phase,              # [B, T]
-            "log_tempo": log_tempo,      # [B, T]
+            "meter_soft": meter_soft,      # [B, K]
+            "meter_onehot": meter_hard,    # [B, K]
+            "phase": phase,                # [B]
+            "log_tempo": log_tempo,        # [B]
         }
 
     # ------------------------------------------------------------------
     # Emission decoder
     # ------------------------------------------------------------------
 
-    def decode(
+    def decode_at_t(
         self,
         samples: dict[str, Tensor],
-        h_audio: Tensor,
+        h_prior_t: Tensor,
     ) -> Tensor:
-        """Decode beat logits from latent samples and acoustic features.
-
-        Args:
-            samples: Dict from ``sample_latent``.
-            h_audio: ``[B, T, hidden_dim]`` acoustic encoder output.
-
-        Returns:
-            ``[B, T, 1]`` beat logits (pre-sigmoid).
-        """
-        decoder_input = torch.cat(
-            [
-                samples["phase"].unsqueeze(-1),      # [B, T, 1]
-                samples["log_tempo"].unsqueeze(-1),   # [B, T, 1]
-                samples["meter_soft"],                # [B, T, K]
-                h_audio,                              # [B, T, hidden_dim]
-            ],
-            dim=-1,
-        )
-        return self.emission_decoder(decoder_input)  # [B, T, 1]
+        """Decode beat logit at time t."""
+        decoder_input = torch.cat([
+            samples["phase"].unsqueeze(-1),       # [B, 1]
+            samples["log_tempo"].unsqueeze(-1),    # [B, 1]
+            samples["meter_soft"],                 # [B, K]
+            h_prior_t,                             # [B, D]
+        ], dim=-1)
+        return self.emission_decoder(decoder_input)  # [B, 1]
 
     # ------------------------------------------------------------------
-    # Full forward pass (teacher-forced / parallel)
+    # Forward: Algorithm 1 sequential loop
     # ------------------------------------------------------------------
 
     def forward(
         self,
         activations: Tensor,
-        z_prev: dict[str, Tensor],
+        z_prev_init: dict[str, Tensor],
         temperature: float = 1.0,
+        beat_targets: Tensor | None = None,
     ) -> dict[str, Tensor | dict[str, Tensor]]:
-        """Run one forward pass (parallel, teacher-forced).
+        """Algorithm 1: sequential autoregressive forward.
 
-        This processes all timesteps simultaneously using causal masking in the
-        prior.  For autoregressive sampling (Algorithm 1), use
-        ``encode_acoustics`` + ``step`` in a loop instead.
+        Prior uncertainties and all posterior params are pre-computed in
+        parallel. The sequential loop only evaluates prior means (which
+        depend on z_{t-1}) and samples from the posterior.
 
         Args:
-            activations: ``[B, T, 2]`` acoustic activations.
-            z_prev: Dict with keys:
-                - ``phase``: ``[B, T, 1]`` previous phase (radians).
-                - ``log_tempo``: ``[B, T, 1]`` previous log-tempo.
-                - ``meter_onehot``: ``[B, T, K]`` previous meter one-hot.
+            activations: [B, T, 2] acoustic activations.
+            z_prev_init: Dict with initial z_prev (t=0 seed):
+                - phase: [B, 1, 1]
+                - log_tempo: [B, 1, 1]
+                - meter_onehot: [B, 1, K]
             temperature: Gumbel-Softmax temperature.
+            beat_targets: [B, T] binary beat indicators (required for
+                posterior encoder-decoder). If None, uses zeros.
 
         Returns:
-            Dict with keys: ``beat_logits``, ``posterior``, ``prior``, ``samples``.
+            Dict with beat_logits, posterior, prior, samples.
         """
-        # Acoustic encoding (parallel, bidirectional)
-        h_audio = self.encode_acoustics(activations)  # [B, T, D]
+        B, T, _ = activations.shape
+        device = activations.device
 
-        # Prior encoding (causal)
-        z_prev_cat = torch.cat(
-            [z_prev["phase"], z_prev["log_tempo"], z_prev["meter_onehot"]],
-            dim=-1,
-        )  # [B, T, 2+K]
-        h_prior = self.encode_prior(z_prev_cat)  # [B, T, D]
+        # Pre-compute beat targets if not provided
+        if beat_targets is None:
+            beat_targets = torch.zeros(B, T, device=device)
 
-        # Posterior parameters
-        h_fused = torch.cat([h_audio, h_prior], dim=-1)  # [B, T, 2D]
-        posterior = self.compute_posterior_params(h_fused)
+        # Step 0: Prior encoder (parallel, one pass)
+        h_prior, prior_params = self.encode_prior(activations)
 
-        # Prior parameters
-        prior = self.compute_prior_params(
-            h_prior,
-            phase_prev=z_prev["phase"],
-            log_tempo_prev=z_prev["log_tempo"],
-            meter_onehot_prev=z_prev["meter_onehot"],
-        )
+        # Step 0: Posterior encoder-decoder (parallel, one pass)
+        posterior = self.encode_posterior(activations, beat_targets)
 
-        # Sample
-        samples = self.sample_latent(posterior, temperature=temperature)
-
-        # Decode
-        beat_logits = self.decode(samples, h_audio)
-
-        return {
-            "beat_logits": beat_logits,  # [B, T, 1]
-            "posterior": posterior,
-            "prior": prior,
-            "samples": samples,
+        # Reformat posterior for KL compatibility:
+        # The loss expects "phase_log_kappa" and "tempo_log_sigma",
+        # but we use Softplus (direct kappa/sigma). Store both forms.
+        posterior_for_loss = {
+            "meter_logits": posterior["meter_logits"],
+            "phase_mu": posterior["phase_mu"],
+            "phase_log_kappa": torch.log(posterior["phase_kappa"] + 1e-8),
+            "tempo_mu": posterior["tempo_mu"],
+            "tempo_log_sigma": torch.log(posterior["tempo_sigma"] + 1e-8),
         }
 
-    # ------------------------------------------------------------------
-    # Step-wise forward (for autoregressive training / inference)
-    # ------------------------------------------------------------------
+        # Current z_prev state
+        phase_prev = z_prev_init["phase"].squeeze(1)          # [B, 1]
+        log_tempo_prev = z_prev_init["log_tempo"].squeeze(1)  # [B, 1]
+        meter_prev = z_prev_init["meter_onehot"].squeeze(1)   # [B, K]
 
-    def step(
-        self,
-        h_audio_t: Tensor,
-        h_prior_t: Tensor,
-        phase_prev: Tensor,
-        log_tempo_prev: Tensor,
-        meter_onehot_prev: Tensor,
-        temperature: float = 1.0,
-    ) -> dict[str, Tensor | dict[str, Tensor]]:
-        """Single-step forward for autoregressive rollout.
+        # Output accumulators
+        all_beat_logits = []
+        all_prior_meter = []
+        all_prior_phase_mu = []
+        all_prior_phase_kappa = []
+        all_prior_tempo_mu = []
+        all_prior_tempo_sigma = []
+        all_samp = {k: [] for k in ("meter_soft", "meter_onehot", "phase", "log_tempo")}
 
-        Args:
-            h_audio_t: ``[B, 1, hidden_dim]`` acoustic features at time t.
-            h_prior_t: ``[B, 1, hidden_dim]`` prior hidden state at time t.
-            phase_prev: ``[B, 1, 1]`` previous phase.
-            log_tempo_prev: ``[B, 1, 1]`` previous log-tempo.
-            meter_onehot_prev: ``[B, 1, K]`` previous meter one-hot.
-            temperature: Gumbel-Softmax temperature.
+        for t in range(T):
+            # Prior at time t (means depend on z_{t-1}, uncertainties pre-computed)
+            prior_t = self.compute_prior_at_t(
+                prior_params, t, phase_prev, log_tempo_prev, meter_prev,
+            )
 
-        Returns:
-            Same structure as ``forward`` but for a single timestep.
-        """
-        h_fused = torch.cat([h_audio_t, h_prior_t], dim=-1)  # [B, 1, 2D]
-        posterior = self.compute_posterior_params(h_fused)
-        prior = self.compute_prior_params(
-            h_prior_t, phase_prev, log_tempo_prev, meter_onehot_prev,
-        )
-        samples = self.sample_latent(posterior, temperature=temperature)
-        beat_logits = self.decode(samples, h_audio_t)
+            # Sample from posterior at time t
+            samp_t = self.sample_latent_at_t(posterior, t, temperature=temperature)
+
+            # Decode
+            beat_logit_t = self.decode_at_t(samp_t, h_prior[:, t, :])
+
+            # Accumulate
+            all_beat_logits.append(beat_logit_t)
+            all_prior_meter.append(prior_t["meter_logits"])
+            all_prior_phase_mu.append(prior_t["phase_mu"])
+            all_prior_phase_kappa.append(prior_t["phase_kappa"])
+            all_prior_tempo_mu.append(prior_t["tempo_mu"])
+            all_prior_tempo_sigma.append(prior_t["tempo_sigma"])
+            for k in all_samp:
+                all_samp[k].append(samp_t[k])
+
+            # Update z_prev for next step (Algorithm 1)
+            phase_prev = samp_t["phase"].unsqueeze(-1)       # [B, 1]
+            log_tempo_prev = samp_t["log_tempo"].unsqueeze(-1)  # [B, 1]
+            meter_prev = samp_t["meter_onehot"]              # [B, K]
+
+        # Stack across time
+        prior_out = {
+            "meter_logits": torch.stack(all_prior_meter, dim=1),       # [B, T, K]
+            "phase_mu": torch.stack(all_prior_phase_mu, dim=1),        # [B, T]
+            "phase_kappa": torch.stack(all_prior_phase_kappa, dim=1),  # [B, T]
+            "tempo_mu": torch.stack(all_prior_tempo_mu, dim=1),        # [B, T]
+            "tempo_sigma": torch.stack(all_prior_tempo_sigma, dim=1),  # [B, T]
+        }
+        samples_out = {k: torch.stack(v, dim=1) for k, v in all_samp.items()}
 
         return {
-            "beat_logits": beat_logits,
-            "posterior": posterior,
-            "prior": prior,
-            "samples": samples,
+            "beat_logits": torch.stack(all_beat_logits, dim=1),  # [B, T, 1]
+            "posterior": posterior_for_loss,
+            "prior": prior_out,
+            "samples": samples_out,
         }
