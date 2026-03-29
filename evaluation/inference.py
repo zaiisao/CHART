@@ -60,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_meter_classes", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.1,
                         help="Gumbel-Softmax temperature for meter (low = more discrete)")
-    parser.add_argument("--fps", type=float, default=172.265625,
+    parser.add_argument("--fps", type=float, default=86.1328125,
                         help="Frames per second of the input activations")
     return parser
 
@@ -114,7 +114,7 @@ def run_inference(
     acoustic_activations: Tensor,
     *,
     temperature: float = 0.1,
-    fps: float = 172.265625,
+    fps: float = 86.1328125,
 ) -> dict[str, Tensor | np.ndarray]:
     """Run CHART inference using the PRIOR (no beat annotations needed).
 

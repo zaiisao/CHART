@@ -297,17 +297,17 @@ class AudioPhaseBridgeDataset(Dataset):
         # Align phase file with the audio crop.
         #
         # The phase file is at phase_fps (default 100). The extractor target
-        # is at target_fps (44100/256 ≈ 172). We resample the FULL-SONG phase
+        # is at target_fps (sample_rate/256). We resample the FULL-SONG phase
         # to target_fps, then find the crop offset by matching beat positions.
-        target_len = extractor_target.shape[-1]  # cropped length (e.g. 256)
+        target_len = extractor_target.shape[-1]  # cropped length
         beat_target = extractor_target[0].numpy()  # [target_len] binary beats
 
         # Compute full-song length at target fps from the phase file's length.
         # Phase file covers the full song at phase_fps; convert to target_fps.
         phase_fps = 100.0  # default from phase_generation/common.py
         target_factor = getattr(self.source_dataset, 'target_factor', 256)
-        sample_rate = getattr(self.source_dataset, 'audio_sample_rate', 44100)
-        target_fps = sample_rate / target_factor  # 172.27
+        sample_rate = getattr(self.source_dataset, 'audio_sample_rate', 22050)
+        target_fps = sample_rate / target_factor  # 22050/256 = 86.13
         full_target_len = int(phase_np.shape[0] * (target_fps / phase_fps))
 
         if full_target_len > target_len:
@@ -379,9 +379,9 @@ class AudioPhaseBridgeDataset(Dataset):
     ) -> int:
         """Find the frame offset where the phase file aligns with the beat target.
 
-        Uses the beat_phase column (column 1) of the phase file: beat positions
-        correspond to frames where beat_phase wraps near 0. Cross-correlates
-        this with the binary beat_target to find the best alignment.
+        Uses full cross-correlation (every offset checked) between beat
+        positions derived from the phase file and the binary beat_target
+        from WaveBeat.
 
         Args:
             full_phase: [T_full, C] resampled phase at target fps.
@@ -395,37 +395,24 @@ class AudioPhaseBridgeDataset(Dataset):
         if T_full <= crop_len:
             return 0
 
-        # Create a beat indicator from the phase file:
+        if beat_target.sum() < 1:
+            return 0
+
+        # Create beat indicator from phase file:
         # beats occur where beat_phase (column 1) wraps from ~1 back to ~0
-        # (phase is in [0, 1) range, not [0, 2*pi))
         beat_phase = full_phase[:, 1]  # [T_full]
-        # Detect wraps: phase drops by more than 0.5 (wrap from ~1 to ~0)
         phase_diff = np.diff(beat_phase, prepend=beat_phase[0])
-        phase_beats = (phase_diff < -0.5).astype(np.float32)  # 1 at wrap points
+        phase_beats = (phase_diff < -0.5).astype(np.float32)
 
-        # Cross-correlate to find best offset
-        best_offset = 0
-        best_score = -1.0
-        # Search in chunks for efficiency
-        search_range = T_full - crop_len + 1
-        for offset in range(0, search_range, max(1, search_range // 500)):
-            window = phase_beats[offset : offset + crop_len]
-            score = float(np.dot(window, beat_target))
-            if score > best_score:
-                best_score = score
-                best_offset = offset
+        # Full cross-correlation: check EVERY offset via np.correlate
+        # mode='valid' gives scores for each valid offset where beat_target
+        # fits entirely within phase_beats — exactly (T_full - crop_len + 1) values
+        scores = np.correlate(phase_beats, beat_target, mode='valid')
 
-        # Refine around best
-        lo = max(0, best_offset - search_range // 500 - 1)
-        hi = min(search_range, best_offset + search_range // 500 + 2)
-        for offset in range(lo, hi):
-            window = phase_beats[offset : offset + crop_len]
-            score = float(np.dot(window, beat_target))
-            if score > best_score:
-                best_score = score
-                best_offset = offset
+        if len(scores) == 0:
+            return 0
 
-        return best_offset
+        return int(np.argmax(scores))
 
     @staticmethod
     def _fit_phase_length_np(phase_np: np.ndarray, target_len: int) -> np.ndarray:

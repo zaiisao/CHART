@@ -87,7 +87,7 @@ def extract_downbeat_timestamps(
 
 def extract_beats_from_phase_trajectory(
     phase: np.ndarray,
-    fps: float = 172.265625,
+    fps: float = 86.1328125,
     min_distance_sec: float = 0.15,
 ) -> np.ndarray:
     """Extract beat timestamps directly from a phase trajectory.

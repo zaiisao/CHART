@@ -97,7 +97,7 @@ def _save_beat_viz(
     beat_targets: Tensor,
     epoch: int,
     log_dir: str,
-    fps: float = 172.265625,
+    fps: float = 86.1328125,
 ) -> str | None:
     """Save a beat activation visualization for the first sample in the batch."""
     try:
@@ -505,7 +505,7 @@ def val_epoch_end_to_end(
     free_bits_tempo: float | None = None,
     extractor_loss_weight: float = 1.0,
     svt_loss_weight: float = 1.0,
-    fps: float = 172.265625,
+    fps: float = 86.1328125,
 ) -> tuple[float, float, float, dict[str, float], dict[str, float]]:
     """Run one validation epoch (no gradient updates).
 
@@ -909,7 +909,7 @@ def main() -> None:
 
         val_f_measure = 0.0
         if is_main and val_dataloader is not None:
-            val_fps = getattr(args, "audio_sample_rate", 44100) / getattr(args, "target_factor", 256)
+            val_fps = getattr(args, "audio_sample_rate", 22050) / getattr(args, "target_factor", 256)
             v_total, v_ext, v_svt, v_comps, v_metrics = val_epoch_end_to_end(
                 extractor_model=extractor_model,
                 extractor_backend=extractor_backend,
