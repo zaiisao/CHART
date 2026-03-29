@@ -294,8 +294,35 @@ class AudioPhaseBridgeDataset(Dataset):
                 f"Expected phase shape [T, 3] or [T, 4], got {phase_np.shape} for {phase_path}"
             )
 
-        target_len = extractor_target.shape[-1]
-        phase_np = self._fit_phase_length_np(phase_np, target_len)
+        # Align phase file with the audio crop.
+        #
+        # The phase file may be at a different fps than the extractor target
+        # (e.g., phase at 100fps, target at 172fps). We first resample the phase
+        # to the FULL song length at the target fps, then find the crop offset
+        # by matching beat positions between the cropped target and the full
+        # phase, and finally extract the aligned crop.
+        target_len = extractor_target.shape[-1]  # cropped length (e.g. 256)
+        beat_target = extractor_target[0].numpy()  # [target_len] binary beats
+
+        # Get full-song target length from audio duration
+        # audio shape: [1, num_samples] → total_target_frames = num_samples / target_factor
+        audio_samples = audio.shape[-1]
+        target_factor = getattr(self.source_dataset, 'target_factor', 256)
+        full_target_len = int(audio_samples / target_factor)
+        # For val (full audio), full_target_len ≈ target_len; for train (cropped), full_target_len = target_len
+
+        # Resample phase to full-song length at target fps
+        full_phase = self._fit_phase_length_np(phase_np, max(full_target_len, target_len))
+
+        # Find crop offset by matching beat positions
+        crop_offset = self._find_phase_crop_offset(full_phase, beat_target, target_len)
+        phase_np = full_phase[crop_offset : crop_offset + target_len]
+
+        if phase_np.shape[0] != target_len:
+            # Fallback: if offset calculation went wrong, just resample
+            phase_np = self._fit_phase_length_np(
+                np.load(phase_path).astype(np.float32), target_len
+            )
 
         structured = _phase_npy_to_structured(phase_np, self.num_meter_classes)
         prev = _build_prev_shifted(structured)
@@ -345,6 +372,59 @@ class AudioPhaseBridgeDataset(Dataset):
         raise FileNotFoundError(
             f"No phase file found for audio '{audio_path}'. Tried keys: {candidates} in {self.phases_dir}"
         )
+
+    @staticmethod
+    def _find_phase_crop_offset(
+        full_phase: np.ndarray, beat_target: np.ndarray, crop_len: int,
+    ) -> int:
+        """Find the frame offset where the phase file aligns with the beat target.
+
+        Uses the beat_phase column (column 1) of the phase file: beat positions
+        correspond to frames where beat_phase wraps near 0. Cross-correlates
+        this with the binary beat_target to find the best alignment.
+
+        Args:
+            full_phase: [T_full, C] resampled phase at target fps.
+            beat_target: [crop_len] binary beat indicators from extractor.
+            crop_len: Length of the crop window.
+
+        Returns:
+            Best offset (0-indexed) into full_phase.
+        """
+        T_full = full_phase.shape[0]
+        if T_full <= crop_len:
+            return 0
+
+        # Create a beat indicator from the phase file:
+        # beats occur where beat_phase (column 1) is close to 0 or 2*pi
+        beat_phase = full_phase[:, 1]  # [T_full]
+        # Detect wraps: phase drops from near 2*pi to near 0
+        phase_diff = np.diff(beat_phase, prepend=beat_phase[0])
+        phase_beats = (phase_diff < -np.pi).astype(np.float32)  # 1 at wrap points
+
+        # Cross-correlate to find best offset
+        best_offset = 0
+        best_score = -1.0
+        # Search in chunks for efficiency
+        search_range = T_full - crop_len + 1
+        for offset in range(0, search_range, max(1, search_range // 500)):
+            window = phase_beats[offset : offset + crop_len]
+            score = float(np.dot(window, beat_target))
+            if score > best_score:
+                best_score = score
+                best_offset = offset
+
+        # Refine around best
+        lo = max(0, best_offset - search_range // 500 - 1)
+        hi = min(search_range, best_offset + search_range // 500 + 2)
+        for offset in range(lo, hi):
+            window = phase_beats[offset : offset + crop_len]
+            score = float(np.dot(window, beat_target))
+            if score > best_score:
+                best_score = score
+                best_offset = offset
+
+        return best_offset
 
     @staticmethod
     def _fit_phase_length_np(phase_np: np.ndarray, target_len: int) -> np.ndarray:
