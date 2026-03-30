@@ -433,29 +433,24 @@ class SVTModel(nn.Module):
         self,
         prior_params: dict[str, Tensor],
         samples: dict[str, Tensor],
-        z_prev_init: dict[str, Tensor],
+        z_prev_gt: dict[str, Tensor],
         beat_targets: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Compute all prior params in parallel using shifted samples.
+        """Compute all prior params in parallel using GT z_prev.
 
-        Since the posterior is independent of z_{t-1}, all samples are
-        pre-drawn. Prior means at time t use the sample at t-1 (shifted).
-        Prior uncertainties are already pre-computed from h_prior.
+        Prior means use the GROUND TRUTH phase/tempo/meter trajectory
+        (teacher-forced), not shifted posterior samples. This anchors
+        the prior to the correct bar pointer dynamics, forcing the
+        posterior to learn meaningful phase/tempo/meter values via KL.
         """
         B, T = samples["phase"].shape
         device = samples["phase"].device
         K = self.num_meter_classes
 
-        # Build z_prev by shifting samples: z_prev[t] = sample[t-1]
-        # Frame 0 uses z_prev_init
-        init_phase = z_prev_init["phase"].squeeze(1)          # [B, 1]
-        init_log_tempo = z_prev_init["log_tempo"].squeeze(1)  # [B, 1]
-        init_meter = z_prev_init["meter_onehot"].squeeze(1)   # [B, K]
-
-        # [B, T] shifted: [init, sample[0], sample[1], ..., sample[T-2]]
-        phase_prev = torch.cat([init_phase, samples["phase"][:, :-1]], dim=1)           # [B, T]
-        log_tempo_prev = torch.cat([init_log_tempo, samples["log_tempo"][:, :-1]], dim=1)  # [B, T]
-        meter_prev = torch.cat([init_meter.unsqueeze(1), samples["meter_onehot"][:, :-1]], dim=1)  # [B, T, K]
+        # Use GT z_prev for prior means (teacher-forced)
+        phase_prev = z_prev_gt["phase"][:, :T, 0] if z_prev_gt["phase"].ndim == 3 else z_prev_gt["phase"][:, :T]  # [B, T]
+        log_tempo_prev = z_prev_gt["log_tempo"][:, :T, 0] if z_prev_gt["log_tempo"].ndim == 3 else z_prev_gt["log_tempo"][:, :T]  # [B, T]
+        meter_prev = z_prev_gt["meter_onehot"][:, :T, :]  # [B, T, K]
 
         # Phase prior: mu = (phi_{t-1} + phidot_{t-1}) mod 2pi
         tempo_prev = torch.exp(log_tempo_prev.clamp(max=10.0))
@@ -529,18 +524,19 @@ class SVTModel(nn.Module):
         temperature: float = 1.0,
         beat_targets: Tensor | None = None,
     ) -> dict[str, Tensor | dict[str, Tensor]]:
-        """Fully parallel forward pass.
+        """Algorithm 1 faithful forward pass.
 
-        Since the posterior q_phi(z_{1:T} | b_{1:T}, x_{1:T}) does NOT
-        depend on z_{t-1}, all posterior params and samples can be computed
-        in a single parallel pass. Prior means are computed by shifting
-        the samples (z_prev[t] = sample[t-1]). This is mathematically
-        equivalent to Algorithm 1's sequential loop but runs in O(1)
-        sequential steps instead of O(T).
+        Posterior params and prior uncertainties are pre-computed in parallel.
+        Sampling is SEQUENTIAL per Algorithm 1: sample z_t from posterior,
+        then use z_t as z_prev for the prior at t+1. The sequential loop
+        is lightweight (just sampling + arithmetic, no Transformers).
 
         Args:
             activations: [B, T, 2] acoustic activations.
-            z_prev_init: Dict with initial z_prev (t=0 seed).
+            z_prev_init: Dict with initial z_prev (first frame seed):
+                - phase: [B, 1, 1] or [B, T, 1]
+                - log_tempo: [B, 1, 1] or [B, T, 1]
+                - meter_onehot: [B, 1, K] or [B, T, K]
             temperature: Gumbel-Softmax temperature.
             beat_targets: [B, T] binary beat indicators.
 
@@ -549,6 +545,7 @@ class SVTModel(nn.Module):
         """
         B, T, _ = activations.shape
         device = activations.device
+        K = self.num_meter_classes
 
         if beat_targets is None:
             beat_targets = torch.zeros(B, T, device=device)
@@ -559,26 +556,109 @@ class SVTModel(nn.Module):
         # Step 2: Posterior encoder-decoder — pre-compute all params (parallel)
         posterior = self.encode_posterior(activations, beat_targets)
 
-        # Step 3: Sample ALL timesteps from posterior at once (parallel)
-        meter_soft = gumbel_softmax_sample(posterior["meter_logits"], temperature=temperature, hard=False)
-        meter_hard = gumbel_softmax_sample(posterior["meter_logits"], temperature=temperature, hard=True)
-        kappa_q = posterior["phase_kappa"]
-        phase = von_mises_sample(posterior["phase_mu"], kappa_q)
-        phase = torch.remainder(phase, TWO_PI)
-        sigma_q = posterior["tempo_sigma"]
-        log_tempo = lognormal_sample_logspace(posterior["tempo_mu"], sigma_q)
+        # Step 3: Sequential sampling per Algorithm 1
+        # Pre-extract posterior params for indexing
+        post_meter_logits = posterior["meter_logits"]   # [B, T, K]
+        post_phase_mu = posterior["phase_mu"]           # [B, T]
+        post_phase_kappa = posterior["phase_kappa"]      # [B, T]
+        post_tempo_mu = posterior["tempo_mu"]            # [B, T]
+        post_tempo_sigma = posterior["tempo_sigma"]      # [B, T]
+
+        # Initialize z_prev from first frame
+        phase_prev = z_prev_init["phase"][:, 0, 0] if z_prev_init["phase"].ndim == 3 else z_prev_init["phase"][:, 0]  # [B]
+        log_tempo_prev = z_prev_init["log_tempo"][:, 0, 0] if z_prev_init["log_tempo"].ndim == 3 else z_prev_init["log_tempo"][:, 0]  # [B]
+        meter_prev = z_prev_init["meter_onehot"][:, 0, :] if z_prev_init["meter_onehot"].ndim == 3 else z_prev_init["meter_onehot"][:, 0]  # [B, K]
+
+        # Accumulators
+        all_phase = []
+        all_log_tempo = []
+        all_meter_soft = []
+        all_meter_hard = []
+        all_prior_phase_mu = []
+        all_prior_phase_kappa = []
+        all_prior_tempo_mu = []
+        all_prior_tempo_sigma = []
+        all_prior_meter_logits = []
+
+        for t in range(T):
+            # --- Prior means from z_prev (Algorithm 1 line 16) ---
+            if t == 0:
+                prior_phase_mu_t = torch.zeros(B, device=device)
+                prior_tempo_mu_t = self.prior_tempo_mu_init.expand(B)
+            else:
+                tempo_prev_lin = torch.exp(log_tempo_prev.clamp(max=10.0))
+                prior_phase_mu_t = torch.remainder(phase_prev + tempo_prev_lin, TWO_PI)
+                prior_tempo_mu_t = log_tempo_prev
+
+            # Prior uncertainties (pre-computed)
+            prior_phase_kappa_t = prior_params["phase_kappa"][:, t]
+            prior_tempo_sigma_t = prior_params["tempo_sigma"][:, t]
+
+            # --- Sample from posterior at t (Algorithm 1 lines 17-19) ---
+            meter_soft_t = gumbel_softmax_sample(post_meter_logits[:, t, :], temperature=temperature, hard=False)
+            meter_hard_t = gumbel_softmax_sample(post_meter_logits[:, t, :], temperature=temperature, hard=True)
+            phase_t = von_mises_sample(post_phase_mu[:, t], post_phase_kappa[:, t])
+            phase_t = torch.remainder(phase_t, TWO_PI)
+            log_tempo_t = lognormal_sample_logspace(post_tempo_mu[:, t], post_tempo_sigma[:, t])
+
+            # --- Meter prior (needs boundary detection) ---
+            if t == 0:
+                prior_meter_logits_t = torch.zeros(B, K, device=device)  # uniform
+            else:
+                tempo_prev_lin = torch.exp(log_tempo_prev.clamp(max=10.0))
+                boundary = (phase_prev + tempo_prev_lin) >= TWO_PI
+                eps_t = prior_params["epsilon_ij"][:, t]  # [B, K, K]
+                diag = torch.eye(K, device=device).unsqueeze(0)
+                off_diag = eps_t * (1.0 - diag)
+                row_sum = off_diag.sum(dim=-1, keepdim=True)
+                stay = 1.0 - row_sum
+                trans = off_diag + stay * diag
+                wrap = boundary.unsqueeze(-1).unsqueeze(-1).float()
+                trans = wrap * trans + (1.0 - wrap) * diag.expand_as(trans)
+                m_prob = meter_prev + 1e-6
+                m_prob = m_prob / m_prob.sum(dim=-1, keepdim=True)
+                prior_meter_logits_t = torch.log(
+                    torch.bmm(m_prob.unsqueeze(1), trans).squeeze(1) + 1e-10
+                )
+
+            # Accumulate
+            all_phase.append(phase_t)
+            all_log_tempo.append(log_tempo_t)
+            all_meter_soft.append(meter_soft_t)
+            all_meter_hard.append(meter_hard_t)
+            all_prior_phase_mu.append(prior_phase_mu_t)
+            all_prior_phase_kappa.append(prior_phase_kappa_t)
+            all_prior_tempo_mu.append(prior_tempo_mu_t)
+            all_prior_tempo_sigma.append(prior_tempo_sigma_t)
+            all_prior_meter_logits.append(prior_meter_logits_t)
+
+            # --- Update z_prev for next step (Algorithm 1: use own sample) ---
+            phase_prev = phase_t
+            log_tempo_prev = log_tempo_t
+            meter_prev = meter_hard_t
+
+        # Stack across time
+        phase = torch.stack(all_phase, dim=1)              # [B, T]
+        log_tempo = torch.stack(all_log_tempo, dim=1)      # [B, T]
+        meter_soft = torch.stack(all_meter_soft, dim=1)    # [B, T, K]
+        meter_hard = torch.stack(all_meter_hard, dim=1)    # [B, T, K]
 
         samples = {
-            "meter_soft": meter_soft,       # [B, T, K]
-            "meter_onehot": meter_hard,     # [B, T, K]
-            "phase": phase,                 # [B, T]
-            "log_tempo": log_tempo,         # [B, T]
+            "meter_soft": meter_soft,
+            "meter_onehot": meter_hard,
+            "phase": phase,
+            "log_tempo": log_tempo,
         }
 
-        # Step 4: Compute prior params using shifted samples (parallel)
-        prior_out = self._compute_prior_parallel(prior_params, samples, z_prev_init, beat_targets)
+        prior_out = {
+            "meter_logits": torch.stack(all_prior_meter_logits, dim=1),
+            "phase_mu": torch.stack(all_prior_phase_mu, dim=1),
+            "phase_kappa": torch.stack(all_prior_phase_kappa, dim=1),
+            "tempo_mu": torch.stack(all_prior_tempo_mu, dim=1),
+            "tempo_sigma": torch.stack(all_prior_tempo_sigma, dim=1),
+        }
 
-        # Step 5: Decode ALL timesteps at once (parallel)
+        # Step 4: Decode ALL timesteps at once (parallel)
         h = h_prior
         if self.h_prior_bottleneck_dim > 0:
             h = self.h_prior_bottleneck_proj(h)

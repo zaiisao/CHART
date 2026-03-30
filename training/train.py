@@ -394,14 +394,14 @@ def train_epoch_end_to_end(
         T_act = activations.shape[1]
         beat_targets_cropped = _center_crop_seq_dim(beat_targets.unsqueeze(-1), T_act).squeeze(-1)
 
-        # Ground-truth z_prev initial frame (seed for autoregressive rollout)
+        # Initial z_prev seed (first frame of GT)
         z_prev_init = {
             "phase": _center_crop_seq_dim(batch["phase_prev"].to(device), T_act)[:, :1, :],
             "log_tempo": _center_crop_seq_dim(batch["log_tempo_prev"].to(device), T_act)[:, :1, :],
             "meter_onehot": _center_crop_seq_dim(batch["meter_onehot_prev"].to(device), T_act)[:, :1, :],
         }
 
-        # Algorithm 1: true sequential autoregressive forward
+        # Algorithm 1: sequential sampling, prior uses own samples
         out = svt_model(activations, z_prev_init, temperature=temperature,
                         beat_targets=beat_targets_cropped)
         svt_total, components = compute_elbo_loss(
@@ -570,7 +570,7 @@ def val_epoch_end_to_end(
         activations = activations[:, :T_act, :]
         beat_targets_cropped = beat_targets_aligned[:, :T_act]
 
-        # z_prev_init: first frame of the aligned region
+        # Initial z_prev seed (first frame)
         z_prev_init = {
             "phase": phase_prev_aligned[:, :1, :],
             "log_tempo": log_tempo_prev_aligned[:, :1, :],
