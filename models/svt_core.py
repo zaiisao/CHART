@@ -229,8 +229,9 @@ class SVTModel(nn.Module):
             self.prior_phase_ffn(h_prior).squeeze(-1)
         )
 
-        # Tempo: sigma in [0.01, 0.3] — moderate random walk
-        tempo_sigma = 0.01 + 0.29 * torch.sigmoid(
+        # Tempo: sigma in [0.001, 0.05] — tight random walk (learned Gaussian variance limit)
+        # All prior models limit tempo change rate. sigma=0.05 allows ~5% change/frame max.
+        tempo_sigma = 0.001 + 0.049 * torch.sigmoid(
             self.prior_tempo_ffn(h_prior).squeeze(-1)
         )
 
@@ -433,6 +434,7 @@ class SVTModel(nn.Module):
         prior_params: dict[str, Tensor],
         samples: dict[str, Tensor],
         z_prev_init: dict[str, Tensor],
+        beat_targets: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Compute all prior params in parallel using shifted samples.
 
@@ -469,14 +471,23 @@ class SVTModel(nn.Module):
         tempo_mu = log_tempo_prev.clone()                                     # [B, T]
         tempo_mu[:, 0] = self.prior_tempo_mu_init                             # learnable init
 
-        # Tempo sigma: continuous random walk (not boundary-gated)
-        # Per the paper: continuous tempo allows smooth gradient flow
-        # for variational training, unlike discrete HMM constraints.
-        tempo_sigma = prior_params["tempo_sigma"]  # [B, T]
+        # Tempo sigma: beat-gated (tempo can change at beats, locked between beats)
+        # Uses GT beat_targets during training to gate tempo changes.
+        # At inference (beat_targets=None), falls back to learned sigma everywhere.
+        _TEMPO_BETWEEN_SIGMA = 0.03  # moderate lock between beats
+        if beat_targets is not None and beat_targets.shape[1] == T:
+            is_beat = beat_targets > 0.5  # [B, T] bool
+            tempo_sigma = torch.where(
+                is_beat,
+                prior_params["tempo_sigma"],                                        # learned at beats
+                torch.full_like(prior_params["tempo_sigma"], _TEMPO_BETWEEN_SIGMA),  # locked between beats
+            )
+        else:
+            tempo_sigma = prior_params["tempo_sigma"]  # no gating at inference
 
-        # Meter prior: boundary-gated transition (vectorized)
+        # Meter boundary detection (phase-based for now)
         boundary = (phase_prev + tempo_prev) >= TWO_PI  # [B, T]
-        boundary[:, 0] = False  # no boundary at t=0
+        boundary[:, 0] = False
 
         eps_ij = prior_params["epsilon_ij"]  # [B, T, K, K]
         diag_mask = torch.eye(K, device=device).unsqueeze(0).unsqueeze(0)  # [1, 1, K, K]
@@ -565,7 +576,7 @@ class SVTModel(nn.Module):
         }
 
         # Step 4: Compute prior params using shifted samples (parallel)
-        prior_out = self._compute_prior_parallel(prior_params, samples, z_prev_init)
+        prior_out = self._compute_prior_parallel(prior_params, samples, z_prev_init, beat_targets)
 
         # Step 5: Decode ALL timesteps at once (parallel)
         h = h_prior
