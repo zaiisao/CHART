@@ -118,7 +118,8 @@ class SVTModel(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
         # Learnable initial tempo mean (for t=1)
-        self.prior_tempo_mu_init = nn.Parameter(torch.tensor(0.0))
+        # Initialize to ~120 BPM at 86fps: log(2π * 120 / (60 * 86)) ≈ -1.92
+        self.prior_tempo_mu_init = nn.Parameter(torch.tensor(-1.9))
 
         # ================================================================
         # POSTERIOR: Encoder-Decoder Transformer
@@ -223,13 +224,13 @@ class SVTModel(nn.Module):
             self.prior_meter_ffn(h_prior).view(B, T, K, K)
         )
 
-        # Phase: kappa in [1, 200] — concentrated prior around predicted phase
-        phase_kappa = 1.0 + 199.0 * torch.sigmoid(
+        # Phase: kappa in [10, 300] — concentrated but not frozen
+        phase_kappa = 10.0 + 290.0 * torch.sigmoid(
             self.prior_phase_ffn(h_prior).squeeze(-1)
         )
 
-        # Tempo: sigma in [0.01, 0.5] — bounded random walk variance
-        tempo_sigma = 0.01 + 0.49 * torch.sigmoid(
+        # Tempo: sigma in [0.01, 0.3] — moderate random walk
+        tempo_sigma = 0.01 + 0.29 * torch.sigmoid(
             self.prior_tempo_ffn(h_prior).squeeze(-1)
         )
 
@@ -357,7 +358,8 @@ class SVTModel(nn.Module):
             "phase_mu": math.pi * torch.tanh(self.post_phase_mu_ffn(h_post).squeeze(-1)),  # [B, T]
             "phase_kappa": 0.1 + 299.9 * torch.sigmoid(                                 # [B, T] in [0.1, 300]
                 self.post_phase_kappa_ffn(h_post).squeeze(-1)),
-            "tempo_mu": self.post_tempo_mu_ffn(h_post).squeeze(-1),                   # [B, T]
+            "tempo_mu": -2.1 + 0.9 * torch.tanh(                                      # [B, T] in [-3.0, -1.2]
+                self.post_tempo_mu_ffn(h_post).squeeze(-1)),                           # ~40-250 BPM at 86fps (madmom range)
             "tempo_sigma": 0.01 + 1.99 * torch.sigmoid(                               # [B, T] in [0.01, 2.0]
                 self.post_tempo_sigma_ffn(h_post).squeeze(-1)),
         }
@@ -467,7 +469,9 @@ class SVTModel(nn.Module):
         tempo_mu = log_tempo_prev.clone()                                     # [B, T]
         tempo_mu[:, 0] = self.prior_tempo_mu_init                             # learnable init
 
-        # Tempo sigma: pre-computed
+        # Tempo sigma: continuous random walk (not boundary-gated)
+        # Per the paper: continuous tempo allows smooth gradient flow
+        # for variational training, unlike discrete HMM constraints.
         tempo_sigma = prior_params["tempo_sigma"]  # [B, T]
 
         # Meter prior: boundary-gated transition (vectorized)

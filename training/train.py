@@ -98,6 +98,7 @@ def _save_beat_viz(
     epoch: int,
     log_dir: str,
     fps: float = 86.1328125,
+    gt_phase: np.ndarray | None = None,
 ) -> str | None:
     """Save a beat activation visualization for the first sample in the batch."""
     try:
@@ -112,33 +113,56 @@ def _save_beat_viz(
     gt = beat_targets[0].detach().cpu().numpy()
     phase = out["samples"]["phase"][0].detach().cpu().numpy()
     log_tempo = out["samples"]["log_tempo"][0].detach().cpu().numpy()
+    T = len(probs)
 
     beat_frames = np.where(gt > 0.5)[0]
 
+    # Identify GT downbeats from gt_phase.
+    # gt_phase here is extractor_target channel 1 (downbeat indicators from WaveBeat).
+    db_frames = []
+    if gt_phase is not None:
+        db_frames = list(np.where(gt_phase[:T] > 0.5)[0])
+
+    # Detect model's predicted downbeats from phase wraps
+    phase_wrapped = phase % (2 * np.pi)
+    phase_diff = np.diff(phase_wrapped, prepend=phase_wrapped[0])
+    model_db_frames = np.where(phase_diff < -np.pi)[0]
+
     fig, axes = plt.subplots(4, 1, figsize=(18, 10), sharex=True)
 
-    # Beat probability
+    # Beat probability with GT beats (green) and GT downbeats (red)
     axes[0].plot(probs, "b-", lw=0.8, label="P(beat)")
-    axes[0].axhline(0.5, color="r", ls="--", alpha=0.5)
+    axes[0].axhline(0.5, color="gray", ls="--", alpha=0.3)
     for bf in beat_frames:
-        axes[0].axvline(bf, color="g", alpha=0.3, lw=1)
+        if bf in db_frames:
+            axes[0].axvline(bf, color="r", alpha=0.5, lw=2)
+        else:
+            axes[0].axvline(bf, color="g", alpha=0.3, lw=1)
     axes[0].set_ylim(-0.05, 1.05)
     axes[0].set_ylabel("Prob")
-    axes[0].set_title(f"Epoch {epoch}: Beat probability (blue) vs GT beats (green)")
+    axes[0].set_title(f"Epoch {epoch}: P(beat) | GT beats (green) | GT downbeats (red)")
     axes[0].legend(loc="upper right")
 
-    # GT
+    # GT beats and downbeats
     if len(beat_frames) > 0:
-        axes[1].stem(beat_frames, gt[gt > 0.5], linefmt="g-", markerfmt="go", basefmt=" ")
+        regular = [bf for bf in beat_frames if bf not in db_frames]
+        if regular:
+            axes[1].stem(regular, [1.0]*len(regular), linefmt="g-", markerfmt="go", basefmt=" ", label="beat")
+        if db_frames:
+            axes[1].stem(db_frames, [1.0]*len(db_frames), linefmt="r-", markerfmt="rs", basefmt=" ", label="downbeat")
+        axes[1].legend()
     axes[1].set_ylabel("GT")
-    axes[1].set_title(f"Ground truth ({len(beat_frames)} beats)")
+    axes[1].set_title(f"Ground truth ({len(beat_frames)} beats, {len(db_frames)} downbeats)")
 
-    # Phase
-    axes[2].plot(phase, "purple", lw=0.5)
+    # Phase with model downbeat markers
+    axes[2].plot(phase_wrapped, "purple", lw=0.5, label="phase mod 2π")
     axes[2].axhline(0, color="k", ls=":", alpha=0.3)
     axes[2].axhline(2 * np.pi, color="k", ls=":", alpha=0.3)
+    for mdb in model_db_frames:
+        axes[2].axvline(mdb, color="r", alpha=0.3, lw=1)
     axes[2].set_ylabel("Phase (rad)")
-    axes[2].set_title("Sampled phase trajectory")
+    axes[2].set_title(f"Phase trajectory | model downbeats (red lines, {len(model_db_frames)} detected)")
+    axes[2].legend()
 
     # Tempo
     tempo = np.exp(np.clip(log_tempo, -10, 10))
@@ -956,8 +980,17 @@ def main() -> None:
                         "meter_onehot": _center_crop_seq_dim(viz_batch["meter_onehot_prev"].to(device), viz_T)[:, :1, :],
                     }
                     viz_out = svt_model(viz_act, viz_z_init, temperature=temp, beat_targets=viz_bt)
+                    # Get GT downbeats from extractor_target channel 1
+                    viz_gt_db = None
+                    if "extractor_target" in viz_batch:
+                        ext_tgt = viz_batch["extractor_target"].to(device)
+                        if ext_tgt.shape[1] >= 2:
+                            viz_gt_db = _center_crop_seq_dim(
+                                ext_tgt[:, 1:2, :].permute(0, 2, 1), viz_T
+                            )[0, :, 0].cpu().numpy()
                 viz_dir = os.path.join(ckpt_dir, "viz")
-                viz_path = _save_beat_viz(viz_out, viz_bt, epoch, viz_dir, fps=val_fps)
+                viz_path = _save_beat_viz(viz_out, viz_bt, epoch, viz_dir, fps=val_fps,
+                                          gt_phase=viz_gt_db)
                 if viz_path:
                     print(f"  [Viz] saved {viz_path}")
                     if use_wandb:
