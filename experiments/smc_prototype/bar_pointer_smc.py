@@ -261,14 +261,22 @@ class BarPointerFIVO(nn.Module):
             needs_resample = ess < ess_frac * num_particles                  # [batch] bool
 
             if needs_resample.any():
+                # Different sequences in the batch cross the ESS threshold at different frames, so we
+                # cannot just overwrite the whole batch's particles -- we compute the resampled version
+                # for EVERY sequence, then use `mask` (needs_resample broadcast to particle-dim) to keep
+                # the resampled particles only where that sequence actually needed a resample this frame,
+                # and leave the other sequences' particles untouched via torch.where.
                 ancestor_index = systematic_resample_batched(weight.detach())    # [batch, K]
                 resampled_meter = _gather_rows(meter, ancestor_index)
                 resampled_log_tempo = _gather_rows(log_tempo, ancestor_index)
                 resampled_phase = _gather_rows(phase, ancestor_index)
-                mask = needs_resample.unsqueeze(-1)
+                mask = needs_resample.unsqueeze(-1)   # [batch, 1], broadcasts over the particle dim K
                 meter = torch.where(mask, resampled_meter, meter)
                 log_tempo = torch.where(mask, resampled_log_tempo, log_tempo)
                 phase = torch.where(mask, resampled_phase, phase)
+                # After a resample, each surviving particle's incremental weight resets to uniform
+                # (equal to 1/K in probability space, i.e. log-weight 0) since its ancestor was chosen
+                # proportional to weight already -- the old log_weight has already been "spent".
                 log_weight = torch.where(mask, torch.zeros_like(log_weight), log_weight)
                 resample_count = resample_count + needs_resample.float()
 
@@ -317,6 +325,17 @@ class BarPointerFIVO(nn.Module):
         log_likelihood = self.emission.log_likelihood(phase, observed_activations[:, 0])
         log_weight = log_likelihood - torch.logsumexp(log_likelihood, dim=-1, keepdim=True)
 
+        # `phase_history`/`weight_history` store every particle's phase/weight at every frame, so we can
+        # look back afterward and reconstruct a single particle's full trajectory even though particles
+        # get overwritten by resampling as we go.
+        #
+        # `ancestor_history[t, k]` answers: "at frame t, which particle SLOT (0..K-1) does particle k's
+        # value actually come from?" Initially each particle is its own ancestor (identity mapping). Each
+        # time we resample at frame t, particle k's NEW value came from slot ancestor_index[k] -- so we
+        # rewrite every earlier column's history by re-indexing it through ancestor_index, meaning
+        # "whichever particle slot k's current lineage traces back to at an earlier frame." This is what
+        # lets us later walk backward from the single best final particle to its complete, correct phase
+        # trajectory, even though intermediate slots were repeatedly overwritten by different ancestors.
         phase_history = torch.zeros(num_frames, num_particles, device=device)
         phase_history[0] = phase[0]
         weight_history = torch.zeros(num_frames, num_particles, device=device)
@@ -331,6 +350,8 @@ class BarPointerFIVO(nn.Module):
                 meter = _gather_rows(meter, ancestor_index)
                 log_tempo = _gather_rows(log_tempo, ancestor_index)
                 phase = _gather_rows(phase, ancestor_index)
+                # Re-index every frame recorded SO FAR (columns 0..t-1) through this frame's ancestor
+                # mapping, so the genealogy stays consistent with the particles we just kept.
                 ancestor_history[:t] = ancestor_history[:t].gather(1, ancestor_index[0].unsqueeze(0).expand(t, -1))
                 log_weight = torch.zeros_like(log_weight)
 
@@ -344,6 +365,10 @@ class BarPointerFIVO(nn.Module):
             ancestor_history[t] = torch.arange(num_particles, device=device)
 
         if readout == "map":
+            # Trace the single highest-final-weight particle's genealogy back through every frame (its
+            # slot index at each earlier frame, per the bookkeeping above), then gather that particle's
+            # actual phase value at each frame -- this reconstructs ONE coherent trajectory end-to-end,
+            # as opposed to naively taking argmax-per-frame, which could jump between unrelated particles.
             final_weight = weight_history[-1]
             best = torch.argmax(final_weight)
             trajectory_index = ancestor_history[:, best]        # [T] -- genealogy of the MAP particle
