@@ -107,6 +107,13 @@ def kvae_elbo(model: KalmanVAEBarPointer, features_time_major: torch.Tensor, sam
 
     features_time_major: [num_frames, batch, feature_dim] (the SSM's filter/smoother are time-major).
     Returns (elbo_to_maximize, smoothed_z_sample, info_dict).
+
+    Weight defaults (0.3 / 1.0 / 1.0) are inherited UNCHANGED from the historical M1 run's kvae_run.py
+    (its kvae_elbo(..., recon_w=0.3, reg_w=1.0, kal_w=1.0)) that first reached the 0.878/0.833 target this
+    module reproduces -- kept as-is for a faithful reproduction rather than re-tuned. reconstruction_weight
+    is down-weighted below 1.0 because the reconstruction term (ln p(h|a) over all feature_dim=512
+    dimensions, summed) is numerically much larger in magnitude than the Kalman terms (which sum over only
+    a_dim/z_dim=8 dimensions), so 0.3 keeps it from dominating the loss purely by dimensionality.
     """
     num_frames, batch_size, feature_dim = features_time_major.shape
     a_distribution = model.encoder(features_time_major.reshape(-1, feature_dim))

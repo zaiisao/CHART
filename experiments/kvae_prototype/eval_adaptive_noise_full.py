@@ -45,11 +45,12 @@ def continuity_or_nan(reference_beats: np.ndarray, estimated_beats: np.ndarray) 
 @torch.no_grad()
 def run_adaptive_deploy(model, song_specs, device, frames_per_second, tolerance_seconds, batch_chunk_size=32):
     """song_specs: [(tid, features [T,feature_dim], reference_beats, reference_downbeats_or_None), ...]
-    (downbeats optional -- SMC has none). Returns per-song rows: f_measure, cmlc/cmlt/amlc/amlt,
-    downbeat_f (nan if no downbeat annotation given), mean_scale_Q, mean_scale_R, scale_Q_entropy_proxy
-    (std/mean, since scale is a scalar not a K-way distribution -- entropy doesn't directly apply the way
-    it did for the K=5 mixture; per-song coefficient of variation is the analogous "how much does it move"
-    summary)."""
+    (downbeats optional -- SMC has none). Returns a list of per-song dicts with keys: f_measure,
+    downbeat_f (nan if no downbeat annotation given), CMLc/CMLt/AMLc/AMLt, and mean_scale_Q/std_scale_Q/
+    mean_scale_R/std_scale_R -- the noise head's per-song scale statistics (std/mean, i.e. the coefficient
+    of variation computed later by print_scale_variation_report, is the "how much does it move" summary;
+    scale is a single scalar per frame here, not a K-way categorical distribution like the K=5 mixture
+    weights, so an entropy measure doesn't apply the way it did for Task B's mixture-collapse check)."""
     model.eval()
     num_songs = len(song_specs)
     rows = []

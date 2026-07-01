@@ -63,7 +63,9 @@ def main():
     noise_head = ConstantOneNoiseHead(a_dim=model.a_dim).to(device)
 
     val_songs = load_songs("cache/acts/bt_val_rich", 8, seed=2)
-    crop = 300
+    crop = 300  # a few hundred frames (~3.5s) is enough to exercise the full recursion (init + steady-state
+               # + a Kalman gain that has converged) without the O(T) Python loop taking long; not tied to
+               # any training convention -- this script only ever runs the filter in eval/no_grad mode.
     features = torch.stack([s.features[:crop] for s in val_songs]).to(device)   # [batch, crop, feature_dim]
     features_time_major = features.transpose(0, 1).contiguous()                 # [crop, batch, feature_dim]
     print(f"[correctness_gate] testing on {len(val_songs)} real val songs, crop={crop} frames", flush=True)

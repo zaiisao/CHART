@@ -38,44 +38,55 @@ class RawSong:
 
 
 def _parse_ballroom(annot_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Ballroom .beats format: "time_sec beat_index_in_bar" per line (space- or tab-separated;
+    beat_index_in_bar == 1 marks a downbeat, see module docstring's format table)."""
     beat_times, downbeat_times = [], []
     for line in open(annot_path):
         line = line.strip("\n").replace("\t", " ")
-        parts = [p for p in line.split(" ") if p]
-        if len(parts) < 2:
+        fields = [field for field in line.split(" ") if field]  # drop empty strings from repeated spaces
+        if len(fields) < 2:
             continue
-        time_sec, beat = float(parts[0]), int(float(parts[1]))
+        time_sec, beat_index_in_bar = float(fields[0]), int(float(fields[1]))
         beat_times.append(time_sec)
-        if beat == 1:
+        if beat_index_in_bar == 1:
             downbeat_times.append(time_sec)
     return np.array(beat_times), np.array(downbeat_times)
 
 
 def _parse_beatles_or_hains(annot_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Beatles/hains .txt format: "time_sec beat_index_in_bar" per line (same convention as ballroom,
+    just double-space- or single-space-separated depending on the file -- both normalized to single-space
+    here before splitting)."""
     beat_times, downbeat_times = [], []
     for line in open(annot_path):
         line = line.strip("\n").replace("\t", " ")
-        parts = [p for p in line.split(" ") if p]
-        if len(parts) < 2:
+        fields = [field for field in line.split(" ") if field]  # drop empty strings from repeated spaces
+        if len(fields) < 2:
             continue
-        time_sec, beat = float(parts[0]), int(float(parts[1]))
+        time_sec, beat_index_in_bar = float(fields[0]), int(float(fields[1]))
         beat_times.append(time_sec)
-        if beat == 1:
+        if beat_index_in_bar == 1:
             downbeat_times.append(time_sec)
     return np.array(beat_times), np.array(downbeat_times)
 
 
 def _parse_rwc_popular(annot_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """RWC-Popular .BEAT.TXT format: three tab-separated fields per line, "time_centiseconds \\t
+    time_centiseconds_repeated \\t beat_marker" (the second field duplicates the first in this dataset's
+    files; only the first and third are used here). beat_marker == 384 specifically (not just any nonzero
+    value) marks a downbeat -- this magic number is RWC's own encoding convention, not derived from
+    anything in this codebase (see module docstring's format table for provenance)."""
     beat_times, downbeat_times = [], []
     for line in open(annot_path):
         line = line.strip("\n")
-        parts = line.split("\t")
-        if len(parts) < 3:
+        fields = line.split("\t")
+        if len(fields) < 3:
             continue
-        time_sec = int(parts[0]) / 100.0
-        beat = 1 if int(parts[2]) == 384 else 2
+        time_centiseconds_field, _duplicate_time_field, beat_marker_field = fields[0], fields[1], fields[2]
+        time_sec = int(time_centiseconds_field) / 100.0
+        is_downbeat = int(beat_marker_field) == 384
         beat_times.append(time_sec)
-        if beat == 1:
+        if is_downbeat:
             downbeat_times.append(time_sec)
     return np.array(beat_times), np.array(downbeat_times)
 

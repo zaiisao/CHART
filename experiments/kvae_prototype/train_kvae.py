@@ -194,6 +194,12 @@ def main():
     parser.add_argument("--Q_reg", type=float, default=1e-3, help="StateSpaceModel process-noise floor "
                         "(vendored default 1e-3); raise to loosen the dynamics prior's grip on z_t for "
                         "the Q_reg generalization sweep (rubato/tempo-drift robustness on OOD data).")
+    # These three defaults (5.0 / 8.0 / 20.0) are inherited UNCHANGED from the historical M1 run
+    # (kvae_run.py's own --beat_w default and its `pw = torch.tensor([8.0, 20.0], ...)`) that first
+    # reached the 0.878/0.833 target this prototype reproduces -- kept as-is for a faithful reproduction
+    # rather than re-tuned. downbeat_pos_weight > beat_pos_weight because downbeats are rarer positives
+    # (1 in `beats_per_bar` frames vs 1 in ~1 for beats), so they need a larger BCE up-weight to avoid
+    # being swamped by the "no downbeat" majority class.
     parser.add_argument("--beat_loss_weight", type=float, default=5.0)
     parser.add_argument("--beat_pos_weight", type=float, default=8.0)
     parser.add_argument("--downbeat_pos_weight", type=float, default=20.0)

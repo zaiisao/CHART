@@ -127,6 +127,7 @@ def main():
     parser.add_argument("--z_dim", type=int, default=8)
     parser.add_argument("--K", type=int, default=5)
     parser.add_argument("--Q_reg", type=float, default=1e-3)
+    # See train_kvae.py's identical defaults for provenance: inherited unchanged from the historical M1 run.
     parser.add_argument("--beat_loss_weight", type=float, default=5.0)
     parser.add_argument("--beat_pos_weight", type=float, default=8.0)
     parser.add_argument("--downbeat_pos_weight", type=float, default=20.0)
