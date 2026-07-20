@@ -1,6 +1,13 @@
-"""R2 -- the Böck 2016 DBN with LEARNED factors, trained by the exact forward algorithm.
+"""CRF BASELINE (formerly "R2") -- the Böck 2016 DBN with factors learned DISCRIMINATIVELY.
 
-The ladder rule made literal: R2 changes ONLY how the factors are produced. Deployment is
+NOT A RUNG. The objective below is a supervised CRF conditional likelihood p(z|x) on the
+annotated path -- a discriminative structured-prediction objective, off-program for a ladder of
+GENERATIVE latent-variable models. The rung that learns the same factor on-program is
+rungs/r2_em_dbn.py (unsupervised EM on the exact marginal p(x)). This module is kept as the
+discriminative comparison point: generative lambda ~40 vs discriminative lambda ~99 vs hand-set
+100 is a finding about the model, and it needs both estimators to state.
+
+The ladder rule made literal: this arm changes ONLY how the factors are produced. Deployment is
 DBN2016 itself, constructed with the learned transition_lambda (see make_rung()) -- same state
 space, same engine, same read-out, so any R1-vs-R2 difference is attributable to the factors.
 
@@ -34,7 +41,7 @@ from torch import nn
 from rungs.r1_2016_dbn import DBN2016
 
 
-class R2LearnedFactors(nn.Module):
+class CRFLearnedFactors(nn.Module):
     """Training-side owner of the learned factors. Deployment = make_rung() -> a plain DBN2016."""
 
     def __init__(self, fps: float, beats_per_bar=(3, 4), init_transition_lambda: float = 100.0,

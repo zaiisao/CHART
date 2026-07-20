@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mir_eval                                          # noqa: E402
 from rungs.r1_2016_dbn import DBN2016                    # noqa: E402
-from rungs.r2_learned_dbn import R2LearnedFactors        # noqa: E402
+from crf_baseline import CRFLearnedFactors        # noqa: E402
 import final_eval                                        # noqa: E402
 from train_bt import FPS, BT_SHIPPED_DECODE, load_songs, sample_crop  # noqa: E402
 
@@ -30,7 +30,7 @@ EPOCHS = 8
 def main():
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
-    r2 = R2LearnedFactors(fps=FPS, device=DEVICE,
+    r2 = CRFLearnedFactors(fps=FPS, device=DEVICE,
                           observation_lambda=BT_SHIPPED_DECODE["observation_lambda"])
     train_entries, val_entries, _ = load_songs(r2)
     print(f"train {len(train_entries)} | val {len(val_entries)}", flush=True)

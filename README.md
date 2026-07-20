@@ -15,9 +15,13 @@ experiments/.)
 |------|-------|---------|--------|
 | R0 | madmom's bar-pointer DBN, exactly as Beat This / Beat Transformer use it | hand-set | done |
 | R1 | the same model on OUR engine (torch, differentiable) | hand-set | done, **certified ≡ R0** |
-| R2 | same, but the factors are learned by maximizing the exact forward log-likelihood | learned scalars/tables | next |
-| R3 | transitions conditioned on audio per frame | learned, audio-conditioned | — |
+| R2 | same, but transition_lambda is learned by UNSUPERVISED exact EM (Baum-Welch) on the marginal likelihood — no annotations | learned scalar, generative MLE | done (`rungs/r2_em_dbn.py`) |
+| R3 | transitions conditioned on audio per frame — NOTE: this makes the model CONDITIONAL, p(z\|x), an input-output HMM, not a generative DBN; it previews R5's conditional prior | learned, audio-conditioned | prototype (`rungs/r3_conditioned_dbn.py`) |
 | R4 | neural emission + transition (Neural HMM) | learned networks | — |
+
+Not a rung: `experiments/bt_e2e/crf_baseline.py` learns the same transition_lambda by a SUPERVISED
+discriminative CRF objective p(z|x) on annotated paths — off-program for a generative ladder, kept
+as the comparison point (generative λ≈40 vs discriminative λ≈99 vs hand-set 100).
 
 ## Layout
 

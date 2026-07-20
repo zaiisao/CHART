@@ -9,7 +9,7 @@ ReduceLROnPlateau) and epochs. The ONLY difference is the loss/decode pair:
   vanilla : their BCE loss (targets widened twice by maximum_filter1d(size=3)*0.5, summed over
             the 2 channels; tempo-head loss dropped from BOTH arms) ->
             decode with madmom-as-BT-ships-it (obs_lambda=6, num_tempi=None, threshold=0.2)
-  r2      : CRF NLL through the exact structured forward (rungs/r2_learned_dbn.py); learns the
+  r2      : CRF NLL through the exact structured forward (experiments/bt_e2e/crf_baseline.py); learns the
             frontend AND transition_lambda end-to-end ->
             decode with the SAME shipped params but the LEARNED transition_lambda
 
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "external" / "beat_transformer" / "code"))
 
 from data.songs import iter_songs                       # noqa: E402
 from rungs.r1_2016_dbn import DBN2016                   # noqa: E402
-from rungs.r2_learned_dbn import R2LearnedFactors       # noqa: E402
+from crf_baseline import CRFLearnedFactors       # noqa: E402
 from DilatedTransformer import Demixed_DilatedTransformerModel  # noqa: E402
 from optimizer import Lookahead                         # noqa: E402
 
@@ -45,7 +45,7 @@ MAX_CROP_FRAMES = 700                                    # ~16 s
 EVAL_FOLD = 0
 
 
-def load_songs(r2_probe: R2LearnedFactors):
+def load_songs(r2_probe: CRFLearnedFactors):
     """(train, val) lists of dicts with demixed mel path + frame annotations. Both arms use the
     SAME eligibility filter: demix cache exists, meter in {3,4}, whole-song path representable."""
     train, val, skipped = [], [], 0
@@ -111,6 +111,40 @@ def widened_targets(beat_frames, is_downbeat_mask, num_frames):
     return target
 
 
+
+TOLERANCE = 1
+
+
+def smooth_beat_frames(beat_times, tol=TOLERANCE):
+    """Smoothest-in-tolerance quantization: integer frames f_i with |f_i - round(t_i*FPS)| <= tol
+    minimizing sum |interval_i - interval_{i-1}| (DP over per-beat offsets)."""
+    base = np.round(beat_times * FPS).astype(np.int64)
+    offsets = list(range(-tol, tol + 1))
+    states = {(d, None): (0.0, None) for d in offsets}   # (offset, prev interval) -> (cost, back)
+    back_tables = []
+    for i in range(1, len(base)):
+        gap = int(base[i] - base[i - 1])
+        new_states = {}
+        for (d_prev, k_prev), (cost, _) in states.items():
+            for d_next in offsets:
+                interval = gap + d_next - d_prev
+                if interval < 2:
+                    continue
+                step = cost + (abs(interval - k_prev) if k_prev is not None else 0.0)
+                key = (d_next, interval)
+                if key not in new_states or step < new_states[key][0]:
+                    new_states[key] = (step, (d_prev, k_prev))
+        if not new_states:                                # pathological; give up on smoothing
+            return base
+        states = new_states
+        back_tables.append({k: v[1] for k, v in states.items()})
+    best_key = min(states, key=lambda k: states[k][0])
+    chosen = [best_key]
+    for table in reversed(back_tables):
+        chosen.append(table[chosen[-1]])
+    chosen.reverse()
+    return base + np.array([c[0] for c in chosen], dtype=np.int64)
+
 @torch.no_grad()
 def evaluate(model, entries, device, transition_lambda, max_songs=None):
     """Full-song activations -> DBN2016 with BT's shipped decode + the given lambda -> beat F."""
@@ -143,6 +177,9 @@ def main():
     parser.add_argument("--eval-every", type=int, default=2)
     parser.add_argument("--eval-songs", type=int, default=60)
     parser.add_argument("--init-from", default=None, help="checkpoint to resume the model from")
+    parser.add_argument("--smooth", action="store_true",
+                        help="r2 arm: jitter-free (smoothest-in-tolerance) target path -- the\n"
+                             "fix that recovers lambda~98 (see RESULTS.md)")
     args = parser.parse_args()
     device = args.device
     torch.manual_seed(args.seed)
@@ -150,9 +187,16 @@ def main():
 
     # observation_lambda=6 == the deployment decode (BT shipped); a mismatch co-adapts the
     # learned factors to the wrong observation world (measured, see RESULTS.md).
-    r2 = R2LearnedFactors(fps=FPS, device=device,
+    r2 = CRFLearnedFactors(fps=FPS, device=device,
                           observation_lambda=BT_SHIPPED_DECODE["observation_lambda"])
     train_entries, val_entries, skipped = load_songs(r2)
+    if args.arm == "r2" and args.smooth:
+        for e in train_entries + val_entries:
+            sm = smooth_beat_frames(e["beat_times"])
+            keep = len(e["beat_frames"])
+            if len(sm) >= keep:
+                e["beat_frames"] = sm[len(sm) - keep:]
+        print("[r2] using SMOOTH (jitter-free) target paths", flush=True)
     print(f"[{args.arm}] train {len(train_entries)} | val {len(val_entries)} | "
           f"skipped {skipped} (no cache / meter / grid)", flush=True)
 

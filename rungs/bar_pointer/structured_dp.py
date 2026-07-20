@@ -91,6 +91,14 @@ class StructuredBarPointerDP:
         log_probabilities = torch.log(torch.from_numpy(probabilities).to(self.dtype))
         return log_probabilities.to(self.device)                  # p == 0 -> -inf, as intended
 
+    @staticmethod
+    def _kernel_at(log_tempo_transition, frame):
+        """The tempo kernel governing the boundary mix INTO `frame`. A 2-D [V, V] kernel is fixed
+        (R1/R2); a 3-D [num_frames, V, V] kernel is per-frame audio-conditioned (R3) -- indexed at
+        frame-1, the boundary being crossed. The 2-D path is byte-identical to before (R1 cert)."""
+        return log_tempo_transition[frame - 1] if log_tempo_transition.dim() == 3 \
+            else log_tempo_transition
+
     def _advance_one_frame(self, log_scores, log_tempo_transition, combine_over_source_tempi):
         """One transition step, WITHOUT the emission.
 
@@ -133,7 +141,7 @@ class StructuredBarPointerDP:
         log_scores = log_initial_distribution + self._emission_row(log_emission, 0, state_to_class)
         for frame in range(1, log_emission.shape[0]):
             log_scores, _ = self._advance_one_frame(
-                log_scores, log_tempo_transition,
+                log_scores, self._kernel_at(log_tempo_transition, frame),
                 lambda scores: (torch.logsumexp(scores, dim=1), None))
             log_scores = log_scores + self._emission_row(log_emission, frame, state_to_class)
         return torch.logsumexp(log_scores, dim=0)
@@ -167,7 +175,8 @@ class StructuredBarPointerDP:
                                       dtype=torch.long, device=self.device)
         for frame in range(1, num_frames):
             log_best_score, source_tempo_index = self._advance_one_frame(
-                log_best_score, log_tempo_transition, lambda scores: torch.max(scores, dim=1))
+                log_best_score, self._kernel_at(log_tempo_transition, frame),
+                lambda scores: torch.max(scores, dim=1))
             log_best_score = log_best_score + self._emission_row(log_emission, frame,
                                                                  state_to_class)
             # For each first state, which last-state of the previous beat did the argmax pick?

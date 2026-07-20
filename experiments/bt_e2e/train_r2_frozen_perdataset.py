@@ -20,7 +20,7 @@ import mir_eval
 from train_bt import FPS, BT_SHIPPED_DECODE, load_songs, sample_crop
 from train_r2_frozen_smooth import smooth_beat_frames, jitter_rate
 from rungs.r1_2016_dbn import DBN2016
-from rungs.r2_learned_dbn import R2LearnedFactors
+from crf_baseline import CRFLearnedFactors
 
 DEVICE = "cuda:0"
 final_eval.DEVICE = DEVICE
@@ -29,7 +29,7 @@ EPOCHS = 10
 
 
 def learn_lambda(entries, acts, rng):
-    r2 = R2LearnedFactors(fps=FPS, device=DEVICE,
+    r2 = CRFLearnedFactors(fps=FPS, device=DEVICE,
                           observation_lambda=BT_SHIPPED_DECODE["observation_lambda"])
     opt = torch.optim.Adam(r2.parameters(), lr=0.05)
     for _ in range(EPOCHS):
@@ -67,7 +67,7 @@ def score(entries, acts, lam):
 def main():
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
-    r2_probe = R2LearnedFactors(fps=FPS, device=DEVICE,
+    r2_probe = CRFLearnedFactors(fps=FPS, device=DEVICE,
                                 observation_lambda=BT_SHIPPED_DECODE["observation_lambda"])
     train_entries, val_entries, _ = load_songs(r2_probe)
     all_entries = train_entries + val_entries

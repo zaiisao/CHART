@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data.songs import iter_songs
 from train_bt import FPS
 from train_r2_frozen_smooth import smooth_beat_frames
-from rungs.r2_learned_dbn import R2LearnedFactors
+from crf_baseline import CRFLearnedFactors
 import torch
 
 DEVICE = "cpu"
@@ -27,7 +27,7 @@ LAMBDAS = np.logspace(np.log10(2), np.log10(400), 80)
 
 
 def main():
-    r2 = R2LearnedFactors(fps=FPS, device=DEVICE, observation_lambda=6)
+    r2 = CRFLearnedFactors(fps=FPS, device=DEVICE, observation_lambda=6)
     grid = r2.chassis.state_spaces[0].interval_frames          # [V] integer frame intervals
     # precompute the normalized log tempo kernel for each candidate lambda: [L, V, V]
     kernels = []

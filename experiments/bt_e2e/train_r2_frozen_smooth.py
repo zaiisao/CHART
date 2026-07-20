@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import final_eval
 from train_bt import FPS, BT_SHIPPED_DECODE, load_songs, sample_crop
 from rungs.r1_2016_dbn import DBN2016
-from rungs.r2_learned_dbn import R2LearnedFactors
+from crf_baseline import CRFLearnedFactors
 import mir_eval
 
 DEVICE = "cuda:0"
@@ -69,7 +69,7 @@ def jitter_rate(entries):
 def main():
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
-    r2 = R2LearnedFactors(fps=FPS, device=DEVICE,
+    r2 = CRFLearnedFactors(fps=FPS, device=DEVICE,
                           observation_lambda=BT_SHIPPED_DECODE["observation_lambda"])
     train_entries, val_entries, _ = load_songs(r2)
 

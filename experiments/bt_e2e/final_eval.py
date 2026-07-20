@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "external" / "beat_transformer" / "code"))
 
 import mir_eval                                          # noqa: E402
 from rungs.r1_2016_dbn import DBN2016                    # noqa: E402
-from rungs.r2_learned_dbn import R2LearnedFactors        # noqa: E402
+from crf_baseline import CRFLearnedFactors        # noqa: E402
 from DilatedTransformer import Demixed_DilatedTransformerModel  # noqa: E402
 from train_bt import FPS, MODEL_KWARGS, BT_SHIPPED_DECODE, load_songs  # noqa: E402
 
@@ -52,7 +52,7 @@ def score(entries, acts, **rung_kwargs):
 
 
 def main():
-    r2_probe = R2LearnedFactors(fps=FPS, device=DEVICE)
+    r2_probe = CRFLearnedFactors(fps=FPS, device=DEVICE)
     _, val_entries, _ = load_songs(r2_probe)
     print(f"full val fold: {len(val_entries)} songs", flush=True)
 
