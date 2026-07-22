@@ -38,11 +38,22 @@ import numpy as np
 import torch
 from torch import nn
 
+from rungs.base import Rung
 from rungs.r1_2016_dbn import DBN2016
 
 
-class CRFLearnedFactors(nn.Module):
-    """Training-side owner of the learned factors. Deployment = make_rung() -> a plain DBN2016."""
+class CRFLearnedFactors(nn.Module, Rung):
+    """Training-side owner of the learned factors. Deployment = make_rung() -> a plain DBN2016.
+
+    Inherits Rung only so it is trained and scored through the same path as the real rungs; the
+    module docstring explains why it is not one."""
+
+    INPUT_CHANNELS = 2
+    TRAIN_MODE = "gradient"
+    ARM_NAME = "crf"
+    TRAIN_DEFAULTS = dict(epochs=8, learning_rate=0.05)          # frozen frontend: pure CRF
+    E2E_DEFAULTS = dict(epochs=30, learning_rate=1e-3,           # joint: CRF + BCE anchor
+                        gradient_clip=0.5)
 
     def __init__(self, fps: float, beats_per_bar=(3, 4), init_transition_lambda: float = 100.0,
                  device: str = "cuda", min_bpm: float = 55.0, max_bpm: float = 215.0,
@@ -57,6 +68,8 @@ class CRFLearnedFactors(nn.Module):
                                threshold=0.0, correct=False,
                                observation_lambda=observation_lambda,
                                dtype=torch.float32, device=device)
+        Rung.__init__(self, fps=self.chassis.fps, bounding=self.chassis.bounding,
+                      eps=self.chassis.eps)
         self.device = device
         self.log_transition_lambda = nn.Parameter(
             torch.log(torch.tensor(float(init_transition_lambda))))
@@ -81,36 +94,11 @@ class CRFLearnedFactors(nn.Module):
         return scores - torch.logsumexp(scores, dim=1, keepdim=True)
 
     def log_class_densities(self, activations: torch.Tensor) -> torch.Tensor:
-        """Torch mirror of DBN2016._log_class_densities (clip recipe): [T, 2] probs -> [T, 3]."""
-        eps = self.chassis.eps
-        beat = activations[:, 0].clamp(eps, 1 - eps)
-        downbeat = activations[:, 1].clamp(eps, 1 - eps)
-        beat_not_downbeat = (beat - downbeat).clamp(min=eps)
-        num_non_beat_states = self.chassis.observation_lambda - 1
-        no_beat = (1.0 - beat_not_downbeat - downbeat).clamp(min=1e-12)
-        return torch.stack([torch.log(no_beat / num_non_beat_states),
-                            torch.log(beat_not_downbeat), torch.log(downbeat)], dim=1)
+        return self.chassis.log_class_densities(activations)
 
     def annotated_state_path(self, beat_frames: np.ndarray, beat_in_bar: np.ndarray,
                              beats_per_bar: int):
-        """(state_path [T], meter_index) for the span beat_frames[0]..beat_frames[-1], or None
-        if unrepresentable (gap outside the tempo grid / non-consecutive bar positions).
-        beats_per_bar is the SONG-level meter (a crop may not contain a full bar)."""
-        meters = tuple(self.chassis.beats_per_bar)
-        bpb = int(beats_per_bar)
-        if bpb not in meters:
-            return None
-        meter_index = meters.index(bpb)
-        space = self.chassis.state_spaces[meter_index]
-        gaps = np.diff(beat_frames)
-        if gaps.min() < self._min_interval or gaps.max() > self._max_interval:
-            return None
-        if not np.all((beat_in_bar[1:] - beat_in_bar[:-1]) % bpb == 1):
-            return None
-        path = np.concatenate([
-            space.first_states[beat_in_bar[i], gap - self._min_interval] + np.arange(gap)
-            for i, gap in enumerate(gaps)])
-        return path.astype(np.int64), meter_index
+        return self.chassis.annotated_state_path(beat_frames, beat_in_bar, beats_per_bar)
 
     def crf_nll(self, activations: torch.Tensor, state_path: np.ndarray,
                 meter_index: int) -> torch.Tensor:
@@ -146,3 +134,25 @@ class CRFLearnedFactors(nn.Module):
         """Deployment: a plain DBN2016 whose transition_lambda is the LEARNED value."""
         return DBN2016(fps=self.chassis.fps, transition_lambda=self.transition_lambda,
                        beats_per_bar=tuple(self.chassis.beats_per_bar), **kwargs)
+
+    def trainable_parameters(self):
+        return [self.log_transition_lambda]
+
+    def training_step(self, activations: torch.Tensor, path, meter_index) -> torch.Tensor:
+        """Length-normalized CRF NLL. In e2e the harness adds the BCE calibration anchor, which
+        concerns the frontend rather than this factor."""
+        return self.crf_nll(activations, path, meter_index) / len(path)
+
+    @torch.no_grad()
+    def decode(self, activations, deploy: bool = True) -> dict:
+        """Deploy the learned lambda through a plain DBN2016. deploy=True uses the BT-shipped decode
+        (threshold 0.2); deploy=False the bare model."""
+        obs = self.chassis.observation_lambda
+        decode = (dict(observation_lambda=obs, num_tempi=None, threshold=0.2) if deploy
+                  else dict(observation_lambda=obs, num_tempi=None, threshold=0.0, correct=False))
+        rung = self.make_rung(device=self.device, dtype=torch.float32, bounding="none", **decode)
+        return rung.predict(activations)
+
+    @torch.no_grad()
+    def _predict_features(self, activations, deploy: bool = True) -> dict:
+        return self.decode(activations, deploy=deploy)

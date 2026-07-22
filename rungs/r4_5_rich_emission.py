@@ -19,12 +19,18 @@ class labels from the Böck/[T,2] system) -- self-supervised, no human annotatio
 import numpy as np
 import torch
 
+from rungs.base import Rung
 from rungs.r1_2016_dbn import DBN2016
 
 VARIANCE_FLOOR = 1e-3
 
 
-class R45RichEmission:
+class R45RichEmission(Rung):
+    INPUT_CHANNELS = None    # feature width is an instance choice (feature_dim)
+    TRAIN_MODE = "em"
+    ARM_NAME = "r4_5"
+    TRAIN_DEFAULTS = dict(em_iterations=10)
+
     def __init__(self, fps: float, feature_dim: int = 256, beats_per_bar=(3, 4),
                  mixture_w: float = 0.370, transition_lambda: float = 93.1,
                  observation_lambda: int = 6, device: str = "cuda",
@@ -42,6 +48,8 @@ class R45RichEmission:
                                threshold=0.0, correct=False,
                                observation_lambda=observation_lambda,
                                dtype=torch.float32, device=device)
+        super().__init__(fps=self.chassis.fps, bounding=self.chassis.bounding,
+                         eps=self.chassis.eps)
         self.device = device
         self.feature_dim = feature_dim
         intervals = self.chassis.state_spaces[0].interval_frames.astype(np.float32)
@@ -96,6 +104,38 @@ class R45RichEmission:
         self.mu = sums / counts[:, None]
         self._set_variances(sqs, sums, counts)
 
+    @torch.no_grad()
+    def bootstrap_labels(self, activation_crops):
+        """Hard class labels from the [T, 2] pipeline's own Viterbi decode -- no annotations.
+
+        Depends only on the activations + chassis, NOT on the feature projection, so the harness can
+        call it before fitting a label-dependent projection (LDA).
+        """
+        labels = []
+        for acts in activation_crops:
+            densities = self.chassis.log_class_densities(acts).to(torch.float32)
+            best = None
+            for mi in range(len(self.chassis.state_spaces)):
+                dp = self.chassis.dynamic_programs[mi]
+                path, score = dp.viterbi(self.chassis.log_initial_distributions[mi], self.log_kernel,
+                                         densities, state_to_class=self.chassis.state_to_classes[mi],
+                                         return_log_score=True)
+                if best is None or score > best[0]:
+                    best = (score, path, mi)
+            _, path, mi = best
+            labels.append(self.chassis.state_to_classes[mi][path].long())
+        return labels
+
+    def self_supervised_init(self, feature_crops, activation_crops):
+        """Seed the class Gaussians from bootstrap_labels. feature_crops and activation_crops are
+        aligned crop-for-crop."""
+        labels = self.bootstrap_labels(activation_crops)
+        self.initialize_from_labels(feature_crops, labels)
+        return labels
+
+    def training_state(self) -> dict:
+        """Serializable learned emission; the harness adds the projection stats it owns."""
+        return {"mu": self.mu.cpu(), "log_var": self.log_var.cpu()}
     # --- exact inference --------------------------------------------------------------------
     def marginal_log_likelihood(self, features: torch.Tensor,
                                 log_densities: torch.Tensor = None) -> torch.Tensor:
@@ -136,7 +176,18 @@ class R45RichEmission:
 
     # --- decode -----------------------------------------------------------------------------
     @torch.no_grad()
-    def decode(self, features: torch.Tensor) -> dict:
+    def _predict_features(self, features) -> dict:
+        """Events only. The harness bypasses this and calls decode() with device tensors directly,
+        so [num_frames, D] features are never round-tripped through predict()'s float64 coercion."""
+        decoded = self.decode(torch.as_tensor(features, dtype=torch.float32, device=self.device))
+        return {"beats": decoded["beats"], "downbeats": decoded["downbeats"]}
+
+
+    @torch.no_grad()
+    def decode(self, features: torch.Tensor, deploy: bool = False) -> dict:
+        """Bare Viterbi over the fixed mixture kernel + read-out. `deploy` is accepted for interface
+        uniformity; the threshold-crop + snap needs the [T, 2] activations and is done by the
+        harness."""
         from rungs.bar_pointer.readout import state_path_to_events
         dens = self.log_class_densities(features).to(torch.float32)
         best = None

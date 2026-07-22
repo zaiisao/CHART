@@ -155,6 +155,47 @@ class DBN2016(Rung):
                  np.log(beat_not_downbeat_activation), np.log(downbeat_activation)], axis=1)
         return torch.from_numpy(log_class_densities).to(dtype=self.dtype, device=self.device)
 
+    # Training-side utilities: unused by predict(), shared by the learned rungs.
+    def log_class_densities(self, activations: torch.Tensor) -> torch.Tensor:
+        """Differentiable mirror of _log_class_densities: [num_frames, 2] probability TENSOR ->
+        [num_frames, 3].
+
+        One deliberate difference: no_beat is floored at 1e-12 rather than reaching log(0) = -inf,
+        which would make the gradient NaN. The floor only bites where the numpy path is -inf.
+        """
+        beat, downbeat, decorrelation_floor = self._bound_tensor(
+            activations[:, 0], activations[:, 1])
+        beat_not_downbeat = (beat - downbeat).clamp(min=decorrelation_floor)
+        no_beat = (1.0 - beat_not_downbeat - downbeat).clamp(min=1e-12)
+        num_non_beat_states = self.observation_lambda - 1
+        return torch.stack([torch.log(no_beat / num_non_beat_states),
+                            torch.log(beat_not_downbeat), torch.log(downbeat)], dim=1)
+
+    def annotated_state_path(self, beat_frames: np.ndarray, beat_in_bar: np.ndarray,
+                             beats_per_bar) -> Optional[tuple]:
+        """(state_path[int64], meter_index) for the span beat_frames[0]..beat_frames[-1], or None
+        if unrepresentable (meter absent / gap outside the tempo grid / non-consecutive bar
+        positions). Between annotated beats f_i -> f_{i+1} the pointer occupies the tempo block
+        whose interval equals the frame gap, advancing +1 per frame, then takes the beat-boundary
+        transition. beats_per_bar is the SONG meter -- a crop may not span a full bar."""
+        meters = self.beats_per_bar
+        bpb = int(beats_per_bar)
+        if bpb not in meters:
+            return None
+        meter_index = meters.index(bpb)
+        space = self.state_spaces[meter_index]
+        min_interval = int(space.interval_frames[0])
+        max_interval = int(space.interval_frames[-1])
+        gaps = np.diff(beat_frames)
+        if len(gaps) == 0 or gaps.min() < min_interval or gaps.max() > max_interval:
+            return None
+        if not np.all((beat_in_bar[1:] - beat_in_bar[:-1]) % bpb == 1):
+            return None
+        path = np.concatenate([
+            space.first_states[beat_in_bar[i], gap - min_interval] + np.arange(gap)
+            for i, gap in enumerate(gaps)])
+        return path.astype(np.int64), meter_index
+
     @torch.no_grad()
     def _predict_features(self, activations: np.ndarray, threshold: Optional[float] = None,
                             correct: Optional[bool] = None) -> dict:

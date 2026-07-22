@@ -26,10 +26,16 @@ per-meter forwards), so learning uses NO annotation of any kind.
 import numpy as np
 import torch
 
+from rungs.base import Rung
 from rungs.r1_2016_dbn import DBN2016
 
 
-class R2GenerativeLambda:
+class R2GenerativeLambda(Rung):
+    INPUT_CHANNELS = 2
+    TRAIN_MODE = "em"
+    ARM_NAME = "r2_em"
+    TRAIN_DEFAULTS = dict(em_iterations=8)
+
     def __init__(
         self,
         fps: float,
@@ -41,20 +47,14 @@ class R2GenerativeLambda:
         max_bpm: float = 215.0,
         observation_candidates=(2, 4, 6, 8, 16, 32)
     ):
-        self._chassis_kwargs = dict()
+        # Shared by the current chassis and every observation_lambda candidate (_chassis_for).
+        self._chassis_kwargs = dict(
+            fps=fps, min_bpm=min_bpm, max_bpm=max_bpm, beats_per_bar=beats_per_bar,
+            num_tempi=None, threshold=0.0, correct=False, dtype=torch.float32, device=device)
         self.observation_lambda = int(observation_lambda)
-        self.chassis = DBN2016(
-            observation_lambda=self.observation_lambda,
-            fps=fps,
-            min_bpm=min_bpm,
-            max_bpm=max_bpm,
-            beats_per_bar=beats_per_bar,
-            num_tempi=None,
-            threshold=0.0,
-            correct=False,
-            dtype=torch.float32,
-            device=device
-        )
+        self.chassis = DBN2016(observation_lambda=self.observation_lambda, **self._chassis_kwargs)
+        super().__init__(fps=self.chassis.fps, bounding=self.chassis.bounding,
+                         eps=self.chassis.eps)
         self._chassis_cache = {self.observation_lambda: self.chassis}
         self._obs_candidates = tuple(int(v) for v in observation_candidates)
         self.device = device
@@ -81,15 +81,9 @@ class R2GenerativeLambda:
 
     def log_class_densities(self, activations: torch.Tensor,
                             chassis: DBN2016 = None) -> torch.Tensor:
-        """Torch Böck densities (same as R1): [T, 2] probs -> [T, 3]."""
-        chassis = chassis if chassis is not None else self.chassis
-        eps = chassis.eps
-        beat = activations[:, 0].clamp(eps, 1 - eps)
-        downbeat = activations[:, 1].clamp(eps, 1 - eps)
-        bnd = (beat - downbeat).clamp(min=eps)
-        no_beat = (1.0 - bnd - downbeat).clamp(min=1e-12)
-        return torch.stack([torch.log(no_beat / (chassis.observation_lambda - 1)),
-                            torch.log(bnd), torch.log(downbeat)], dim=1)
+        """Torch Böck densities (same as R1): [T, 2] probs -> [T, 3]. `chassis` selects the
+        observation model (default: the current one)."""
+        return (chassis if chassis is not None else self.chassis).log_class_densities(activations)
 
     def marginal_log_likelihood(self, activations: torch.Tensor, log_kernel: torch.Tensor,
                                 chassis: DBN2016 = None) -> torch.Tensor:
@@ -163,3 +157,26 @@ class R2GenerativeLambda:
         if learn_observation_lambda:
             self.observation_step(crops)
         return self.transition_lambda
+
+    def deploy_rung(self, deploy: bool = True) -> DBN2016:
+        """A plain DBN2016 carrying the learned transition_lambda. deploy=True uses the BT-shipped
+        decode (threshold 0.2); deploy=False the bare model."""
+        decode = (dict(observation_lambda=self.observation_lambda, num_tempi=None, threshold=0.2)
+                  if deploy else
+                  dict(observation_lambda=self.observation_lambda, num_tempi=None,
+                       threshold=0.0, correct=False))
+        return DBN2016(fps=self.chassis.fps, transition_lambda=self.transition_lambda,
+                       beats_per_bar=tuple(self.chassis.beats_per_bar),
+                       device=self.device, dtype=torch.float32, bounding="none", **decode)
+
+    @torch.no_grad()
+    def decode(self, activations, deploy: bool = True) -> dict:
+        return self.deploy_rung(deploy).predict(activations)
+
+    @torch.no_grad()
+    def _predict_features(self, activations, deploy: bool = True) -> dict:
+        return self.deploy_rung(deploy).predict(activations)
+
+    def training_state(self) -> dict:
+        return {"transition_lambda": self.transition_lambda,
+                "observation_lambda": self.observation_lambda}

@@ -43,6 +43,42 @@ class Rung(ABC):
     # frontend cut at the wrong depth fails loudly instead of predicting on garbage.
     INPUT_CHANNELS = 2      # int, or None for "any"
 
+    # A learned rung declares TRAIN_MODE and implements that mode's hooks:
+    #     "em"        em_step(crops) -> statistic
+    #     "gradient"  trainable_parameters(), training_step(observation, path, meter_index)
+    # Both also provide decode(observation, deploy=...), the coercion-free evaluation path the
+    # training harness calls instead of predict() (see fit).
+    TRAIN_MODE = None        # "em" | "gradient" | None (not trainable)
+    ARM_NAME = None          # config `rung.name` and checkpoint prefix
+    TRAIN_DEFAULTS = {}      # this rung's idiomatic frozen/EM hyperparameters
+    E2E_DEFAULTS = None      # overrides when the frontend trains too; None -> reuse TRAIN_DEFAULTS
+
+    @classmethod
+    def observes_features(cls) -> bool:
+        """True for a rung conditioned on rich features rather than [num_frames, 2] activations."""
+        return cls.INPUT_CHANNELS != 2
+
+    @classmethod
+    def from_config(cls, config):
+        """Build this rung from the config's `rung:` section."""
+        from training import data, harness
+        return cls(fps=data.FPS, device=harness.device_of(config),
+                   **harness.rung_kwargs(config))
+
+    @classmethod
+    def fit(cls, config):
+        """Train this rung from a config (see configs/train.yaml).
+
+        Named `fit`, not `train`: nn.Module.train(mode: bool) already exists, and an nn.Module rung
+        (R3, CRF) would shadow one of the two.
+        """
+        if cls.TRAIN_MODE is None:
+            raise TypeError(
+                f"{cls.__name__} is not trainable: its factors are hand-set (R1) or opaque (R0). "
+                f"A learned rung declares TRAIN_MODE ('em' or 'gradient').")
+        from training import harness
+        return harness.dispatch(cls, config)
+
     def __init__(self, fps: float, bounding: str = "clip", eps: float = 1e-5):
         """Shared construction, uniform across ALL rungs -- no per-class wiring declarations.
 
@@ -108,6 +144,28 @@ class Rung(ABC):
             decorrelation_floor = eps / 2
         else:
             # none (Beat Transformer); tiny floor for safety
+            decorrelation_floor = 1e-12
+
+        return beat_activation, downbeat_activation, decorrelation_floor
+
+    def _bound_tensor(self, beat_activation, downbeat_activation):
+        """Torch mirror of _bound, kept adjacent to it so the two recipes cannot drift.
+
+        The training path must bound exactly as deployment does: a bounding="none" frontend
+        (Beat Transformer) trained through clip-bounded densities disagrees with its own decode by
+        up to 16 nats.
+        """
+        bounding, eps = self.bounding, self.eps
+
+        if bounding == "clip":
+            beat_activation = beat_activation.clamp(eps, 1 - eps)
+            downbeat_activation = downbeat_activation.clamp(eps, 1 - eps)
+            decorrelation_floor = eps
+        elif bounding == "squeeze":
+            beat_activation = beat_activation * (1 - eps) + eps / 2
+            downbeat_activation = downbeat_activation * (1 - eps) + eps / 2
+            decorrelation_floor = eps / 2
+        else:
             decorrelation_floor = 1e-12
 
         return beat_activation, downbeat_activation, decorrelation_floor
