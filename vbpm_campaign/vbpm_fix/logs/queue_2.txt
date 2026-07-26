@@ -1,0 +1,8 @@
+=== 00:12:22 starting D_cpi on gpu 2
+=== 01:10:47 done D_cpi
+=== 01:10:47 starting D_c02 on gpu 2
+=== 02:04:28 done D_c02
+=== 02:04:28 starting D_cpi_noti on gpu 2
+=== 02:48:11 done D_cpi_noti
+=== 02:48:11 starting M_cpi on gpu 2
+=== 04:44:05 done M_cpi

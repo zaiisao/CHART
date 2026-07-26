@@ -1,0 +1,56 @@
+{
+ "copy_ceiling_barphase": {
+  "beat_F": 0.9875844268897616,
+  "db_F": 0.988128570584711
+ },
+ "variant-B DIRAC free_run (open loop)": {
+  "A": {
+   "beat_F": 0.010205218906314586,
+   "db_F": 0.0,
+   "ratio": 0.019770408163265307,
+   "metronome": 0.2856967451598596,
+   "N": 30
+  },
+  "blind_grid_at_own_density": 0.01949392569067342,
+  "B": {
+   "beat_F": 0.010205218906314586,
+   "db_F": 0.0,
+   "ratio": 0.019770408163265307,
+   "metronome": 0.2856967451598596,
+   "N": 30
+  },
+  "C": {
+   "beat_F": 0.009460055383386722,
+   "db_F": 0.0,
+   "ratio": 0.01997422680412371,
+   "metronome": 0.2854725448777136,
+   "N": 30
+  },
+  "verdict": "AT/BELOW FLOOR (density explains it) -- and the Dirac copy ceiling is 1.000"
+ },
+ "variant-B DIRAC particle filter (K=400)": {
+  "A": {
+   "beat_F": 0.37348998436873937,
+   "db_F": 0.11847444422207752,
+   "ratio": 2.299107142857143,
+   "metronome": 0.2856967451598596,
+   "N": 30
+  },
+  "blind_grid_at_own_density": 0.39427090478687776,
+  "B": {
+   "beat_F": 0.36263242324520634,
+   "db_F": 0.1367873080702582,
+   "ratio": 2.2627551020408165,
+   "metronome": 0.2856967451598596,
+   "N": 30
+  },
+  "C": {
+   "beat_F": 0.3599306323302515,
+   "db_F": 0.12162329962264445,
+   "ratio": 2.286082474226804,
+   "metronome": 0.2854725448777136,
+   "N": 30
+  },
+  "verdict": "AT/BELOW FLOOR (density explains it) -- and the Dirac copy ceiling is 1.000"
+ }
+}

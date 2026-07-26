@@ -1,0 +1,47 @@
+
+==============================================================================
+ARM (i)  obs=head_bern  tag=i_bern
+==============================================================================
+  train 147  eval 40   loaded in 25s
+  observation = frozen head activation, obs_dim=2, likelihood=bern
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+
+==============================================================================
+(1) TRAIN  (train fold only)
+==============================================================================
+  s    1 loss=718.2 rec_b=172.5 rec_db=177.3 rec_obs=368.1 kl=190.0 kl_phi=80.6 0.45 it/s
+  s  100 loss=215.2 rec_b=40.5 rec_db=16.3 rec_obs=126.1 kl=194.3 kl_phi=20.8 0.53 it/s
+  s  200 loss=208.9 rec_b=43.1 rec_db=14.8 rec_obs=124.2 kl=80.6 kl_phi=0.1 0.53 it/s
+  s  300 loss=169.8 rec_b=23.0 rec_db=11.4 rec_obs=85.5 kl=99.7 kl_phi=0.5 0.53 it/s
+  s  400 loss=169.9 rec_b=23.7 rec_db=11.4 rec_obs=87.6 kl=70.8 kl_phi=0.3 0.54 it/s
+  s  500 loss=168.8 rec_b=21.8 rec_db=10.2 rec_obs=89.7 kl=56.5 kl_phi=0.3 0.54 it/s
+  s  600 loss=181.1 rec_b=25.7 rec_db=10.7 rec_obs=89.6 kl=55.1 kl_phi=0.2 0.54 it/s
+  s  700 loss=193.0 rec_b=24.5 rec_db=8.8 rec_obs=114.3 kl=45.4 kl_phi=0.3 0.54 it/s
+  s  800 loss=181.3 rec_b=28.6 rec_db=10.7 rec_obs=96.3 kl=45.8 kl_phi=0.3 0.54 it/s
+  s  900 loss=184.0 rec_b=26.9 rec_db=10.0 rec_obs=103.7 kl=43.4 kl_phi=0.2 0.54 it/s
+  s 1000 loss=166.8 rec_b=21.7 rec_db=9.3 rec_obs=102.7 kl=33.2 kl_phi=0.3 0.54 it/s
+  s 1100 loss=190.1 rec_b=27.5 rec_db=11.2 rec_obs=109.9 kl=41.5 kl_phi=0.5 0.54 it/s
+  s 1200 loss=151.6 rec_b=23.0 rec_db=9.3 rec_obs=74.9 kl=44.4 kl_phi=0.6 0.54 it/s
+  layer softmax: 0.071 0.073 0.075 0.078 0.081 0.083 0.087 0.081 0.082 0.075 0.072 0.071 0.072  argmax=6
+
+==============================================================================
+(2) DEPLOY = BOOTSTRAP PARTICLE FILTER  (eval fold 0, full length)
+==============================================================================
+  PF K=300 alpha=1.0  (163s, 40 songs)
+    [mean  ] beat_F=0.3812 db_F=0.1368 n_ratio=2.238 blind0=0.3931 blindbest=0.4165 MARGIN=-0.0353 | db_blind=0.1613 MARGIN_db=-0.0246 | frac_neg=0.500 jit/adv=258.05 ESS=208.2 obs_contrast=1
+    [map   ] beat_F=0.3724 db_F=0.1292 n_ratio=2.193 blind0=0.3894 blindbest=0.4219 MARGIN=-0.0494 | db_blind=0.1586 MARGIN_db=-0.0293 | frac_neg=0.501 jit/adv=109.12 ESS=208.2 obs_contrast=1
+    [smooth] beat_F=0.3786 db_F=0.1255 n_ratio=2.233 blind0=0.3881 blindbest=0.4271 MARGIN=-0.0485 | db_blind=0.1633 MARGIN_db=-0.0378 | frac_neg=0.498 jit/adv=117.05 ESS=208.2 obs_contrast=1
+  PF K=300 alpha=3.0  (166s, 40 songs)
+    [mean  ] beat_F=0.3901 db_F=0.1251 n_ratio=2.241 blind0=0.3815 blindbest=0.4284 MARGIN=-0.0383 | db_blind=0.1652 MARGIN_db=-0.0401 | frac_neg=0.501 jit/adv=179.99 ESS=194.2 obs_contrast=1
+    [map   ] beat_F=0.3729 db_F=0.1161 n_ratio=2.176 blind0=0.3893 blindbest=0.4167 MARGIN=-0.0439 | db_blind=0.1627 MARGIN_db=-0.0466 | frac_neg=0.503 jit/adv=184.64 ESS=194.2 obs_contrast=1
+    [smooth] beat_F=0.3737 db_F=0.1021 n_ratio=2.209 blind0=0.3926 blindbest=0.4231 MARGIN=-0.0493 | db_blind=0.1693 MARGIN_db=-0.0672 | frac_neg=0.502 jit/adv=80.93 ESS=194.2 obs_contrast=1
+  PF K=600 alpha=1.0  (163s, 40 songs)
+    [mean  ] beat_F=0.3836 db_F=0.1206 n_ratio=2.213 blind0=0.3944 blindbest=0.4201 MARGIN=-0.0365 | db_blind=0.1645 MARGIN_db=-0.0439 | frac_neg=0.502 jit/adv=272.58 ESS=416.7 obs_contrast=1
+    [map   ] beat_F=0.3695 db_F=0.1327 n_ratio=2.193 blind0=0.3982 blindbest=0.4219 MARGIN=-0.0524 | db_blind=0.1661 MARGIN_db=-0.0334 | frac_neg=0.501 jit/adv=238.37 ESS=416.7 obs_contrast=1
+    [smooth] beat_F=0.3734 db_F=0.1181 n_ratio=2.216 blind0=0.3933 blindbest=0.4281 MARGIN=-0.0547 | db_blind=0.1796 MARGIN_db=-0.0615 | frac_neg=0.504 jit/adv=123.98 ESS=416.7 obs_contrast=1
+  PF K=600 alpha=3.0  (167s, 40 songs)
+    [mean  ] beat_F=0.3781 db_F=0.1119 n_ratio=2.210 blind0=0.3904 blindbest=0.4247 MARGIN=-0.0466 | db_blind=0.1608 MARGIN_db=-0.0489 | frac_neg=0.501 jit/adv=1105.54 ESS=388.7 obs_contrast=1
+    [map   ] beat_F=0.3614 db_F=0.1273 n_ratio=2.164 blind0=0.4032 blindbest=0.4335 MARGIN=-0.0721 | db_blind=0.1654 MARGIN_db=-0.0382 | frac_neg=0.500 jit/adv=185.34 ESS=388.7 obs_contrast=1
+    [smooth] beat_F=0.3834 db_F=0.1035 n_ratio=2.241 blind0=0.3915 blindbest=0.4235 MARGIN=-0.0400 | db_blind=0.1672 MARGIN_db=-0.0637 | frac_neg=0.500 jit/adv=487.57 ESS=388.7 obs_contrast=1
+WROTE /home/sogang/jaehoon/VBPM_reintegration/vbpm_arms/arm_i_i_bern.json

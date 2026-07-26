@@ -1,0 +1,37 @@
+{
+  "config": {
+    "steps": 1200,
+    "warmup": 600,
+    "bs": 16,
+    "frames": 256,
+    "hidden": 128,
+    "lr": 0.0003,
+    "K": 300,
+    "n_eval": 25,
+    "max_frames": 1200,
+    "n_shift": 6,
+    "skip_baseline": false,
+    "only_baseline": true,
+    "out": "/home/sogang/jaehoon/VBPM_reintegration/vbpm_fix/results_mert_base.json"
+  },
+  "baseline_freerun": {
+    "beat_F": 0.059260756916813824,
+    "db_F": 0.0,
+    "n_ratio": 0.6396333023099013,
+    "metronome": 0.290316731616395
+  },
+  "baseline_shift": {
+    "max": 2.8276495138804116,
+    "mean": 1.5336593290170033,
+    "lag": [
+      37,
+      26,
+      -5,
+      37,
+      44,
+      -20
+    ],
+    "lag_cost_min": 1.176825723250374,
+    "lag_cost_max": 1.9660561440011561
+  }
+}

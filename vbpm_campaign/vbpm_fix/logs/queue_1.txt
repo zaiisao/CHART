@@ -1,0 +1,8 @@
+=== 00:12:22 starting D_base on gpu 1
+=== 01:05:06 done D_base
+=== 01:05:06 starting D_c005 on gpu 1
+=== 01:55:55 done D_c005
+=== 01:55:55 starting D_tinit on gpu 1
+=== 02:40:40 done D_tinit
+=== 02:40:40 starting M_base on gpu 1
+=== 04:52:21 done M_base

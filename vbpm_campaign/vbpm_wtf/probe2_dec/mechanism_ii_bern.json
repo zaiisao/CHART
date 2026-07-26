@@ -1,0 +1,283 @@
+{
+ "arm": "ii",
+ "split": "eval",
+ "surface": [
+  {
+   "log_tempo": -6.0,
+   "beat_p_mean": 0.003268,
+   "beat_logit_range_over_phase": 0.2695775,
+   "emis_beat_logit_mean": -4.23241,
+   "emis_beat_logit_range_over_phase": 0.18744373,
+   "emis_db_logit_range_over_phase": 0.11213112
+  },
+  {
+   "log_tempo": -5.75,
+   "beat_p_mean": 0.003538,
+   "beat_logit_range_over_phase": 0.2674284,
+   "emis_beat_logit_mean": -4.14281,
+   "emis_beat_logit_range_over_phase": 0.18900633,
+   "emis_db_logit_range_over_phase": 0.11570692
+  },
+  {
+   "log_tempo": -5.5,
+   "beat_p_mean": 0.003856,
+   "beat_logit_range_over_phase": 0.26487923,
+   "emis_beat_logit_mean": -4.04652,
+   "emis_beat_logit_range_over_phase": 0.1903193,
+   "emis_db_logit_range_over_phase": 0.11959171
+  },
+  {
+   "log_tempo": -5.25,
+   "beat_p_mean": 0.004234,
+   "beat_logit_range_over_phase": 0.26189423,
+   "emis_beat_logit_mean": -3.9431,
+   "emis_beat_logit_range_over_phase": 0.1916163,
+   "emis_db_logit_range_over_phase": 0.12370348
+  },
+  {
+   "log_tempo": -5.0,
+   "beat_p_mean": 0.004686,
+   "beat_logit_range_over_phase": 0.25844002,
+   "emis_beat_logit_mean": -3.83208,
+   "emis_beat_logit_range_over_phase": 0.19311857,
+   "emis_db_logit_range_over_phase": 0.12774467
+  },
+  {
+   "log_tempo": -4.75,
+   "beat_p_mean": 0.005232,
+   "beat_logit_range_over_phase": 0.25448179,
+   "emis_beat_logit_mean": -3.71304,
+   "emis_beat_logit_range_over_phase": 0.19447684,
+   "emis_db_logit_range_over_phase": 0.1321497
+  },
+  {
+   "log_tempo": -4.5,
+   "beat_p_mean": 0.005896,
+   "beat_logit_range_over_phase": 0.24998856,
+   "emis_beat_logit_mean": -3.58553,
+   "emis_beat_logit_range_over_phase": 0.19572592,
+   "emis_db_logit_range_over_phase": 0.13722134
+  },
+  {
+   "log_tempo": -4.25,
+   "beat_p_mean": 0.006712,
+   "beat_logit_range_over_phase": 0.24493837,
+   "emis_beat_logit_mean": -3.44918,
+   "emis_beat_logit_range_over_phase": 0.19731069,
+   "emis_db_logit_range_over_phase": 0.14251995
+  },
+  {
+   "log_tempo": -4.0,
+   "beat_p_mean": 0.007726,
+   "beat_logit_range_over_phase": 0.23931551,
+   "emis_beat_logit_mean": -3.30364,
+   "emis_beat_logit_range_over_phase": 0.19918346,
+   "emis_db_logit_range_over_phase": 0.14774847
+  },
+  {
+   "log_tempo": -3.75,
+   "beat_p_mean": 0.008997,
+   "beat_logit_range_over_phase": 0.23347569,
+   "emis_beat_logit_mean": -3.14862,
+   "emis_beat_logit_range_over_phase": 0.20205951,
+   "emis_db_logit_range_over_phase": 0.15306091
+  },
+  {
+   "log_tempo": -3.5,
+   "beat_p_mean": 0.010609,
+   "beat_logit_range_over_phase": 0.22779751,
+   "emis_beat_logit_mean": -2.98394,
+   "emis_beat_logit_range_over_phase": 0.20509267,
+   "emis_db_logit_range_over_phase": 0.15888977
+  },
+  {
+   "log_tempo": -3.25,
+   "beat_p_mean": 0.012674,
+   "beat_logit_range_over_phase": 0.22183132,
+   "emis_beat_logit_mean": -2.80951,
+   "emis_beat_logit_range_over_phase": 0.20831203,
+   "emis_db_logit_range_over_phase": 0.16525626
+  },
+  {
+   "log_tempo": -3.0,
+   "beat_p_mean": 0.015348,
+   "beat_logit_range_over_phase": 0.21648884,
+   "emis_beat_logit_mean": -2.62537,
+   "emis_beat_logit_range_over_phase": 0.21173811,
+   "emis_db_logit_range_over_phase": 0.17146564
+  },
+  {
+   "log_tempo": -2.75,
+   "beat_p_mean": 0.018848,
+   "beat_logit_range_over_phase": 0.21136642,
+   "emis_beat_logit_mean": -2.4317,
+   "emis_beat_logit_range_over_phase": 0.21537614,
+   "emis_db_logit_range_over_phase": 0.17723584
+  },
+  {
+   "log_tempo": -2.5,
+   "beat_p_mean": 0.023471,
+   "beat_logit_range_over_phase": 0.20786834,
+   "emis_beat_logit_mean": -2.22886,
+   "emis_beat_logit_range_over_phase": 0.21958017,
+   "emis_db_logit_range_over_phase": 0.18293953
+  },
+  {
+   "log_tempo": -2.25,
+   "beat_p_mean": 0.029633,
+   "beat_logit_range_over_phase": 0.20574546,
+   "emis_beat_logit_mean": -2.01735,
+   "emis_beat_logit_range_over_phase": 0.22395921,
+   "emis_db_logit_range_over_phase": 0.18809676
+  },
+  {
+   "log_tempo": -2.0,
+   "beat_p_mean": 0.037904,
+   "beat_logit_range_over_phase": 0.20503402,
+   "emis_beat_logit_mean": -1.79788,
+   "emis_beat_logit_range_over_phase": 0.22829688,
+   "emis_db_logit_range_over_phase": 0.19228077
+  },
+  {
+   "log_tempo": -1.75,
+   "beat_p_mean": 0.049057,
+   "beat_logit_range_over_phase": 0.20733428,
+   "emis_beat_logit_mean": -1.57133,
+   "emis_beat_logit_range_over_phase": 0.23247588,
+   "emis_db_logit_range_over_phase": 0.19576716
+  },
+  {
+   "log_tempo": -1.5,
+   "beat_p_mean": 0.064121,
+   "beat_logit_range_over_phase": 0.21162224,
+   "emis_beat_logit_mean": -1.33874,
+   "emis_beat_logit_range_over_phase": 0.23636794,
+   "emis_db_logit_range_over_phase": 0.19783068
+  },
+  {
+   "log_tempo": -1.25,
+   "beat_p_mean": 0.084411,
+   "beat_logit_range_over_phase": 0.2175107,
+   "emis_beat_logit_mean": -1.10128,
+   "emis_beat_logit_range_over_phase": 0.23984551,
+   "emis_db_logit_range_over_phase": 0.19836783
+  },
+  {
+   "log_tempo": -1.0,
+   "beat_p_mean": 0.111514,
+   "beat_logit_range_over_phase": 0.2260499,
+   "emis_beat_logit_mean": -0.86026,
+   "emis_beat_logit_range_over_phase": 0.2427972,
+   "emis_db_logit_range_over_phase": 0.19733906
+  },
+  {
+   "log_tempo": -0.75,
+   "beat_p_mean": 0.147173,
+   "beat_logit_range_over_phase": 0.23421955,
+   "emis_beat_logit_mean": -0.61704,
+   "emis_beat_logit_range_over_phase": 0.24562085,
+   "emis_db_logit_range_over_phase": 0.19477499
+  },
+  {
+   "log_tempo": -0.5,
+   "beat_p_mean": 0.192995,
+   "beat_logit_range_over_phase": 0.24362803,
+   "emis_beat_logit_mean": -0.37302,
+   "emis_beat_logit_range_over_phase": 0.24831022,
+   "emis_db_logit_range_over_phase": 0.19077778
+  },
+  {
+   "log_tempo": -0.25,
+   "beat_p_mean": 0.249971,
+   "beat_logit_range_over_phase": 0.25212151,
+   "emis_beat_logit_mean": -0.12959,
+   "emis_beat_logit_range_over_phase": 0.25199652,
+   "emis_db_logit_range_over_phase": 0.18573236
+  },
+  {
+   "log_tempo": 0.0,
+   "beat_p_mean": 0.317855,
+   "beat_logit_range_over_phase": 0.25852519,
+   "emis_beat_logit_mean": 0.1119,
+   "emis_beat_logit_range_over_phase": 0.25537795,
+   "emis_db_logit_range_over_phase": 0.18073392
+  },
+  {
+   "log_tempo": 0.25,
+   "beat_p_mean": 0.394665,
+   "beat_logit_range_over_phase": 0.26247424,
+   "emis_beat_logit_mean": 0.35022,
+   "emis_beat_logit_range_over_phase": 0.25948673,
+   "emis_db_logit_range_over_phase": 0.17585045
+  },
+  {
+   "log_tempo": 0.5,
+   "beat_p_mean": 0.476658,
+   "beat_logit_range_over_phase": 0.26372713,
+   "emis_beat_logit_mean": 0.58423,
+   "emis_beat_logit_range_over_phase": 0.26408851,
+   "emis_db_logit_range_over_phase": 0.17076057
+  },
+  {
+   "log_tempo": 0.75,
+   "beat_p_mean": 0.558979,
+   "beat_logit_range_over_phase": 0.26219237,
+   "emis_beat_logit_mean": 0.81295,
+   "emis_beat_logit_range_over_phase": 0.26983398,
+   "emis_db_logit_range_over_phase": 0.16785559
+  },
+  {
+   "log_tempo": 1.0,
+   "beat_p_mean": 0.636804,
+   "beat_logit_range_over_phase": 0.25793827,
+   "emis_beat_logit_mean": 1.03555,
+   "emis_beat_logit_range_over_phase": 0.27547783,
+   "emis_db_logit_range_over_phase": 0.16889115
+  }
+ ],
+ "max_beat_logit_range_over_phase_any_tempo": 0.2695775,
+ "max_emis_logit_range_over_phase_any_tempo": 0.27547783,
+ "dec_W0_col_absmean": [
+  0.18719,
+  0.16877,
+  0.20504,
+  0.225,
+  0.19549,
+  0.18753,
+  0.18126
+ ],
+ "emis_W0_col_absmean": [
+  0.18053,
+  0.18455,
+  0.1911,
+  0.19078,
+  0.20255,
+  0.17556,
+  0.18885
+ ],
+ "rec_beat|lt_clamp_deployband": 42.98080825805664,
+ "rec_obs|lt_clamp_deployband": 116.04936981201172,
+ "rec_beat|lt_clamp_wide": 33.94937515258789,
+ "rec_obs|lt_clamp_wide": 100.43247985839844,
+ "rec_beat|none": 28.1403751373291,
+ "rec_obs|none": 91.9122085571289,
+ "logtempo_quantiles_1_10_50_90_95_99": [
+  -7.677,
+  -5.602,
+  -3.676,
+  -1.283,
+  -0.284,
+  1.978
+ ],
+ "frac_logtempo_in_deploy_band": 0.279160897943038,
+ "frac_logtempo_above_-2.0": 0.1661392405063291,
+ "frac_beatframes_logtempo_above_-2.0": 0.8392747387830363,
+ "frac_nonbeatframes_logtempo_above_-2.0": 0.1379279256072744,
+ "implied_bpm_at_beat_frames": 1658.0849609375,
+ "implied_bpm_median_all": 48.3686637878418,
+ "onebit_logtempo_BCE_beat": 30.51361656188965,
+ "onebit_thr": -1.4308406975309733,
+ "onebit_p_hi": 0.27395275235176086,
+ "onebit_p_lo": 0.011053948663175106,
+ "onebit_frac_hi": 0.11095727848101265
+}

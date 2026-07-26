@@ -1,0 +1,67 @@
+
+==============================================================================
+EXP1 CUT-THE-SIDE-CHANNEL view=full decoder dims=[0, 1, 2, 3, 4, 5, 6] seed=0
+==============================================================================
+  train 147  eval 40  (14s); h = obs = frozen 2-ch activation, Bernoulli
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+
+==============================================================================
+(1) TRAIN  (train fold only)
+==============================================================================
+  s    1 loss=630.8 rec_b=160.1 rec_db=162.9 rec_obs=307.5 kl=164.7 kl_phi=59.9 0.38 it/s
+  s  100 loss=211.6 rec_b=40.5 rec_db=14.3 rec_obs=126.0 kl=184.4 kl_phi=15.0 0.40 it/s
+  s  200 loss=228.1 rec_b=45.1 rec_db=15.7 rec_obs=129.5 kl=113.5 kl_phi=4.2 0.39 it/s
+  s  300 loss=180.7 rec_b=23.6 rec_db=9.7 rec_obs=87.5 kl=119.7 kl_phi=0.4 0.37 it/s
+  s  400 loss=183.6 rec_b=19.1 rec_db=9.5 rec_obs=80.3 kl=112.1 kl_phi=0.1 0.36 it/s
+  s  500 loss=188.4 rec_b=18.0 rec_db=8.9 rec_obs=81.4 kl=96.2 kl_phi=0.2 0.36 it/s
+  s  600 loss=200.7 rec_b=22.6 rec_db=9.1 rec_obs=80.2 kl=88.7 kl_phi=0.3 0.37 it/s
+  s  700 loss=198.9 rec_b=21.1 rec_db=6.7 rec_obs=102.0 kl=69.1 kl_phi=0.2 0.37 it/s
+  s  800 loss=180.2 rec_b=23.8 rec_db=7.9 rec_obs=86.3 kl=62.2 kl_phi=0.2 0.37 it/s
+  s  900 loss=182.5 rec_b=23.2 rec_db=7.8 rec_obs=93.0 kl=58.6 kl_phi=0.3 0.37 it/s
+  s 1000 loss=163.8 rec_b=19.3 rec_db=6.2 rec_obs=93.0 kl=45.2 kl_phi=0.3 0.37 it/s
+  s 1100 loss=188.1 rec_b=26.5 rec_db=9.0 rec_obs=99.5 kl=53.0 kl_phi=0.2 0.36 it/s
+  s 1200 loss=140.7 rec_b=19.9 rec_db=6.8 rec_obs=69.1 kl=44.8 kl_phi=0.3 0.36 it/s
+
+==============================================================================
+(2) PROBE (a): DOES THE PHASE REVIVE?  teacher-forced posterior rollout
+==============================================================================
+  [train] corr(cos phi,beat)=-0.0034  corr(sin phi,beat)=-0.0097  corr(cos(m*phi),beat)=-0.0034  corr(log_tempo,beat)=+0.4369
+  [train] q_rho=0.0315 p_rho=0.0057  TF phase: frac_neg=0.501 adv=-0.0103 jit=1.8097
+  [train] ABLATION (nats / 256-frame crop):
+      _baserate                    rec_b=   39.33  rec_db=  14.10  rec_obs=   128.54
+      FULL z                       rec_b=   21.78  rec_db=   7.40  rec_obs=    92.07
+      phase -> UNIFORM RANDOM      rec_b=   21.78  rec_db=   7.41  rec_obs=    92.09
+      phase -> CONSTANT 0          rec_b=   21.75  rec_db=   7.37  rec_obs=    92.08
+      log_tempo -> per-crop mean   rec_b=   46.00  rec_db=  15.79  rec_obs=   138.76
+      log_tempo -> shuffled        rec_b=   58.09  rec_db=  19.30  rec_obs=   168.77
+      meter -> flat                rec_b=   21.97  rec_db=   8.63  rec_obs=    93.11
+  [train] DELTA rec_b: phase-random +0.004  phase-const -0.022  tempo-flat +24.228  tempo-shuffled +36.319
+  [eval] corr(cos phi,beat)=-0.0070  corr(sin phi,beat)=-0.0077  corr(cos(m*phi),beat)=-0.0070  corr(log_tempo,beat)=+0.3774
+  [eval] q_rho=0.0313 p_rho=0.0058  TF phase: frac_neg=0.502 adv=-0.0109 jit=1.8126
+  [eval] ABLATION (nats / 256-frame crop):
+      _baserate                    rec_b=   46.40  rec_db=  15.90  rec_obs=   133.73
+      FULL z                       rec_b=   32.64  rec_db=  11.29  rec_obs=    98.15
+      phase -> UNIFORM RANDOM      rec_b=   32.64  rec_db=  11.29  rec_obs=    98.14
+      phase -> CONSTANT 0          rec_b=   32.69  rec_db=  11.28  rec_obs=    98.16
+      log_tempo -> per-crop mean   rec_b=   55.83  rec_db=  18.03  rec_obs=   143.47
+      log_tempo -> shuffled        rec_b=   67.38  rec_db=  21.01  rec_obs=   174.31
+      meter -> flat                rec_b=   32.82  rec_db=  12.16  rec_obs=    99.48
+  [eval] DELTA rec_b: phase-random +0.003  phase-const +0.053  tempo-flat +23.190  tempo-shuffled +34.747
+  first-layer |w| by input group:
+      p_b: {'cos_phi': 0.16825515031814575, 'sin_phi': 0.17055946588516235, 'log_tempo': 0.18838123977184296, 'm1': 0.22664745151996613, 'm2': 0.17220942676067352, 'm3': 0.1746111363172531, 'm4': 0.19621020555496216}
+      p_b|all: 0.18526773154735565
+      p_o: {'cos_phi': 0.1929997205734253, 'sin_phi': 0.18690796196460724, 'log_tempo': 0.19823117554187775, 'm1': 0.2044442892074585, 'm2': 0.18898621201515198, 'm3': 0.19267456233501434, 'm4': 0.17777787148952484}
+      p_o|all: 0.19171740114688873
+
+==============================================================================
+(3) DEPLOY = BOOTSTRAP PARTICLE FILTER  (eval fold 0, full length)
+==============================================================================
+  PF K=300 alpha=1.0  (441s, 40 songs)
+    [mean  ] beat_F=0.3774 db_F=0.1286 n_ratio=2.225 blind0=0.3928 blindbest=0.4266 MARGIN=-0.0492 | db_blind=0.1639 MARGIN_db=-0.0353 | frac_neg=0.499 jit/adv=153.84 ESS=207.2 obs_contrast=1
+    [map   ] beat_F=0.3718 db_F=0.1200 n_ratio=2.223 blind0=0.3930 blindbest=0.4213 MARGIN=-0.0495 | db_blind=0.1634 MARGIN_db=-0.0435 | frac_neg=0.500 jit/adv=503.02 ESS=207.2 obs_contrast=1
+    [smooth] beat_F=0.3768 db_F=0.1087 n_ratio=2.223 blind0=0.3911 blindbest=0.4218 MARGIN=-0.0450 | db_blind=0.1714 MARGIN_db=-0.0626 | frac_neg=0.500 jit/adv=69.90 ESS=207.2 obs_contrast=1
+  PF K=300 alpha=3.0  (440s, 40 songs)
+    [mean  ] beat_F=0.3785 db_F=0.1265 n_ratio=2.217 blind0=0.3891 blindbest=0.4227 MARGIN=-0.0442 | db_blind=0.1673 MARGIN_db=-0.0408 | frac_neg=0.498 jit/adv=155.23 ESS=194.4 obs_contrast=1
+    [map   ] beat_F=0.3678 db_F=0.1245 n_ratio=2.220 blind0=0.3831 blindbest=0.4246 MARGIN=-0.0568 | db_blind=0.1747 MARGIN_db=-0.0503 | frac_neg=0.497 jit/adv=680.87 ESS=194.4 obs_contrast=1
+    [smooth] beat_F=0.3737 db_F=0.1133 n_ratio=2.237 blind0=0.3970 blindbest=0.4323 MARGIN=-0.0587 | db_blind=0.1666 MARGIN_db=-0.0533 | frac_neg=0.497 jit/adv=72.38 ESS=194.4 obs_contrast=1

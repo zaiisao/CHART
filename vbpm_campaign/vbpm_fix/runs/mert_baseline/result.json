@@ -1,0 +1,29 @@
+{
+ "tag": "mert_baseline",
+ "args": {
+  "regime": "mert",
+  "variant": "baseline",
+  "steps": 1200,
+  "warmup": 600,
+  "bs": 16,
+  "frames": 512,
+  "hidden": 128,
+  "lr": 0.0003,
+  "K": 500,
+  "temper": 1.0,
+  "obs_weight": 1.0,
+  "n_eval": 30,
+  "max_frames": 1600,
+  "eval_every": 400,
+  "out": "mert_baseline"
+ },
+ "final": {
+  "baseline_freerun": {
+   "beat_F": 0.0,
+   "db_F": 0.13468125726255561,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.0,
+   "n_songs": 30
+  }
+ }
+}

@@ -1,0 +1,28 @@
+
+===== ALL79  (cap 1600 frames = 32 s) =====
+free_run (open loop, same model)           beat_F=0.020 db_F=0.000 n_est/n_true=0.033 (N=79)
+PARTICLE FILTER (K=400)                    beat_F=0.371 db_F=0.128 n_est/n_true=2.449 (N=79)
+PARTICLE FILTER + smooth5 read-out         beat_F=0.369 db_F=0.122 n_est/n_true=2.437 (N=79)
+PARTICLE FILTER + smooth9 read-out         beat_F=0.359 db_F=0.110 n_est/n_true=2.285 (N=79)
+FLOOR 120-BPM metronome                    beat_F=0.287
+FLOOR blind grid @ PF density 2.45x        beat_F=0.393
+FLOOR blind grid @ PF+sm5 density 2.44x    beat_F=0.393
+FLOOR blind grid @ PF+sm9 density 2.29x    beat_F=0.383
+REF perfect open loop (oracle tempo+phase) beat_F=0.601
+
+===== eval[:30]  (cap 1600 frames = 32 s) =====
+free_run (open loop, same model)           beat_F=0.018 db_F=0.000 n_est/n_true=0.031 (N=30)
+PARTICLE FILTER (K=400)                    beat_F=0.392 db_F=0.135 n_est/n_true=2.331 (N=30)
+PARTICLE FILTER + smooth5 read-out         beat_F=0.384 db_F=0.130 n_est/n_true=2.325 (N=30)
+PARTICLE FILTER + smooth9 read-out         beat_F=0.375 db_F=0.124 n_est/n_true=2.164 (N=30)
+FLOOR 120-BPM metronome                    beat_F=0.295
+FLOOR blind grid @ PF density 2.33x        beat_F=0.410
+FLOOR blind grid @ PF+sm5 density 2.33x    beat_F=0.409
+FLOOR blind grid @ PF+sm9 density 2.16x    beat_F=0.416
+REF perfect open loop (oracle tempo+phase) beat_F=0.701
+
+===== TIME-ROLL CONTROL (+1000 frames = 20 s, labels fixed) =====
+  PF         aligned=0.388 rolled=0.387 metro=0.293 drop=+0.001
+  free_run   aligned=0.017 rolled=0.017 metro=0.293 drop=+0.000
+
+WROTE /home/sogang/jaehoon/VBPM_reintegration/vbpm_fix/final_dirac.json

@@ -1,0 +1,45 @@
+{
+ "ckpt": "/home/sogang/jaehoon/VBPM_reintegration/vbpm_final/e3_A_both.pt",
+ "config": {
+  "drop_tempo": 1,
+  "emission": "frozen",
+  "lik": "gauss",
+  "bpb": 24,
+  "steps": 1200,
+  "warmup": 600,
+  "bs": 16,
+  "frames": 256,
+  "hidden": 128,
+  "lr": 0.0003,
+  "obs_w": 1.0,
+  "K": 600,
+  "num_meters": 3,
+  "alphas": [
+   1.0,
+   0.25
+  ],
+  "n_eval": 0,
+  "seed": 0,
+  "tag": "e3_A_both"
+ },
+ "transition": {
+  "rho_mean": 0.7451608180999756,
+  "rho_med": 0.750673234462738,
+  "rho_p10": 0.6915643811225891,
+  "rho_p90": 0.7911555767059326,
+  "gamma_med_rad": 0.2867848291446536,
+  "level_sigma_med": 0.8417606949806213,
+  "dev_sigma_med": 0.19872935116291046,
+  "dev_ar_med": 0.01737654209136963,
+  "level_ar": 0.8505589365959167,
+  "tempo_dof": 3.152653694152832
+ },
+ "side_channel": {
+  "corr_logtempo_beats": 0.00434482754122451,
+  "corr_cosphi_beats": -0.18050251497929912,
+  "corr_sinphi_beats": -0.028406583853738003,
+  "logtempo_std": 1.7842540740966797,
+  "logtempo_mean": -4.238025188446045,
+  "R_phase_vs_true": 0.010660182479767284
+ }
+}

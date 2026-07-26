@@ -1,0 +1,4 @@
+DIRAC: train 147 eval 30
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+  [base] s200 rec_b=37.2 kl_phi=0.09 0.26 it/s

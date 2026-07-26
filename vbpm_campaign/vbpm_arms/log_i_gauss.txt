@@ -1,0 +1,47 @@
+
+==============================================================================
+ARM (i)  obs=head_gauss  tag=i_gauss
+==============================================================================
+  train 147  eval 40   loaded in 25s
+  observation = frozen head activation, obs_dim=2, likelihood=gauss
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+
+==============================================================================
+(1) TRAIN  (train fold only)
+==============================================================================
+  s    1 loss=26292.9 rec_b=172.5 rec_db=177.3 rec_obs=25942.8 kl=190.0 kl_phi=80.6 0.44 it/s
+  s  100 loss=7206.5 rec_b=42.3 rec_db=21.1 rec_obs=7093.2 kl=299.1 kl_phi=103.2 0.53 it/s
+  s  200 loss=5232.3 rec_b=44.4 rec_db=15.0 rec_obs=5058.7 kl=342.5 kl_phi=167.4 0.52 it/s
+  s  300 loss=4906.7 rec_b=42.2 rec_db=15.5 rec_obs=4680.9 kl=336.2 kl_phi=160.1 0.52 it/s
+  s  400 loss=1798.3 rec_b=23.8 rec_db=11.9 rec_obs=1463.1 kl=449.4 kl_phi=43.3 0.53 it/s
+  s  500 loss=1457.7 rec_b=18.6 rec_db=8.0 rec_obs=1086.3 kl=413.8 kl_phi=28.8 0.53 it/s
+  s  600 loss=1349.7 rec_b=21.3 rec_db=8.4 rec_obs=973.3 kl=346.7 kl_phi=3.9 0.53 it/s
+  s  700 loss=1259.5 rec_b=20.7 rec_db=7.0 rec_obs=939.9 kl=291.9 kl_phi=2.5 0.53 it/s
+  s  800 loss=1181.2 rec_b=22.1 rec_db=7.1 rec_obs=871.3 kl=280.7 kl_phi=3.3 0.53 it/s
+  s  900 loss=1146.8 rec_b=20.0 rec_db=7.1 rec_obs=825.5 kl=294.2 kl_phi=2.0 0.53 it/s
+  s 1000 loss=1084.7 rec_b=18.1 rec_db=5.5 rec_obs=794.1 kl=267.1 kl_phi=2.0 0.53 it/s
+  s 1100 loss=1111.8 rec_b=25.0 rec_db=7.5 rec_obs=809.4 kl=269.9 kl_phi=1.8 0.53 it/s
+  s 1200 loss=1011.2 rec_b=16.3 rec_db=5.6 rec_obs=734.2 kl=255.1 kl_phi=1.0 0.53 it/s
+  layer softmax: 0.067 0.066 0.075 0.081 0.084 0.092 0.096 0.093 0.082 0.067 0.066 0.064 0.067  argmax=6
+
+==============================================================================
+(2) DEPLOY = BOOTSTRAP PARTICLE FILTER  (eval fold 0, full length)
+==============================================================================
+  PF K=300 alpha=1.0  (182s, 40 songs)
+    [mean  ] beat_F=0.3746 db_F=0.1346 n_ratio=2.189 blind0=0.3904 blindbest=0.4249 MARGIN=-0.0502 | db_blind=0.1573 MARGIN_db=-0.0227 | frac_neg=0.500 jit/adv=561.22 ESS=136.7 obs_contrast=0.997
+    [map   ] beat_F=0.3621 db_F=0.1446 n_ratio=2.066 blind0=0.3806 blindbest=0.4217 MARGIN=-0.0597 | db_blind=0.1663 MARGIN_db=-0.0217 | frac_neg=0.499 jit/adv=478.79 ESS=136.7 obs_contrast=0.997
+    [smooth] beat_F=0.3786 db_F=0.1336 n_ratio=2.229 blind0=0.3989 blindbest=0.4214 MARGIN=-0.0428 | db_blind=0.1820 MARGIN_db=-0.0484 | frac_neg=0.501 jit/adv=253.56 ESS=136.7 obs_contrast=0.997
+  PF K=300 alpha=3.0  (184s, 40 songs)
+    [mean  ] beat_F=0.3747 db_F=0.1453 n_ratio=2.230 blind0=0.3950 blindbest=0.4247 MARGIN=-0.0500 | db_blind=0.1652 MARGIN_db=-0.0199 | frac_neg=0.498 jit/adv=255.40 ESS=102.0 obs_contrast=0.997
+    [map   ] beat_F=0.3543 db_F=0.1576 n_ratio=1.997 blind0=0.3684 blindbest=0.4201 MARGIN=-0.0658 | db_blind=0.1654 MARGIN_db=-0.0078 | frac_neg=0.497 jit/adv=162.58 ESS=102.0 obs_contrast=0.997
+    [smooth] beat_F=0.3838 db_F=0.1520 n_ratio=2.234 blind0=0.3830 blindbest=0.4241 MARGIN=-0.0404 | db_blind=0.1706 MARGIN_db=-0.0187 | frac_neg=0.500 jit/adv=111.79 ESS=102.0 obs_contrast=0.997
+  PF K=600 alpha=1.0  (178s, 40 songs)
+    [mean  ] beat_F=0.3763 db_F=0.1355 n_ratio=2.249 blind0=0.3973 blindbest=0.4303 MARGIN=-0.0540 | db_blind=0.1609 MARGIN_db=-0.0254 | frac_neg=0.499 jit/adv=170.90 ESS=273.2 obs_contrast=0.997
+    [map   ] beat_F=0.3505 db_F=0.1571 n_ratio=2.048 blind0=0.3736 blindbest=0.4188 MARGIN=-0.0683 | db_blind=0.1698 MARGIN_db=-0.0127 | frac_neg=0.497 jit/adv=123.03 ESS=273.2 obs_contrast=0.997
+    [smooth] beat_F=0.3867 db_F=0.1240 n_ratio=2.218 blind0=0.3961 blindbest=0.4252 MARGIN=-0.0386 | db_blind=0.1585 MARGIN_db=-0.0345 | frac_neg=0.499 jit/adv=75.71 ESS=273.2 obs_contrast=0.997
+  PF K=600 alpha=3.0  (184s, 40 songs)
+    [mean  ] beat_F=0.3681 db_F=0.1441 n_ratio=2.215 blind0=0.3896 blindbest=0.4294 MARGIN=-0.0613 | db_blind=0.1608 MARGIN_db=-0.0167 | frac_neg=0.499 jit/adv=166.37 ESS=203.6 obs_contrast=0.997
+    [map   ] beat_F=0.3489 db_F=0.1532 n_ratio=1.944 blind0=0.3771 blindbest=0.4044 MARGIN=-0.0555 | db_blind=0.1578 MARGIN_db=-0.0046 | frac_neg=0.494 jit/adv=216.07 ESS=203.6 obs_contrast=0.997
+    [smooth] beat_F=0.3782 db_F=0.1402 n_ratio=2.198 blind0=0.3925 blindbest=0.4196 MARGIN=-0.0414 | db_blind=0.1793 MARGIN_db=-0.0391 | frac_neg=0.500 jit/adv=74.40 ESS=203.6 obs_contrast=0.997
+WROTE /home/sogang/jaehoon/VBPM_reintegration/vbpm_arms/arm_i_i_gauss.json

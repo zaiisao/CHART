@@ -1,0 +1,43 @@
+
+==============================================================================
+full_s0
+==============================================================================
+  eval corr(cos,b)=-0.0070 corr(sin,b)=-0.0077 corr(cos m*phi,b)=-0.0070 corr(logT,b)=+0.3774
+  eval d_rec_b: phase-rand +0.003 phase-const +0.053 tempo-flat +23.190 tempo-shuf +34.747
+  eval d_obs/frame: phase -0.00004 tempo +0.17705  | rec_b FULL 32.64 vs baserate 46.40
+
+==============================================================================
+full_s1
+==============================================================================
+  eval corr(cos,b)=-0.0023 corr(sin,b)=-0.0025 corr(cos m*phi,b)=-0.0086 corr(logT,b)=+0.4044
+  eval d_rec_b: phase-rand +0.003 phase-const +0.021 tempo-flat +28.620 tempo-shuf +41.418
+  eval d_obs/frame: phase -0.00005 tempo +0.16591  | rec_b FULL 28.46 vs baserate 46.40
+
+==============================================================================
+cut_tempo_s0
+==============================================================================
+  eval corr(cos,b)=-0.1164 corr(sin,b)=-0.0823 corr(cos m*phi,b)=+0.0126 corr(logT,b)=-0.0002
+  eval d_rec_b: phase-rand +4.183 phase-const +6.193 tempo-flat +0.000 tempo-shuf +0.000
+  eval d_obs/frame: phase +0.02500 tempo +0.00000  | rec_b FULL 43.92 vs baserate 46.40
+
+==============================================================================
+cut_tempo_s1
+==============================================================================
+  eval corr(cos,b)=+0.1025 corr(sin,b)=-0.0906 corr(cos m*phi,b)=+0.0173 corr(logT,b)=+0.0157
+  eval d_rec_b: phase-rand +5.512 phase-const +3.971 tempo-flat +0.000 tempo-shuf +0.000
+  eval d_obs/frame: phase +0.03681 tempo +0.00000  | rec_b FULL 43.94 vs baserate 46.40
+
+==============================================================================
+cut_phase_s0
+==============================================================================
+  eval corr(cos,b)=-0.0047 corr(sin,b)=+0.0065 corr(cos m*phi,b)=-0.0035 corr(logT,b)=+0.4166
+  eval d_rec_b: phase-rand +0.000 phase-const +0.000 tempo-flat +26.336 tempo-shuf +44.572
+  eval d_obs/frame: phase +0.00000 tempo +0.13565  | rec_b FULL 28.21 vs baserate 46.40
+
+==============================================================================
+cut_phase_s1
+==============================================================================
+  eval corr(cos,b)=-0.0010 corr(sin,b)=+0.0017 corr(cos m*phi,b)=+0.0133 corr(logT,b)=+0.3860
+  eval d_rec_b: phase-rand +0.000 phase-const +0.000 tempo-flat +24.900 tempo-shuf +34.998
+  eval d_obs/frame: phase +0.00000 tempo +0.16329  | rec_b FULL 29.85 vs baserate 46.40
+WROTE exp1prb_all.json

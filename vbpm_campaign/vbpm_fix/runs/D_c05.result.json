@@ -1,0 +1,20 @@
+{
+  "tag": "D_c05",
+  "mode": "dirac",
+  "baseline": 0,
+  "corr_scale": 0.5,
+  "tempo_corr_scale": 0.0,
+  "tempo_init": 1,
+  "steps": 800,
+  "best_beat_F": 0.15342397785271325,
+  "final": {
+    "beat_phase": 0.15342397785271325,
+    "downbeat_phase": 0.04403924819046302,
+    "metronome": 0.296136726106983,
+    "ratio": 0.43355062137327344,
+    "lt": -5.9522637844085695
+  },
+  "shift_rad_trained": 0.003682470228523016,
+  "shift_rad_untrained": 0.0004465580161195248,
+  "corr_range": 0.049799677729606626
+}

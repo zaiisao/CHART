@@ -1,0 +1,20 @@
+{
+  "tag": "D_tinit",
+  "mode": "dirac",
+  "baseline": 0,
+  "corr_scale": 0.0,
+  "tempo_corr_scale": 0.0,
+  "tempo_init": 1,
+  "steps": 800,
+  "best_beat_F": 0.02314121402943587,
+  "final": {
+    "beat_phase": 0.02275605971204268,
+    "downbeat_phase": 0.0,
+    "metronome": 0.296136726106983,
+    "ratio": 0.04695830063212198,
+    "lt": -5.851409649848938
+  },
+  "shift_rad_trained": 8.218289003707469e-05,
+  "shift_rad_untrained": 0.0004465580161195248,
+  "corr_range": 0.0
+}

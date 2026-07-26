@@ -1,0 +1,90 @@
+{
+ "dirac_ab_ow1/A_freerun": {
+  "beat_F": 0.875,
+  "db_F": 0.0,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": -0.007239763360867335,
+  "bars_true": 15.78125,
+  "phi_range": 0.1428574025630951,
+  "n_wrap": 0.0,
+  "n_est/n_true": 0.9144602851323829,
+  "n_songs": 8
+ },
+ "dirac_ab_ow1/noA_freerun": {
+  "beat_F": 0.044434615496396185,
+  "db_F": 0.029411764705882353,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": 0.9102437014910201,
+  "bars_true": 15.78125,
+  "phi_range": 6.279444932937622,
+  "n_wrap": 1.0,
+  "n_est/n_true": 0.06109979633401222,
+  "n_songs": 8
+ },
+ "dirac_ab_ow1/B_filter": {
+  "beat_F": 0.4249495249198072,
+  "db_F": 0.1360791471432204,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": 0.6752865515429933,
+  "bars_true": 15.78125,
+  "phi_range": 6.205834627151489,
+  "n_wrap": 7.625,
+  "n_est/n_true": 0.9409368635437881,
+  "n_songs": 8
+ },
+ "dirac_ab_ow1/AB_filter": {
+  "beat_F": 0.39887924796085883,
+  "db_F": 0.11621678743961353,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": 1.1440906064031582,
+  "bars_true": 15.78125,
+  "phi_range": 6.195490894839168,
+  "n_wrap": 7.625,
+  "n_est/n_true": 1.5234215885947047,
+  "n_songs": 8
+ },
+ "dirac_ab_ow01/A_freerun": {
+  "beat_F": 0.0,
+  "db_F": 0.0,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": -0.00973663387570397,
+  "bars_true": 15.78125,
+  "phi_range": 0.15119296312332153,
+  "n_wrap": 0.0,
+  "n_est/n_true": 0.0,
+  "n_songs": 8
+ },
+ "dirac_ab_ow01/noA_freerun": {
+  "beat_F": 0.07819534125706512,
+  "db_F": 0.01,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": 2.8917742237160873,
+  "bars_true": 15.78125,
+  "phi_range": 6.277887225151062,
+  "n_wrap": 3.0,
+  "n_est/n_true": 0.18737270875763748,
+  "n_songs": 8
+ },
+ "dirac_ab_ow01/B_filter": {
+  "beat_F": 0.37564853106990526,
+  "db_F": 0.11100771648372268,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": 2.737024427493701,
+  "bars_true": 15.78125,
+  "phi_range": 6.179777085781097,
+  "n_wrap": 12.375,
+  "n_est/n_true": 1.3156822810590632,
+  "n_songs": 8
+ },
+ "dirac_ab_ow01/AB_filter": {
+  "beat_F": 0.418953968391945,
+  "db_F": 0.13699652274702984,
+  "metro_F": 0.28458155229144977,
+  "bars_advanced": -0.8129031786356606,
+  "bars_true": 15.78125,
+  "phi_range": 6.228930592536926,
+  "n_wrap": 11.875,
+  "n_est/n_true": 1.3665987780040734,
+  "n_songs": 8
+ }
+}

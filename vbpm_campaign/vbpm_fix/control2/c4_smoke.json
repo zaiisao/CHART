@@ -1,0 +1,102 @@
+{
+ "conv probe + peak-pick (POSITIVE CONTROL)": {
+  "A": {
+   "beat_F": 0.8843340352243819,
+   "db_F": NaN,
+   "ratio": 1.2171052631578947,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "blind_grid_at_own_density": 0.28173804633776006,
+  "B": {
+   "beat_F": 0.05149724621935737,
+   "db_F": NaN,
+   "ratio": 1.263157894736842,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "C": {
+   "beat_F": 0.8124567392860076,
+   "db_F": NaN,
+   "ratio": 1.3241379310344827,
+   "metronome": 0.21157946400716934,
+   "N": 3
+  },
+  "verdict": "CLEAN / TRACKING -- collapses when misaligned, recovers when labels follow the audio"
+ },
+ "UNFIXED VBPM free_run (the quoted 0.31)": {
+  "A": {
+   "beat_F": 0.4128777384393054,
+   "db_F": 0.0,
+   "ratio": 3.8815789473684212,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "blind_grid_at_own_density": 0.3746952937181067,
+  "B": {
+   "beat_F": 0.3983539539314076,
+   "db_F": 0.0,
+   "ratio": 3.9539473684210527,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "C": {
+   "beat_F": 0.3814589007841707,
+   "db_F": 0.0,
+   "ratio": 4.144827586206897,
+   "metronome": 0.21157946400716934,
+   "N": 3
+  },
+  "verdict": "AMBIGUOUS"
+ },
+ "variant-B free_run (open loop)": {
+  "A": {
+   "beat_F": 0.2670068027210884,
+   "db_F": 0.0753968253968254,
+   "ratio": 0.9342105263157895,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "blind_grid_at_own_density": 0.24570546441989358,
+  "B": {
+   "beat_F": 0.260204081632653,
+   "db_F": 0.0753968253968254,
+   "ratio": 0.9342105263157895,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "C": {
+   "beat_F": 0.2532632218246676,
+   "db_F": 0.05047619047619048,
+   "ratio": 0.9793103448275862,
+   "metronome": 0.21157946400716934,
+   "N": 3
+  },
+  "verdict": "AT/BELOW FLOOR -- no tracking claim survives (score explained by density alone)"
+ },
+ "variant-B PARTICLE FILTER (K=100)": {
+  "A": {
+   "beat_F": 0.3888948993868769,
+   "db_F": 0.1543416326025022,
+   "ratio": 2.4210526315789473,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "blind_grid_at_own_density": 0.3843635500285547,
+  "B": {
+   "beat_F": 0.3854334231060761,
+   "db_F": 0.07473158835625639,
+   "ratio": 2.3223684210526314,
+   "metronome": 0.2806340609958837,
+   "N": 3
+  },
+  "C": {
+   "beat_F": 0.35034396497811127,
+   "db_F": 0.16872408335764746,
+   "ratio": 2.43448275862069,
+   "metronome": 0.21157946400716934,
+   "N": 3
+  },
+  "verdict": "AT/BELOW FLOOR -- no tracking claim survives (score explained by density alone)"
+ }
+}

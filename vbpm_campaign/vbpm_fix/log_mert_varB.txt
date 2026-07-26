@@ -1,0 +1,19 @@
+MERT: train 147 eval 25
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+  [varB] s200 rec_b=46.0 rec_obs=12206.5 kl_phi=401.41 0.23 it/s
+  [varB] s400 rec_b=39.9 rec_obs=11980.1 kl_phi=213.53 0.24 it/s
+  [varB] s600 rec_b=39.9 rec_obs=11805.4 kl_phi=132.02 0.25 it/s
+  [varB] s800 rec_b=37.0 rec_obs=11709.8 kl_phi=103.52 0.26 it/s
+  [varB] s1000 rec_b=28.5 rec_obs=11589.7 kl_phi=160.78 0.26 it/s
+  [varB] s1200 rec_b=31.7 rec_obs=11486.4 kl_phi=172.13 0.26 it/s
+VARIANT-B free_run(open-loop, SAME trained model): beat_F=0.275 db_F=0.065 n_est/n_true=0.885 metronome=0.290
+VARIANT-B PF(K=300,a=1.0) wmean : beat_F=0.425 db_F=0.246 n_est/n_true=2.363 metronome=0.290 ESS=135.2
+VARIANT-B PF(K=300,a=1.0) MAP   : beat_F=0.398 db_F=0.242 n_est/n_true=2.320 metronome=0.290
+VARIANT-B PF(K=300,a=1.0) smooth: beat_F=0.449 db_F=0.257 n_est/n_true=2.394 metronome=0.290
+VARIANT-B PF(K=300,a=3.0) wmean : beat_F=0.417 db_F=0.242 n_est/n_true=2.360 metronome=0.290 ESS=87.2
+VARIANT-B PF(K=300,a=3.0) MAP   : beat_F=0.403 db_F=0.245 n_est/n_true=2.374 metronome=0.290
+VARIANT-B PF(K=300,a=3.0) smooth: beat_F=0.440 db_F=0.255 n_est/n_true=2.417 metronome=0.290
+VARIANT-B SHIFT free_run: max|dphi|=0.0258 mean=0.0135 lags=[0, 0, 0, 0, 1, 0]
+VARIANT-B SHIFT PF      : max|dphi|=3.1402 mean=1.4750 lags=[25, 25, 25, 25, 25, 25] cost min/max=0.083/1.739
+WROTE /home/sogang/jaehoon/VBPM_reintegration/vbpm_fix/results_mert_varB.json

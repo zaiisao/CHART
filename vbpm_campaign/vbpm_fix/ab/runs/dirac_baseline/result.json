@@ -1,0 +1,35 @@
+{
+ "tag": "dirac_baseline",
+ "args": {
+  "regime": "dirac",
+  "variant": "baseline",
+  "steps": 800,
+  "warmup": 400,
+  "bs": 16,
+  "frames": 256,
+  "hidden": 128,
+  "lr": 0.0003,
+  "K": 500,
+  "temper": 1.0,
+  "obs_weight": 1.0,
+  "n_eval": 30,
+  "max_frames": 1600,
+  "eval_every": 400,
+  "out": "dirac_baseline"
+ },
+ "final": {
+  "baseline_freerun": {
+   "beat_F": 0.0769247859697668,
+   "db_F": 0.14266431292008028,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 1.04,
+   "n_songs": 30
+  }
+ },
+ "shift_test": {
+  "baseline_freerun": {
+   "max_over_songs": 2.952892541885376,
+   "mean_of_per_song_max": 0.6830650806427002
+  }
+ }
+}

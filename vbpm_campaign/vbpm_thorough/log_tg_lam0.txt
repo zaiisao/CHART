@@ -1,0 +1,10 @@
+================================================================================================
+ANCHOR[thorough phys_law] lam=0.0  links=residual v_max=3.0 phys=fit phys_law=gauss pin_dof=False  elbo_obs=vae  transition=learned pf=path K=300 alpha=1.0  tag=tg_lam0
+================================================================================================
+train 147 (holdout fold -1: 0)   eval 79 [eval]
+supervised emission lik=gauss bpb=24 songs/meter={2: 8, 3: 20, 4: 119}  obs_contrast(train)=5.759  (1.5s)
+/home/sogang/mnt/db_2/anaconda3/envs/chart/lib/python3.10/site-packages/sympy/external/gmpy.py:138: UserWarning: gmpy2 version is too old to use (2.0.0 or newer required)
+  gmpy = import_module('gmpy2', min_module_version=_GMPY2_MIN_VERSION,
+  s    1 loss=  78072.2 rec_b=  231.5 rec_db=  160.5 rec_o=   334.5 kl=46407392.0 (phi  1620.4 lv 4048.4 dv 46401720.0 m   4.5) | ANC=     0.00 (ph     0.00 lv    0.00 dv    0.00 m  -0.00) 0.000/fr | g_psi=5.55e-04 s_lv=1.25e-03 s_dv=1.00e-03 sat=0.00 FRAC_NEG_prior=0.0071 0.15 it/s
+  s   50 loss=    534.4 rec_b=  120.7 rec_db=   67.3 rec_o=   169.7 kl=  2119.6 (phi   921.6 lv  796.1 dv  401.5 m   0.4) | ANC= 70127.20 (ph   402.65 lv 37627.62 dv 32096.34 m   0.60) 1.579/fr | g_psi=9.63e-03 s_lv=2.17e-02 s_dv=1.60e-02 sat=0.00 FRAC_NEG_prior=0.1306 0.16 it/s
+  s  100 loss=    357.1 rec_b=   45.0 rec_db=   20.0 rec_o=   125.9 kl=   997.2 (phi   822.0 lv  104.4 dv   70.8 m   0.0) | ANC= 69740.77 (ph   434.99 lv 48756.30 dv 20549.47 m   0.01) 1.706/fr | g_psi=1.11e-02 s_lv=2.46e-02 s_dv=1.29e-02 sat=0.75 FRAC_NEG_prior=0.4248 0.16 it/s

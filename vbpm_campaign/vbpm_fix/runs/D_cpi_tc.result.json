@@ -1,0 +1,20 @@
+{
+  "tag": "D_cpi_tc",
+  "mode": "dirac",
+  "baseline": 0,
+  "corr_scale": 3.14159265,
+  "tempo_corr_scale": 0.5,
+  "tempo_init": 1,
+  "steps": 800,
+  "best_beat_F": 0.35991466788327175,
+  "final": {
+    "beat_phase": 0.23959379470211123,
+    "downbeat_phase": 0.023569831775692295,
+    "metronome": 0.296136726106983,
+    "ratio": 1.891785537875635,
+    "lt": -4.804291105270385
+  },
+  "shift_rad_trained": 1.0824562788009644,
+  "shift_rad_untrained": 0.0004465580161195248,
+  "corr_range": 0.5882480621337891
+}

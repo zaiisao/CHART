@@ -1,0 +1,114 @@
+{
+ "tag": "mert_ab_ow01",
+ "args": {
+  "regime": "mert",
+  "variant": "ab",
+  "steps": 1200,
+  "warmup": 600,
+  "bs": 16,
+  "frames": 512,
+  "hidden": 128,
+  "lr": 0.0003,
+  "K": 500,
+  "temper": 1.0,
+  "obs_weight": 0.1,
+  "n_eval": 30,
+  "max_frames": 1600,
+  "eval_every": 400,
+  "out": "mert_ab_ow01"
+ },
+ "final": {
+  "A_freerun": {
+   "beat_F": 0.199417137273358,
+   "db_F": 0.002564102564102564,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.337,
+   "n_songs": 30
+  },
+  "noA_freerun": {
+   "beat_F": 0.13994294352337786,
+   "db_F": 0.03221661085766485,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.249,
+   "n_songs": 30
+  },
+  "B_filter": {
+   "beat_F": 0.20537330494732156,
+   "db_F": 0.0,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.5145,
+   "n_songs": 30
+  },
+  "B_filter|circmean": {
+   "beat_F": 0.18803173529345013,
+   "db_F": 0.0,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.3755,
+   "n_songs": 30
+  },
+  "AB_filter": {
+   "beat_F": 0.23741087522771617,
+   "db_F": 0.0,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.491,
+   "n_songs": 30
+  },
+  "AB_filter|circmean": {
+   "beat_F": 0.22038108167017348,
+   "db_F": 0.0,
+   "metro_F": 0.2952376398642291,
+   "n_est/n_true": 0.444,
+   "n_songs": 30
+  }
+ },
+ "temper_sweep": {
+  "0.25": {
+   "AB_filter": {
+    "beat_F": 0.2333580903055543,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.5848623853211009,
+    "n_songs": 15
+   },
+   "AB_filter|circmean": {
+    "beat_F": 0.23050907782017643,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.5,
+    "n_songs": 15
+   }
+  },
+  "0.5": {
+   "AB_filter": {
+    "beat_F": 0.23135094569377773,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.5860091743119266,
+    "n_songs": 15
+   },
+   "AB_filter|circmean": {
+    "beat_F": 0.22604506281195372,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.49655963302752293,
+    "n_songs": 15
+   }
+  },
+  "1.0": {
+   "AB_filter": {
+    "beat_F": 0.22230643822262805,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.5401376146788991,
+    "n_songs": 15
+   },
+   "AB_filter|circmean": {
+    "beat_F": 0.2118701815617851,
+    "db_F": 0.0,
+    "metro_F": 0.28148405268289756,
+    "n_est/n_true": 0.5057339449541285,
+    "n_songs": 15
+   }
+  }
+ }
+}

@@ -1,0 +1,25 @@
+
+==============================================================================
+EXP1 DEPLOY  view=cut_tempo seed=1 dims=[0, 1, 3, 4, 5, 6]
+==============================================================================
+  PF K=300 alpha=1.0 (313s, 40 songs)  contrast_bar=1.0049 contrast_beat=1.0494
+    [mean  ] beat_F=0.3098 db_F=0.2193 n_ratio=1.874 blind0=0.3809 blindbest=0.4111 MARGIN=-0.1013 | db_blind=0.1709 MARGIN_db=+0.0484 | frac_neg=0.469 jit/adv=25.04 ESS=221.5 obs_contrast=1
+             lock_bar=0.0213 lock_beat=0.1826 phidot/true=0.814 contrast_beat=1.0494
+    [map   ] beat_F=0.3253 db_F=0.1774 n_ratio=1.990 blind0=0.3824 blindbest=0.4194 MARGIN=-0.0942 | db_blind=0.1731 MARGIN_db=+0.0043 | frac_neg=0.487 jit/adv=101.52 ESS=221.5 obs_contrast=1
+             lock_bar=0.0248 lock_beat=0.1334 phidot/true=0.512 contrast_beat=1.0494
+    [smooth] beat_F=0.4934 db_F=0.2295 n_ratio=1.969 blind0=0.3705 blindbest=0.4039 MARGIN=+0.0895 | db_blind=0.1763 MARGIN_db=+0.0532 | frac_neg=0.460 jit/adv=11.20 ESS=221.5 obs_contrast=1
+             lock_bar=0.0327 lock_beat=0.2003 phidot/true=0.814 contrast_beat=1.0494
+  PF K=300 alpha=3.0 (347s, 40 songs)  contrast_bar=1.0049 contrast_beat=1.0494
+    [mean  ] beat_F=0.2907 db_F=0.2529 n_ratio=0.652 blind0=0.2096 blindbest=0.2736 MARGIN=+0.0171 | db_blind=0.1772 MARGIN_db=+0.0757 | frac_neg=0.457 jit/adv=12.63 ESS=203.9 obs_contrast=1
+             lock_bar=0.0216 lock_beat=0.1978 phidot/true=1.328 contrast_beat=1.0494
+    [map   ] beat_F=0.2524 db_F=0.1641 n_ratio=1.514 blind0=0.3416 blindbest=0.3830 MARGIN=-0.1306 | db_blind=0.1703 MARGIN_db=-0.0061 | frac_neg=0.487 jit/adv=126.79 ESS=203.9 obs_contrast=1
+             lock_bar=0.0233 lock_beat=0.1544 phidot/true=0.346 contrast_beat=1.0494
+    [smooth] beat_F=0.5664 db_F=0.2557 n_ratio=1.856 blind0=0.3627 blindbest=0.4009 MARGIN=+0.1655 | db_blind=0.1655 MARGIN_db=+0.0903 | frac_neg=0.430 jit/adv=6.03 ESS=203.9 obs_contrast=1
+             lock_bar=0.0300 lock_beat=0.2146 phidot/true=1.328 contrast_beat=1.0494
+  PF K=600 alpha=1.0 (409s, 40 songs)  contrast_bar=1.0049 contrast_beat=1.0494
+    [mean  ] beat_F=0.3010 db_F=0.2405 n_ratio=1.568 blind0=0.3479 blindbest=0.3985 MARGIN=-0.0975 | db_blind=0.1626 MARGIN_db=+0.0779 | frac_neg=0.466 jit/adv=27.75 ESS=442.6 obs_contrast=1
+             lock_bar=0.0234 lock_beat=0.1957 phidot/true=0.860 contrast_beat=1.0494
+    [map   ] beat_F=0.3304 db_F=0.1577 n_ratio=1.958 blind0=0.3878 blindbest=0.4148 MARGIN=-0.0845 | db_blind=0.1740 MARGIN_db=-0.0163 | frac_neg=0.490 jit/adv=151.15 ESS=442.6 obs_contrast=1
+             lock_bar=0.0250 lock_beat=0.1376 phidot/true=0.327 contrast_beat=1.0494
+    [smooth] beat_F=0.5261 db_F=0.2629 n_ratio=1.849 blind0=0.3640 blindbest=0.4067 MARGIN=+0.1194 | db_blind=0.1686 MARGIN_db=+0.0943 | frac_neg=0.452 jit/adv=12.70 ESS=442.6 obs_contrast=1
+             lock_bar=0.0349 lock_beat=0.2119 phidot/true=0.860 contrast_beat=1.0494
