@@ -24,7 +24,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 import reference as R  # noqa: E402  (§8 metrics + baselines, spec-side code)
 
-from .data import load_crops  # noqa: E402
+from .data import VALUES, load_crops, to_prob  # noqa: E402
 from .reducers import REDUCERS  # noqa: E402
 from .stage0 import Stage0  # noqa: E402
 
@@ -59,6 +59,28 @@ def crop_stats(crop, values, reducer):
     return counts, offset_mask, reducer(crop["h"]).numpy()
 
 
+def emission_logp_from_counts(counts, offset_mask, log_m, alpha, beta):
+    """[..., K] log p_theta(y|m) from precomputed counts. Dtype/device follow the inputs.
+
+    The ONE composition of the linearised emission — every vectorized objective
+    (Batch.elbo_mean, the e2e head) must call this, not re-derive it.
+    """
+    lsig = torch.nn.functional.logsigmoid
+    v = torch.stack([lsig(alpha), lsig(-alpha), lsig(beta), lsig(-beta)])
+    return torch.logsumexp(counts @ v + offset_mask, dim=-1) - log_m
+
+
+def elbo_mean_from(emission, prior_logits, c):
+    """Scalar mean ELBO from per-crop emission [..., K] and prior logits [..., K] (§4.6).
+
+    The ONE composition of prior/encoder/objective for vectorized training paths.
+    """
+    prior = torch.log_softmax(prior_logits, dim=-1)
+    q_logp = torch.log_softmax(prior + c * emission, dim=-1)
+    q = q_logp.exp()
+    return (q * (emission - (q_logp - prior))).sum(-1).mean()
+
+
 class Batch:
     """All crops' constants stacked, so one training step is a few dense ops."""
 
@@ -71,19 +93,13 @@ class Batch:
 
     def emission_logp(self, model):
         """[N, K] log p_theta(y|m) for every crop from the precomputed counts."""
-        lsig = torch.nn.functional.logsigmoid
-        v = torch.stack([lsig(model.alpha), lsig(-model.alpha),
-                         lsig(model.beta), lsig(-model.beta)])
-        return (torch.logsumexp(self.counts @ v + self.offset_mask, dim=-1)
-                - self.log_m)                                             # [N, K]
+        return emission_logp_from_counts(self.counts, self.offset_mask, self.log_m,
+                                         model.alpha, model.beta)
 
     def elbo_mean(self, model):
         """Scalar mean ELBO over the batch — equals mean of Stage0.elbo per crop."""
-        emission = self.emission_logp(model)
-        prior = torch.log_softmax(self.reduced @ model.W.T + model.b, dim=-1)
-        q_logp = torch.log_softmax(prior + model.c * emission, dim=-1)
-        q = q_logp.exp()
-        return (q * (emission - (q_logp - prior))).sum(-1).mean()
+        prior_logits = self.reduced @ model.W.T + model.b
+        return elbo_mean_from(self.emission_logp(model), prior_logits, model.c)
 
 
 def fit_vectorized(model, crops, steps=500, lr=0.5):
@@ -104,7 +120,9 @@ def verify_vectorized(crops, values, reducer, s_dim):
     probe = crops[: min(8, len(crops))]
     model = Stage0(values, reducer=reducer, s_dim=s_dim)
     with torch.no_grad():   # non-degenerate params so agreement is not vacuous
-        model.alpha.fill_(1.3), model.beta.fill_(-0.7), model.c.fill_(0.8)
+        model.alpha.fill_(1.3)
+        model.beta.fill_(-0.7)
+        model.c.fill_(0.8)
         model.W.copy_(torch.randn_like(model.W) * 0.5)
         model.b.copy_(torch.randn_like(model.b) * 0.5)
     vectorized = float(Batch(probe, values, reducer).elbo_mean(model))
@@ -127,6 +145,46 @@ def score(tag, subset, preds, values):
     return balanced
 
 
+def predict_m(model, h):
+    """Deployable prediction as a COUNT (C1): argmax of predict(h), converted once."""
+    return model.to_value(int(model.predict(h).argmax()))
+
+
+def cv_out_of_fold(cv, test, fit_fn, predict_fn, verbose=True):
+    """The §8 protocol, once.
+
+    Per-fold train-on-complement, pooled out-of-fold predictions, plus a model trained
+    on all CV crops for the test-only split.
+
+    Returns (pooled_crops, pooled_preds, test_preds). fit_fn(crops) -> fitted model;
+    predict_fn(model, crops) -> list of counts (list-at-a-time so callers can batch).
+    """
+    pooled_crops, pooled_preds = [], []
+    for fold in sorted({c["fold"] for c in cv}):
+        train = [c for c in cv if c["fold"] != fold]
+        held = [c for c in cv if c["fold"] == fold]
+        model = fit_fn(train)
+        pooled_preds += predict_fn(model, held)
+        pooled_crops += held
+        if verbose:
+            print(f"fold {fold}: trained on {len(train)}, predicted {len(held)}", flush=True)
+
+    test_preds = []
+    if test:
+        model = fit_fn(cv)
+        test_preds = predict_fn(model, test)
+    return pooled_crops, pooled_preds, test_preds
+
+
+def score_per_dataset(pooled_crops, pooled_preds, values):
+    """§8: per-dataset lines (never pooled for meter claims) then the ALL-CV pool."""
+    for dataset in sorted({c["dataset"] for c in pooled_crops}):
+        sel = [i for i, c in enumerate(pooled_crops) if c["dataset"] == dataset]
+        score(dataset, [pooled_crops[i] for i in sel],
+              [pooled_preds[i] for i in sel], values)
+    score("ALL-CV", pooled_crops, pooled_preds, values)
+
+
 def main(argv=None):
     """Fold-honest CV + §8 report over the real corpora, one run per reducer."""
     ap = argparse.ArgumentParser()
@@ -139,7 +197,7 @@ def main(argv=None):
                     choices=sorted(REDUCERS), help="§4.4 reducer variants, one CV run each")
     args = ap.parse_args(argv)
 
-    values = (2, 3, 4)
+    values = VALUES
     print("loading crops (live fold-honest frontend pass)...", flush=True)
     crops, report = load_crops(datasets=args.datasets, device=args.device,
                                limit_per_fold=6 if args.smoke else None)
@@ -160,42 +218,27 @@ def main(argv=None):
         print(f"\n######## reducer: {name} (s_dim={s_dim}) ########")
         verify_vectorized(crops, values, reducer, s_dim)
 
-        # -- 8-fold CV, pooled out-of-fold predictions (§8) ------------------------------
-        pooled_crops, pooled_preds = [], []
-        for fold in sorted({c["fold"] for c in cv}):
-            train = [c for c in cv if c["fold"] != fold]
-            held = [c for c in cv if c["fold"] == fold]
-            model = fit_vectorized(Stage0(values, reducer=reducer, s_dim=s_dim),
-                                   train, steps=args.steps, lr=args.lr)
-            pooled_preds += [model.to_value(int(model.predict(c["h"]).argmax()))
-                             for c in held]
-            pooled_crops += held
-            print(f"fold {fold}: trained on {len(train)}, predicted {len(held)}", flush=True)
+        def fit_fn(train_crops):
+            return fit_vectorized(Stage0(values, reducer=reducer, s_dim=s_dim),
+                                  train_crops, steps=args.steps, lr=args.lr)
+
+        pooled_crops, pooled_preds, test_preds = cv_out_of_fold(
+            cv, test, fit_fn, lambda model, cs: [predict_m(model, c["h"]) for c in cs])
 
         print("\n== pooled out-of-fold (CV datasets), per dataset ==")
-        for dataset in sorted({c["dataset"] for c in pooled_crops}):
-            sel = [i for i, c in enumerate(pooled_crops) if c["dataset"] == dataset]
-            score(dataset, [pooled_crops[i] for i in sel],
-                  [pooled_preds[i] for i in sel], values)
-        score("ALL-CV", pooled_crops, pooled_preds, values)
-
-        # -- gtzan: test-only, model trained on all CV crops ----------------------------
+        score_per_dataset(pooled_crops, pooled_preds, values)
         if test:
-            model = fit_vectorized(Stage0(values, reducer=reducer, s_dim=s_dim),
-                                   cv, steps=args.steps, lr=args.lr)
-            preds = [model.to_value(int(model.predict(c["h"]).argmax())) for c in test]
             print("\n== test-only (gtzan), model trained on all CV crops ==")
-            score("gtzan", test, preds, values)
+            score("gtzan", test, test_preds, values)
 
     # -- baselines (§8), reducer-independent ---------------------------------------------
     print("\n######## baselines (held-out, deployable) ########")
     majority = R.majority_predict([c["m_true"] for c in cv], values)
     score("majority", cv, [majority] * len(cv), values)
-    # peak-count reads sigmoid(h): the frontend emits LOGITS, the baseline expects activations
-    peak_preds = [R.peak_count_estimate(1 / (1 + np.exp(-c["h"])), values) for c in cv]
+    peak_preds = [R.peak_count_estimate(to_prob(c["h"]), values) for c in cv]
     score("peak-count", cv, peak_preds, values)
     if test:
-        peak_test = [R.peak_count_estimate(1 / (1 + np.exp(-c["h"])), values) for c in test]
+        peak_test = [R.peak_count_estimate(to_prob(c["h"]), values) for c in test]
         score("peak-gtzan", test, peak_test, values)
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from .data import FPS
 from .stage0 import reduce_h as mean_max  # noqa: F401  (the §4.4 default)
 
 MEAN_MAX_DIM = 4        # 2D with D=2
@@ -57,7 +58,7 @@ def peak_summary(h) -> torch.Tensor:
 
     summary = np.array([beat.mean(), down.mean(),
                         beat.max(initial=0.0), down.max(initial=0.0),
-                        n_beat / T * 50.0, n_down / T * 50.0, peak_ratio,
+                        n_beat / T * FPS, n_down / T * FPS, peak_ratio,
                         autocorr[0], autocorr[1], autocorr[2]], dtype=np.float64)
     return torch.tensor(summary, dtype=torch.float64)
 

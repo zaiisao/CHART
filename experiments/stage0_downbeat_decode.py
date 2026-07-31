@@ -14,37 +14,25 @@ Run: CUDA_VISIBLE_DEVICES=3 /disk4/anaconda3/envs/chart/bin/python \
 import sys
 from pathlib import Path
 
+import mir_eval.beat
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 import reference as R  # noqa: E402
 
-from vbpm.data import FPS, VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops, to_prob  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import fit_vectorized  # noqa: E402
+from vbpm.train_real import cv_out_of_fold, fit_vectorized, predict_m  # noqa: E402
+
 TOL_S = 0.07
 
 
 def f_measure(pred_times, true_times, tol=TOL_S):
-    """Greedy one-to-one matching within +-tol, the standard beat-eval convention."""
-    pred, true = list(pred_times), list(true_times)
-    used = np.zeros(len(true), dtype=bool)
-    tp = 0
-    for p in pred:
-        best, best_d = -1, tol
-        for j, t in enumerate(true):
-            d = abs(p - t)
-            if not used[j] and d <= best_d:
-                best, best_d = j, d
-        if best >= 0:
-            used[best] = True
-            tp += 1
-    if not pred or not true:
-        return 0.0 if (pred or true) else 1.0
-    prec, rec = tp / len(pred), tp / len(true)
-    return 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
+    """mir_eval's standard F-measure, without its 5-s trim (crops are crop-local)."""
+    return mir_eval.beat.f_measure(np.asarray(true_times), np.asarray(pred_times),
+                                   f_measure_threshold=tol)
 
 
 def act_at_beats(h_prob_down, crop_beats, t0):
@@ -60,35 +48,27 @@ def grid_decode(m, down_at_beats, crop_beats):
     return crop_beats[r_hat::m]
 
 
-def load(device="cuda"):
-    """One crop entry per §5-valid crop, with activation h, beat grid and downbeats."""
-    crops = []
-    for s, H in iter_frontend_features(device=device):
-        song_crops, _ = extract_crops(*s.beats())
-        for c in song_crops:
-            h_crop, t0 = slice_h(H, c["beats"])
-            crops.append({"h": h_crop, "y": c["y"], "m_true": c["m_true"],
-                          "beats": c["beats"], "downs": c["bounds"][:-1], "t0": t0,
-                          "dataset": s.dataset, "fold": s.fold})
-    return crops
+def make_entry(song, crop, h_crop, t0):
+    """Standard fields plus the beat grid, downbeats and frame origin the decode needs."""
+    return {"h": h_crop, "y": crop["y"], "m_true": crop["m_true"],
+            "beats": crop["beats"], "downs": crop["bounds"][:-1], "t0": t0,
+            "dataset": song.dataset, "fold": song.fold}
 
 
 def main():
-    crops = load()
+    crops, report = load_crops(make_entry=make_entry)
+    print(f"crops: {report['usable']}  rejects: {report['rejects']}")
     cv = [c for c in crops if c["fold"] is not None]
     test = [c for c in crops if c["fold"] is None]
     reducer, s_dim = REDUCERS["peaks"]
 
     # fold-honest predicted m, stored on each crop
-    for fold in sorted({c["fold"] for c in cv}):
-        model = fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim),
-                               [c for c in cv if c["fold"] != fold])
-        for c in (c for c in cv if c["fold"] == fold):
-            c["m_hat"] = model.to_value(int(model.predict(c["h"]).argmax()))
-        print(f"fold {fold}: m predicted", flush=True)
-    model_all = fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim), cv)
-    for c in test:
-        c["m_hat"] = model_all.to_value(int(model_all.predict(c["h"]).argmax()))
+    pooled, preds, test_preds = cv_out_of_fold(
+        cv, test,
+        lambda train: fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim), train),
+        lambda model, cs: [predict_m(model, c["h"]) for c in cs])
+    for c, m_hat in zip(pooled + test, preds + test_preds):
+        c["m_hat"] = m_hat
 
     print(f"\n== downbeat F at +-{TOL_S * 1000:.0f} ms, per dataset ==")
     print(f"{'dataset':12s} {'n':>6s} {'peakpick':>9s} {'grid-mhat':>10s} {'grid-oracle':>12s}")
@@ -96,7 +76,7 @@ def main():
         sel = [c for c in crops if c["dataset"] == ds]
         f_pp, f_grid, f_oracle = [], [], []
         for c in sel:
-            prob_down = 1 / (1 + np.exp(-c["h"][:, 1]))
+            prob_down = to_prob(c["h"][:, 1])
             peaks = R.pick_peaks(prob_down, threshold=0.5)
             f_pp.append(f_measure(c["t0"] + (peaks + 0.5) / FPS, c["downs"]))
             down_at_beats = act_at_beats(prob_down, c["beats"], c["t0"])

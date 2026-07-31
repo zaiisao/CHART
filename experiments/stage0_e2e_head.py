@@ -26,11 +26,12 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 
-from vbpm.data import VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
-from vbpm.train_real import emission_counts, score as score_line  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
+from vbpm.train_real import (cv_out_of_fold, elbo_mean_from, emission_counts,  # noqa: E402
+                             emission_logp_from_counts, score, score_per_dataset)
 
 K = len(VALUES)
-N_LAGS = 250            # 5 s at 50 fps; longest bars here are ~4 s
+N_LAGS = int(5 * FPS)   # 5 s of lags; longest bars here are ~4 s
 EPOCHS = 30
 BATCH = 256
 SEED = 0
@@ -82,52 +83,40 @@ class AutocorrHead(nn.Module):
 # --------------------------------------------------------------------------------------
 # ELBO on a minibatch (exact 3-term enumeration per crop)
 # --------------------------------------------------------------------------------------
-def batch_elbo(head, scalars, x, lengths, Cs, masks):
-    lsig = nn.functional.logsigmoid
-    alpha, beta, c = scalars["alpha"], scalars["beta"], scalars["c"]
-    v = torch.stack([lsig(alpha), lsig(-alpha), lsig(beta), lsig(-beta)])
-    log_m = torch.log(torch.tensor([float(m) for m in VALUES], device=x.device))
-    em = torch.logsumexp(Cs @ v + masks, dim=-1) - log_m              # [B, K]
-    prior = torch.log_softmax(head(x, lengths), dim=-1)               # [B, K]
-    q_logp = torch.log_softmax(prior + c * em, dim=-1)
-    q = q_logp.exp()
-    return (q * (em - (q_logp - prior))).sum(-1).mean()
+def batch_elbo(head, scalars, log_m, x, lengths, Cs, masks):
+    """The shared §4.6 composition with the head's logits as the prior — no local re-derivation."""
+    em = emission_logp_from_counts(Cs, masks, log_m, scalars["alpha"], scalars["beta"])
+    return elbo_mean_from(em, head(x, lengths), scalars["c"])
 
 
 # --------------------------------------------------------------------------------------
 # data
 # --------------------------------------------------------------------------------------
-def load(limit_per_fold=None, device="cuda"):
-    crops = []
-    for s, H in iter_frontend_features(device=device, limit_per_fold=limit_per_fold,
-                                       output="features"):
-        song_crops, _ = extract_crops(*s.beats())
-        for c in song_crops:
-            X, _ = slice_h(H, c["beats"])
-            C, mask = emission_stats(c["y"])
-            crops.append({"h16": X.astype(np.float16), "C": C, "mask": mask,
-                          "m_true": c["m_true"], "dataset": s.dataset, "fold": s.fold})
-    return crops
+def make_entry(song, crop, h_crop, t0):
+    C, mask = emission_stats(crop["y"])
+    return {"h16": h_crop.astype(np.float16), "C": C, "mask": mask,
+            "m_true": crop["m_true"], "dataset": song.dataset, "fold": song.fold}
 
 
-def batches(crops, batch_size, rng):
-    """Bucket by T (sort, chunk) so padding stays small; shuffle chunk order."""
+def bucket_chunks(crops, batch_size):
+    """Length-bucketed index chunks (sorted once; shuffle order per epoch, not contents)."""
     order = sorted(range(len(crops)), key=lambda i: len(crops[i]["h16"]))
-    chunks = [order[i:i + batch_size] for i in range(0, len(order), batch_size)]
-    rng.shuffle(chunks)
-    return chunks
+    return [order[i:i + batch_size] for i in range(0, len(order), batch_size)]
 
 
-def to_batch(crops, idx, device):
+def pad_features(crops, idx, device):
+    """(x [B, Tmax, 512] float32-on-GPU, lengths): fp16 on the wire, cast after transfer."""
     Ts = [len(crops[i]["h16"]) for i in idx]
-    Tmax = max(Ts)
-    x = torch.zeros(len(idx), Tmax, 512, dtype=torch.float32)
+    x16 = torch.zeros(len(idx), max(Ts), 512, dtype=torch.float16)
     for j, i in enumerate(idx):
-        x[j, :Ts[j]] = torch.from_numpy(crops[i]["h16"].astype(np.float32))
-    lengths = torch.tensor(Ts)
+        x16[j, :Ts[j]] = torch.from_numpy(crops[i]["h16"])
+    return x16.to(device).float(), torch.tensor(Ts).to(device)
+
+
+def emission_batch(crops, idx, device):
     Cs = torch.from_numpy(np.stack([crops[i]["C"] for i in idx]))
     masks = torch.from_numpy(np.stack([crops[i]["mask"] for i in idx]))
-    return (x.to(device), lengths.to(device), Cs.to(device), masks.to(device))
+    return Cs.to(device), masks.to(device)
 
 
 # --------------------------------------------------------------------------------------
@@ -142,12 +131,16 @@ def train_head(train_crops, device):
                "c": torch.tensor(1.0, device=device, requires_grad=True)}
     opt = torch.optim.Adam([{"params": head.parameters(), "lr": 3e-3},
                             {"params": list(scalars.values()), "lr": 0.1}])
+    log_m = torch.log(torch.tensor([float(m) for m in VALUES], device=device))
+    chunks = bucket_chunks(train_crops, BATCH)
     rng = np.random.default_rng(SEED)
     for epoch in range(EPOCHS):
         total, nb = 0.0, 0
-        for idx in batches(train_crops, BATCH, rng):
-            x, lengths, Cs, masks = to_batch(train_crops, idx, device)
-            loss = -batch_elbo(head, scalars, x, lengths, Cs, masks)
+        rng.shuffle(chunks)
+        for idx in chunks:
+            x, lengths = pad_features(train_crops, idx, device)
+            Cs, masks = emission_batch(train_crops, idx, device)
+            loss = -batch_elbo(head, scalars, log_m, x, lengths, Cs, masks)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -165,45 +158,31 @@ def predict(head, crops, device):
     preds = []
     for i in range(0, len(crops), BATCH):
         idx = list(range(i, min(i + BATCH, len(crops))))
-        x, lengths, _, _ = to_batch(crops, idx, device)
+        x, lengths = pad_features(crops, idx, device)   # eval needs no emission stats
         preds += [VALUES[int(k)] for k in head(x, lengths).argmax(-1).cpu()]
     return preds
-
-
-def score(tag, subset, preds):
-    """One §8 line via the shared scorer."""
-    score_line(tag, subset, preds, VALUES)
 
 
 def main():
     smoke = "--smoke" in sys.argv
     device = "cuda"
-    crops = load(limit_per_fold=6 if smoke else None, device=device)
+    crops, report = load_crops(limit_per_fold=6 if smoke else None, device=device,
+                               output="features", make_entry=make_entry)
     gb = sum(c["h16"].nbytes for c in crops) / 2**30
-    print(f"crops: {len(crops)}  features in RAM: {gb:.1f} GiB")
+    print(f"crops: {len(crops)}  rejects: {report['rejects']}  features in RAM: {gb:.1f} GiB")
 
     cv = [c for c in crops if c["fold"] is not None]
     test = [c for c in crops if c["fold"] is None]
 
-    pooled, preds = [], []
-    for fold in sorted({c["fold"] for c in cv}):
-        train = [c for c in cv if c["fold"] != fold]
-        held = [c for c in cv if c["fold"] == fold]
-        print(f"fold {fold}: training head on {len(train)} crops", flush=True)
-        head, _ = train_head(train, device)
-        preds += predict(head, held, device)
-        pooled += held
+    pooled, preds, test_preds = cv_out_of_fold(
+        cv, test,
+        lambda train: train_head(train, device)[0],
+        lambda head, cs: predict(head, cs, device))
 
     print("\n== pooled out-of-fold, per dataset ==")
-    for ds in sorted({c["dataset"] for c in pooled}):
-        sel = [i for i, c in enumerate(pooled) if c["dataset"] == ds]
-        score(ds, [pooled[i] for i in sel], [preds[i] for i in sel])
-    score("ALL-CV", pooled, preds)
-
+    score_per_dataset(pooled, preds, VALUES)
     if test:
-        print("training gtzan model on all CV crops", flush=True)
-        head, _ = train_head(cv, device)
-        score("gtzan", test, predict(head, test, device))
+        score("gtzan", test, test_preds, VALUES)
 
 
 if __name__ == "__main__":

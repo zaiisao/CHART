@@ -25,10 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 import reference as R  # noqa: E402
 
 from data.songs import iter_songs  # noqa: E402
-from vbpm.data import FPS, VALUES, extract_crops  # noqa: E402
+from vbpm.data import FPS, VALUES, extract_crops, to_prob  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import fit_vectorized, score  # noqa: E402
+from vbpm.train_real import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+                             score, score_per_dataset)
 
 SIGMA_S = 0.06          # the synthetic bench's bump width (§6.4)
 
@@ -67,26 +68,19 @@ def main(datasets=None):
     test = [c for c in crops if c["fold"] is None]
     for name in ("meanmax", "peaks"):
         reducer, s_dim = REDUCERS[name]
-        pooled, preds = [], []
-        for fold in sorted({c["fold"] for c in cv}):
-            train = [c for c in cv if c["fold"] != fold]
-            held = [c for c in cv if c["fold"] == fold]
-            model = fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim), train)
-            preds += [model.to_value(int(model.predict(c["h"]).argmax())) for c in held]
-            pooled += held
+        pooled, preds, test_preds = cv_out_of_fold(
+            cv, test,
+            lambda train: fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim), train),
+            lambda model, cs: [predict_m(model, c["h"]) for c in cs],
+            verbose=False)
         print(f"---- reducer {name} ----")
-        for ds in sorted({c["dataset"] for c in pooled}):
-            sel = [i for i, c in enumerate(pooled) if c["dataset"] == ds]
-            score(ds, [pooled[i] for i in sel], [preds[i] for i in sel], VALUES)
-        score("ALL-CV", pooled, preds, VALUES)
+        score_per_dataset(pooled, preds, VALUES)
         if name == "peaks":
             meter_change_breakdown(pooled, preds)
         if test:
-            model = fit_vectorized(Stage0(VALUES, reducer=reducer, s_dim=s_dim), cv)
-            t_preds = [model.to_value(int(model.predict(c["h"]).argmax())) for c in test]
-            score("gtzan", test, t_preds, VALUES)
+            score("gtzan", test, test_preds, VALUES)
 
-    pk = [R.peak_count_estimate(1 / (1 + np.exp(-c["h"])), VALUES) for c in crops]
+    pk = [R.peak_count_estimate(to_prob(c["h"]), VALUES) for c in crops]
     print("---- baseline ----")
     for ds in sorted({c["dataset"] for c in crops}):
         sel = [i for i, c in enumerate(crops) if c["dataset"] == ds]

@@ -18,9 +18,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 
-from vbpm.data import FPS, VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import fit_vectorized, score  # noqa: E402
+from vbpm.train_real import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+                             score, score_per_dataset)
 
 
 def reduce_meanmax(X):
@@ -61,49 +62,41 @@ REDUCTIONS = {"rich-meanmax": (reduce_meanmax, 1024),
               "rich-novelty": (reduce_novelty, 8)}
 
 
-def load(limit_per_fold=None, device="cuda"):
-    crops = []
-    for s, H in iter_frontend_features(device=device, limit_per_fold=limit_per_fold,
-                                       output="features"):
-        song_crops, _ = extract_crops(*s.beats())
-        for c in song_crops:
-            X, _ = slice_h(H, c["beats"])
-            X = X.astype(np.float64)
-            crops.append({"s": {k: fn(X) for k, (fn, _) in REDUCTIONS.items()},
-                          "y": c["y"], "m_true": c["m_true"], "dataset": s.dataset,
-                          "fold": s.fold, "stem": s.stem, "crop": c["crop"]})
-    return crops
+def make_entry(song, crop, h_crop, t0):
+    X = h_crop.astype(np.float64)
+    return {"s": {k: fn(X) for k, (fn, _) in REDUCTIONS.items()},
+            "y": crop["y"], "m_true": crop["m_true"], "dataset": song.dataset,
+            "fold": song.fold, "stem": song.stem, "crop": crop["crop"]}
+
+
+def identity_reducer(v):
+    """Precomputed summaries pass through psi untouched."""
+    return torch.as_tensor(np.asarray(v, dtype=np.float64))
 
 
 def main():
     smoke = "--smoke" in sys.argv
-    crops = load(limit_per_fold=6 if smoke else None)
-    print(f"crops: {len(crops)}")
+    crops, report = load_crops(limit_per_fold=6 if smoke else None,
+                               output="features", make_entry=make_entry)
+    print(f"crops: {len(crops)}  rejects: {report['rejects']}")
 
-    ident = lambda v: torch.as_tensor(np.asarray(v, dtype=np.float64))  # noqa: E731
     cv = [c for c in crops if c["fold"] is not None]
     test = [c for c in crops if c["fold"] is None]
 
     for name, (_, s_dim) in REDUCTIONS.items():
-        entries = lambda cs: [{"h": c["s"][name], "y": c["y"], "m_true": c["m_true"]}  # noqa: E731
-                              for c in cs]
-        pooled, preds = [], []
-        for fold in sorted({c["fold"] for c in cv}):
-            train = entries([c for c in cv if c["fold"] != fold])
-            held = [c for c in cv if c["fold"] == fold]
-            model = fit_vectorized(Stage0(VALUES, reducer=ident, s_dim=s_dim), train)
-            preds += [model.to_value(int(model.predict(c["s"][name]).argmax())) for c in held]
-            pooled += held
+        def fit_fn(train):
+            entries = [{"h": c["s"][name], "y": c["y"]} for c in train]
+            return fit_vectorized(Stage0(VALUES, reducer=identity_reducer, s_dim=s_dim),
+                                  entries)
+
+        pooled, preds, test_preds = cv_out_of_fold(
+            cv, test, fit_fn,
+            lambda model, cs: [predict_m(model, c["s"][name]) for c in cs],
+            verbose=False)
         print(f"---- {name} (s_dim={s_dim}) ----")
-        for ds in sorted({c["dataset"] for c in pooled}):
-            sel = [i for i, c in enumerate(pooled) if c["dataset"] == ds]
-            score(ds, [pooled[i] for i in sel], [preds[i] for i in sel], VALUES)
-        score("ALL-CV", pooled, preds, VALUES)
+        score_per_dataset(pooled, preds, VALUES)
         if test:
-            model = fit_vectorized(Stage0(VALUES, reducer=ident, s_dim=s_dim), entries(cv))
-            t_preds = [model.to_value(int(model.predict(c["s"][name]).argmax()))
-                       for c in test]
-            score("gtzan", test, t_preds, VALUES)
+            score("gtzan", test, test_preds, VALUES)
 
 
 if __name__ == "__main__":

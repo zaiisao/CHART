@@ -92,7 +92,6 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
     "m_true": count}. The single authority for crop validity — experiments must not
     re-implement this chain (a five-way copy is how policies silently diverge).
     """
-    from collections import Counter
     rejects: Counter = Counter()
     if len(downbeat_times) == 0:
         rejects["no_downbeat_annotation"] += 1
@@ -112,7 +111,7 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
             rejects[f"crop_m_out_of_vocabulary({m_true})"] += 1
             continue
         if len(crop_beats) < MIN_BEATS:
-            rejects["crop_fewer_than_12_beats"] += 1
+            rejects[f"crop_fewer_than_{MIN_BEATS}_beats"] += 1
             continue
 
         # y against the crop's bar STARTS (bounds[:-1]); the closing bound is the next
@@ -158,6 +157,11 @@ def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=N
             print(f"  {checkpoint}: done", flush=True)
 
 
+def to_prob(h):
+    """sigmoid: the frontend emits LOGITS; this is the one owner of that conversion."""
+    return 1.0 / (1.0 + np.exp(-np.asarray(h, dtype=np.float64)))
+
+
 def slice_h(features, crop_beats):
     """The crop's frame window of a whole-song feature array (§5: "T tracks n")."""
     lo = max(0, int(math.floor(crop_beats[0] * FPS)))
@@ -165,24 +169,33 @@ def slice_h(features, crop_beats):
     return features[lo:hi], lo / FPS
 
 
-def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
-               values=VALUES, verbose: bool = True):
-    """(crops, report). Each entry is one CROP: {h, y, m_true, dataset, fold, stem, crop}.
+def default_entry(song, crop, h_crop, t0):
+    """The standard training-crop dict; loaders needing more override make_entry."""
+    return {"h": h_crop, "y": crop["y"], "m_true": crop["m_true"],
+            "dataset": song.dataset, "fold": song.fold,
+            "stem": song.stem, "crop": crop["crop"]}
 
-    h is sliced to the frames spanned by the crop's beats (§5: "T tracks n").
+
+def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
+               values=VALUES, verbose: bool = True, output: str = "activations",
+               make_entry=default_entry):
+    """(crops, report). One entry per §5-valid crop, built by ``make_entry``.
+
+    The single assembly path for every consumer (package and experiments): the frontend
+    pass, the validity chain and the reject accounting exist here ONCE. ``make_entry``
+    receives (song, crop, h_crop, t0) with h sliced to the crop's frames (§5).
     """
     crops, rejects = [], Counter()
     for s, h in iter_frontend_features(datasets=datasets, device=device,
-                                       limit_per_fold=limit_per_fold, verbose=verbose):
+                                       limit_per_fold=limit_per_fold, verbose=verbose,
+                                       output=output):
         beat_times, downbeat_times = s.beats()
         song_crops, song_rejects = extract_crops(beat_times, downbeat_times, values)
         rejects.update(song_rejects)
 
         for c in song_crops:
-            h_crop, _ = slice_h(h, c["beats"])
-            crops.append({"h": h_crop, "y": c["y"], "m_true": c["m_true"],
-                          "dataset": s.dataset, "fold": s.fold,
-                          "stem": s.stem, "crop": c["crop"]})
+            h_crop, t0 = slice_h(h, c["beats"])
+            crops.append(make_entry(s, c, h_crop, t0))
 
     unmatched = rejects.pop("unmatched_downbeats", 0)
     report = {"usable": len(crops), "rejects": dict(rejects),
