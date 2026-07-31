@@ -10,6 +10,11 @@ line-length = 100    # deliberate deviation from Google's 80: the whole tree is 
 
 [lint]
 select = ["E", "W", "F", "D", "N"]
+# Vertical whitespace (Google SS3.5): the E30x blank-line rules and W391 are preview-gated
+# in ruff; explicit-preview-rules activates ONLY the ones named here, nothing else.
+preview = true
+explicit-preview-rules = true
+extend-select = ["E301", "E302", "E303", "E304", "E305", "E306", "W391"]
 ignore = [
     "N806", "N803", "N812",  # Google SS3.16 sanctions domain-standard short names; in ELBO
                              # code W/K/T/H and `import reference as R` ARE the clear names
