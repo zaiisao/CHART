@@ -16,8 +16,23 @@ sys.path.insert(0, str(ROOT / "experiments" / "bt_e2e"))     # crf_baseline (dis
 
 from rungs.r2_em_dbn import R2GenerativeLambda                # noqa: E402
 from rungs.r3_conditioned_dbn import R3ConditionedFactors    # noqa: E402
-from rungs.r4_5_rich_emission import R45RichEmission          # noqa: E402
+from rungs.r4_neural_hmm import R4NeuralHMM                   # noqa: E402
+
 from crf_baseline import CRFLearnedFactors                    # noqa: E402
+
+
+class R45GaussianAlias(R4NeuralHMM):
+    """`rung: {name: r4_5}` == r4 with the gaussian (rich-feature) emission. Own ARM_NAME keeps
+    its checkpoints separate from bock-emission r4 runs."""
+    ARM_NAME = "r4_5"
+    TRAIN_DEFAULTS = dict(em_iterations=10)
+
+    @classmethod
+    def from_config(cls, config):
+        config = dict(config)
+        config["rung"] = {**(config.get("rung") or {}), "emission": "gaussian"}
+        config["rung"].pop("name", None)
+        return super().from_config(config)
 
 DEFAULT_CONFIG = ROOT / "configs" / "train.yaml"
 
@@ -32,7 +47,8 @@ def train_vanilla(config):
     return harness.run(None, params, e2e.run)
 
 
-TRAINABLE_RUNGS = (CRFLearnedFactors, R3ConditionedFactors, R2GenerativeLambda, R45RichEmission)
+TRAINABLE_RUNGS = (CRFLearnedFactors, R3ConditionedFactors, R2GenerativeLambda,
+                   R4NeuralHMM, R45GaussianAlias)
 TRAINERS = {rung_class.ARM_NAME: rung_class.fit for rung_class in TRAINABLE_RUNGS}
 TRAINERS["vanilla"] = train_vanilla
 

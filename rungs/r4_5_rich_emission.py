@@ -1,4 +1,7 @@
-"""R4.5 -- LEARNED EMISSION on RICH FEATURES: the observed variable becomes the frontend's
+"""DEPRECATED: folded into rungs/r4_neural_hmm.py as R4NeuralHMM(emission="gaussian").
+Kept until tests/test_r4_5_*.py are ported to GaussianEmission; not registered in train.py.
+
+R4.5 -- LEARNED EMISSION on RICH FEATURES: the observed variable becomes the frontend's
 penultimate representation ([T, 256]); the Böck plug-in formula on [T, 2] activations is replaced
 by learned class-conditional diagonal Gaussians p(f_t | class), class in {no-beat, beat,
 downbeat} (the partition of the bar-pointer state space, unchanged).
