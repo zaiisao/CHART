@@ -23,6 +23,7 @@ from .stage0 import Stage0  # noqa: E402
 
 
 def main(argv=None):
+    """Train Stage 0 on the synthetic bench and print the §8 diagnostics."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--n-per-class", type=int, default=8)
     ap.add_argument("--steps", type=int, default=500)   # §5 defaults

@@ -100,8 +100,11 @@ def main(datasets=None):
 
 
 def meter_change_breakdown(pooled, preds):
-    """Split the pooled score by whether the SONG changes meter across its crops, and
-    within changing songs by whether the crop sits at a label switch."""
+    """Split the pooled score by song-level meter change.
+
+    Constant-meter songs vs changing songs, and within changing songs by whether the
+    crop sits at a label switch.
+    """
     by_song = {}
     for i, c in enumerate(pooled):
         by_song.setdefault((c["dataset"], c["stem"]), []).append(i)

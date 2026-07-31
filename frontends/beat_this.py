@@ -31,6 +31,8 @@ _BEAT_THIS_ROOT = Path(__file__).resolve().parent.parent / "external" / "beat_th
 
 
 class BeatThisFrontend(Frontend):
+    """Official Beat This inference behind the Frontend surface; see module docstring."""
+
     OUTPUT_MODES = {"activations": 2, "features": 512}
 
     ACTIVATION_FORM = "logit"
@@ -64,9 +66,12 @@ class BeatThisFrontend(Frontend):
 
     @torch.no_grad()
     def get_features(self, signal, sample_rate: int) -> torch.Tensor:
-        """[num_samples] mono (any sample rate; Beat This resamples internally) -> [num_frames,
-        num_channels] at self.fps: (beat, downbeat) LOGITS in "activations" mode, the penultimate
-        transformer_blocks features in "features" mode."""
+        """[num_samples] mono audio -> [num_frames, num_channels] at self.fps.
+
+        Any sample rate (Beat This resamples internally). Channels: (beat, downbeat)
+        LOGITS in "activations" mode, penultimate transformer_blocks features in
+        "features" mode.
+        """
         if self.output == "activations":
             beat_logits, downbeat_logits = self._audio2frames(signal, sample_rate)
             out = torch.stack([beat_logits, downbeat_logits], dim=-1)         # [T@50fps, 2]
@@ -85,9 +90,11 @@ class BeatThisFrontend(Frontend):
     _BORDER_SIZE = 6
 
     def _penultimate(self, signal, sample_rate: int) -> torch.Tensor:
-        """[T, transformer_dim] transformer_blocks output -- the model with its final task heads
-        cut off, non-destructively: a forward hook captures the heads' input during the normal
-        forward pass (the heads still run; their logits are ignored).
+        """[T, transformer_dim] transformer_blocks output.
+
+        The model with its final task heads cut off, non-destructively: a forward hook
+        captures the heads' input during the normal forward pass (the heads still run;
+        their logits are ignored).
 
         Replicates Spect2Frames.spect2frames' split-predict-aggregate exactly (same split_piece,
         chunk_size=1500, border_size=6, overlap_mode="keep_first"), applied to feature chunks

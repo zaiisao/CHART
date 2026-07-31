@@ -64,12 +64,14 @@ class Stage0:
 
     # -- C1: count <-> index, explicit and one-way ---------------------------------
     def to_idx(self, m: int) -> int:
+        """Count -> index into values; raises on an illegal count (C1: explicit, one-way)."""
         m = int(m)
         if m not in self.values:
             raise ValueError(f"{m} is not a legal meter count in {self.values}")
         return self.values.index(m)
 
     def to_value(self, k: int) -> int:
+        """Index -> count, the inverse of to_idx."""
         return int(self.values[int(k)])
 
     # -- theta: emission (§4.3) ----------------------------------------------------
@@ -89,23 +91,28 @@ class Stage0:
 
     # -- psi: conditional prior (§4.4) — the deployable path, reads h ONLY (C2) ----
     def prior_logp(self, h) -> torch.Tensor:
+        """[K] log p_psi(m|h): softmax of W @ reduce(h) + b. Reads h ONLY (C2)."""
         logits = self.W @ self.reducer(h) + self.b
         return logits - torch.logsumexp(logits, -1)
 
     def predict(self, h) -> torch.Tensor:
+        """The deployed path (§7): identical to the prior by construction."""
         return self.prior_logp(h)
 
     # -- phi: encoder (§4.5), structured on the prior's logits ---------------------
     def q_logp(self, h, y) -> torch.Tensor:
+        """[K] log q_phi(m|h,y): the prior's logits plus c * log p_theta(y|m) (§4.5)."""
         logits = self.prior_logp(h) + self.c * self.emission_logp_all(y)
         return logits - torch.logsumexp(logits, -1)
 
     # -- inference / objective (§4.6), exact over K terms --------------------------
     def exact_posterior(self, h, y) -> torch.Tensor:
+        """[K] log p(m|y,h), proportional to emission + prior (§4.6)."""
         lp = self.emission_logp_all(y) + self.prior_logp(h)
         return lp - torch.logsumexp(lp, -1)
 
     def log_evidence(self, h, y) -> torch.Tensor:
+        """Scalar log p(y|h) = logsumexp over m of emission + prior."""
         return torch.logsumexp(self.emission_logp_all(y) + self.prior_logp(h), dim=-1)
 
     def elbo(self, h, y) -> torch.Tensor:
@@ -146,6 +153,7 @@ class Stage0:
 
     # -- introspection (§4.7 / §10.2) ----------------------------------------------
     def param_groups(self) -> dict:
+        """The §4.7 split {theta, psi, phi}; reach psi/phi by group, never by name."""
         return {
             "theta": {"alpha": self.alpha, "beta": self.beta},
             "psi": {"W": self.W, "b": self.b},
@@ -153,6 +161,7 @@ class Stage0:
         }
 
     def named_params(self) -> dict:
+        """Every trainable tensor, flat — the §10.2 gradient audit surface."""
         out = {}
         for group in self.param_groups().values():
             out.update(group)

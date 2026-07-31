@@ -33,9 +33,12 @@ class Frontend:
 
     @property
     def name(self) -> str:
-        """Derived from the defining module (a frontend's identity IS its module under the
-        dotted-path loader): frontends.beat_this -> "beat_this". Never declared per class.
-        When the module runs as a script (__main__), fall back to its file stem."""
+        """Frontend name, derived from the defining module — never declared per class.
+
+        A frontend's identity IS its module under the dotted-path loader:
+        frontends.beat_this -> "beat_this". When the module runs as a script
+        (__main__), fall back to its file stem.
+        """
         module_name = type(self).__module__.rsplit(".", 1)[-1]
 
         if module_name == "__main__":
@@ -50,6 +53,7 @@ class Frontend:
 
     @property
     def num_channels(self) -> int:
+        """Channel count of the constructed output mode."""
         return self.OUTPUT_MODES[self.output]
 
     def get_features(self, signal, sample_rate: int):

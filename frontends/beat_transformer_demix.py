@@ -34,6 +34,7 @@ INSTRUMENT_ORDER = ("vocals", "piano", "drums", "bass", "other")   # 5stems.json
 
 
 def main():
+    """CLI: demix audio with Spleeter and write the mel spectrogram stack."""
     parser = argparse.ArgumentParser()
     parser.add_argument("audio", help="input audio file (anything ffmpeg reads), or with "
                                       "--batch: a list file of '<audio_path>\\t<out_path>' lines")

@@ -31,8 +31,11 @@ def _pick_peaks(x: np.ndarray, threshold: float = 0.5, min_distance: int = 2) ->
 
 
 def peak_summary(h) -> torch.Tensor:
-    """[T, 2] activation logits -> R^10 summary. Expresses the beat/downbeat rate ratio
-    that mean⊕max provably cannot (measured 2026-07-31: 0.405 vs peak-count 0.702)."""
+    """[T, 2] activation logits -> R^10 summary.
+
+    Expresses the beat/downbeat rate ratio that mean⊕max provably cannot
+    (measured 2026-07-31: 0.405 vs peak-count 0.702).
+    """
     logits = np.asarray(h, dtype=np.float64)
     prob = 1.0 / (1.0 + np.exp(-logits))
     T = max(len(prob), 1)

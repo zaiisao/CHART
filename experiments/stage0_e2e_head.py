@@ -73,7 +73,7 @@ class AutocorrHead(nn.Module):
                                  nn.Linear(64, K))
 
     def forward(self, x, lengths):
-        """x [B, T, 512] zero-padded, lengths [B]. Exact masked autocorr via FFT."""
+        """X [B, T, 512] zero-padded, lengths [B]. Exact masked autocorr via FFT."""
         B, T, _ = x.shape
         valid = (torch.arange(T, device=x.device)[None, :]
                  < lengths[:, None]).to(x.dtype)                      # [B, T]

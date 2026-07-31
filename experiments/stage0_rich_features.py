@@ -1,5 +1,6 @@
-"""Rich-features experiment: does meter evidence survive in Beat This [T,512] penultimate
-features where the compressed [T,2] activation loses it (asap 0.350 vs synth ceiling 0.988)?
+"""Rich-features experiment: [T,512] penultimate features vs the compressed [T,2] activation.
+
+Does meter evidence survive where the compression loses it (asap 0.350 vs synth ceiling 0.988)?
 
 Frontend stays FROZEN (§6.1); we train only our own head (linear psi on a fixed reduction).
 [T,512] for 18.9k crops is ~60 GB, so reductions are computed inside the load pass and only

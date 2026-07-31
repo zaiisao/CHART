@@ -62,6 +62,7 @@ class Batch:
         self.log_m = torch.log(torch.tensor([float(m) for m in values]))
 
     def emission_logp(self, model):
+        """[N, K] log p_theta(y|m) for every crop from the precomputed counts."""
         lsig = torch.nn.functional.logsigmoid
         v = torch.stack([lsig(model.alpha), lsig(-model.alpha),
                          lsig(model.beta), lsig(-model.beta)])
@@ -69,6 +70,7 @@ class Batch:
                 - self.log_m)                                             # [N, K]
 
     def elbo_mean(self, model):
+        """Scalar mean ELBO over the batch — equals mean of Stage0.elbo per crop."""
         emission = self.emission_logp(model)
         prior = torch.log_softmax(self.reduced @ model.W.T + model.b, dim=-1)
         q_logp = torch.log_softmax(prior + model.c * emission, dim=-1)
@@ -77,6 +79,7 @@ class Batch:
 
 
 def fit_vectorized(model, crops, steps=500, lr=0.5):
+    """§5 training loop (Adam, full batch) on the vectorized objective."""
     batch = Batch(crops, model.values, model.reducer)
 
     seen, params = set(), []
@@ -112,6 +115,7 @@ def verify_vectorized(crops, values, reducer, s_dim):
 
 
 def score(tag, subset, preds, values):
+    """Print one §8 scoring line: balanced/raw accuracy, class count, confusion."""
     true = [c["m_true"] for c in subset]
     balanced = R.balanced_accuracy(true, preds, values)
     raw = float(np.mean(np.asarray(true) == np.asarray(preds)))
@@ -122,6 +126,7 @@ def score(tag, subset, preds, values):
 
 
 def main(argv=None):
+    """Fold-honest CV + §8 report over the real corpora, one run per reducer."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", nargs="*", default=None)
     ap.add_argument("--device", default="cuda")

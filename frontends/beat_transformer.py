@@ -49,6 +49,8 @@ _MODEL_KWARGS = dict(attn_len=5, instr=5, ntoken=2, dmodel=256, nhead=8,
 
 
 class BeatTransformerFrontend(Frontend):
+    """Official Beat Transformer inference (Spleeter demix subprocess); see module docstring."""
+
     OUTPUT_MODES = {"activations": 2}
 
     ACTIVATION_FORM = "logit"
