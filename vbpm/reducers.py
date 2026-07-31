@@ -1,10 +1,13 @@
-"""§4.4 reducers: s(h) -> R^{d}, swappable behind one function.
+"""Reducers: s(h) -> R^d, the swappable compression between features and prior.
 
-`mean_max` is the Stage-0 default (re-exported from stage0). `peak_summary` is the
-hand-built alternative §4.4 names as an experimental axis: rates and ratio of beat vs
-downbeat activation peaks, plus downbeat-channel autocorrelation at multiples of the
-beat period. Deployable: reads h only (C2); non-differentiable is fine — ψ's gradient
-flows through W and b, s(h) is a per-song constant.
+The prior needs a fixed-size input but h is [T, D] with variable T; a reducer is the
+function that compresses one to the other, and the spec requires it be swappable so a
+pooling change is not a rewrite. `mean_max` is the default (re-exported from stage0).
+`peak_summary` is the hand-built alternative: rates and ratio of beat vs downbeat
+activation peaks, plus downbeat-channel autocorrelation at multiples of the beat
+period. Both are deployable (they read audio features only, never annotations), and
+non-differentiable is fine — the prior's gradient flows through W and b, s(h) is a
+per-crop constant.
 """
 from __future__ import annotations
 
@@ -13,17 +16,18 @@ import torch
 
 from .data import FPS, to_prob
 from .metrics import pick_peaks
-from .stage0 import reduce_h as mean_max  # noqa: F401  (the §4.4 default)
+from .stage0 import reduce_h as mean_max  # noqa: F401  (the spec's default reducer)
 
 MEAN_MAX_DIM = 4        # 2D with D=2
 PEAK_SUMMARY_DIM = 10
 
 
 def peak_summary(h) -> torch.Tensor:
-    """[T, 2] activation logits -> R^10 summary.
+    """[T, 2] activation logits -> a 10-dim summary built around peak counting.
 
-    Expresses the beat/downbeat rate ratio that mean⊕max provably cannot
-    (measured 2026-07-31: 0.405 vs peak-count 0.702).
+    Meter lives in the RATE of downbeat peaks relative to beat peaks; mean/max pooling
+    discards peakiness entirely, which is why this exists (measured 2026-07-31: the
+    mean⊕max default collapsed on real crops while a peak-count rule scored 0.702).
     """
     prob = to_prob(h)
     T = max(len(prob), 1)

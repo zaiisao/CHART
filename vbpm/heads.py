@@ -1,4 +1,6 @@
-"""Trained evidence heads over frozen frontend features (§6.1: our head, their features).
+"""Trained evidence heads over frozen frontend features.
+
+The frontend is never trained by us; what we own is the head that reads its features.
 
 AutocorrHead is the 2026-07-31 e2e winner (ALL-CV 0.595): learned channel projection ->
 exact masked FFT autocorrelation over lags -> conv over the lag axis -> prior logits.

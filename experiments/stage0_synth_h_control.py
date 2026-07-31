@@ -12,7 +12,7 @@ Rubato timing is preserved because the bump times are the real annotated times.
   * synthetic-h accuracy ~chance -> the fault is ours (labels/crops/reducer/psi), not
     the frontend.
 
-Run: /disk4/anaconda3/envs/chart/bin/python experiments/stage0_synth_h_control.py
+Run: /disk4/anaconda3/envs/vbpm/bin/python experiments/stage0_synth_h_control.py
 """
 import math
 
@@ -27,7 +27,7 @@ from vbpm.stage0 import Stage0
 from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,
                              score, score_per_dataset)
 
-SIGMA_S = 0.06          # the synthetic bench's bump width (§6.4)
+SIGMA_S = 0.06          # the synthetic bench's bump width
 
 
 def synth_h(crop_beats, crop_downs):

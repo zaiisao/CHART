@@ -1,13 +1,15 @@
-"""Fold-honest Stage-0 training + §8 evaluation on the real corpora (§6.3).
+"""Fold-honest Stage-0 training + evaluation on the real corpora.
 
-Protocol (§8): 8-fold CV over the CV-eligible datasets, pooled out-of-fold predictions,
-balanced accuracy computed ONCE over the pool, reported per dataset (never pooled across
-datasets for meter claims). gtzan is test-only: scored with a model trained on all CV crops.
+Protocol: 8-fold cross-validation over the CV-eligible datasets; every crop is predicted
+by the model that held ITS fold out; balanced accuracy is computed once over the pooled
+out-of-fold predictions and reported per dataset (never pooled across datasets for meter
+claims — some corpora are 100% 4/4 and carry no meter signal). gtzan has no CV folds and
+is test-only: scored with a model trained on all CV crops.
 
 Thin CLI over vbpm.fitting + vbpm.data — no protocol logic lives here.
 
 Usage:
-    /disk4/anaconda3/envs/chart/bin/python train.py [--datasets asap ...] [--smoke]
+    /disk4/anaconda3/envs/vbpm/bin/python train.py [--datasets asap ...] [--smoke]
 """
 import argparse
 
@@ -20,7 +22,7 @@ from vbpm.stage0 import Stage0
 
 
 def main(argv=None):
-    """Fold-honest CV + §8 report over the real corpora, one run per reducer."""
+    """Fold-honest CV + per-dataset report over the real corpora, one run per reducer."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", nargs="*", default=None)
     ap.add_argument("--device", default="cuda")
@@ -28,7 +30,8 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=0.5)
     ap.add_argument("--smoke", action="store_true", help="6 songs per fold, quick wiring check")
     ap.add_argument("--reducers", nargs="*", default=["meanmax", "peaks"],
-                    choices=sorted(REDUCERS), help="§4.4 reducer variants, one CV run each")
+                    choices=sorted(REDUCERS),
+                    help="reducer variants (see vbpm/reducers.py), one CV run each")
     args = ap.parse_args(argv)
 
     print("loading crops (live fold-honest frontend pass)...", flush=True)

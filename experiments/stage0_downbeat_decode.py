@@ -8,7 +8,7 @@ Decode (h + beat grid only, no y):
 Arms: raw peak-pick of the downbeat channel (unconstrained baseline), grid decode with
 predicted m, grid decode with oracle m (separates meter cost from offset cost).
 
-Run: CUDA_VISIBLE_DEVICES=3 /disk4/anaconda3/envs/chart/bin/python \
+Run: CUDA_VISIBLE_DEVICES=3 /disk4/anaconda3/envs/vbpm/bin/python \
          experiments/stage0_downbeat_decode.py
 """
 

@@ -1,4 +1,4 @@
-"""Shared fitting machinery: vectorized §5 training, the §8 CV protocol, scoring.
+"""Shared fitting machinery: vectorized training, the cross-validation protocol, scoring.
 
 The per-crop ELBO is Appendix-A `Stage0.elbo`; `Batch` is its vectorized equivalent,
 VERIFIED against the per-crop method (`verify_vectorized`) — an unverified second
@@ -56,9 +56,10 @@ def emission_logp_from_counts(counts, offset_mask, log_m, alpha, beta):
 
 
 def elbo_mean_from(emission, prior_logits, c):
-    """Scalar mean ELBO from per-crop emission [..., K] and prior logits [..., K] (§4.6).
+    """Scalar mean ELBO from per-crop emission [..., K] and prior logits [..., K].
 
-    The ONE composition of prior/encoder/objective for vectorized training paths.
+    The ONE composition of prior/encoder/objective for vectorized training paths —
+    exact enumeration over the K meters, nothing sampled.
     """
     prior = torch.log_softmax(prior_logits, dim=-1)
     q_logp = torch.log_softmax(prior + c * emission, dim=-1)
@@ -88,7 +89,10 @@ class Batch:
 
 
 def fit_vectorized(model, crops, steps=500, lr=0.5):
-    """§5 training loop (Adam, full batch) on the vectorized objective."""
+    """The standard training loop (Adam, full batch, 500 steps at lr 0.5), vectorized.
+
+    Same objective and optimum as Stage0.fit, roughly a thousand times faster.
+    """
     batch = Batch(crops, model.values, model.reducer)
     opt = torch.optim.Adam(model.trainable_params(), lr=lr)
 
@@ -120,7 +124,11 @@ def verify_vectorized(crops, values, reducer, s_dim):
 
 
 def score(tag, subset, preds, values):
-    """Print one §8 scoring line: balanced/raw accuracy, class count, confusion."""
+    """Print one scoring line: balanced accuracy, raw accuracy, classes, confusion.
+
+    Balanced accuracy = mean per-class recall; an always-4 predictor scores exactly 1/K,
+    which is the point — raw accuracy flatters degenerate predictors on skewed data.
+    """
     true = [c["m_true"] for c in subset]
     balanced = metrics.balanced_accuracy(true, preds, values)
     raw = float(np.mean(np.asarray(true) == np.asarray(preds)))
@@ -131,12 +139,15 @@ def score(tag, subset, preds, values):
 
 
 def predict_m(model, h):
-    """Deployable prediction as a COUNT (C1): argmax of predict(h), converted once."""
+    """Deployable prediction as a beats-per-bar COUNT, never an index.
+
+    argmax of predict(h), converted through to_value exactly once.
+    """
     return model.to_value(int(model.predict(h).argmax()))
 
 
 def cv_out_of_fold(cv, test, fit_fn, predict_fn, verbose=True):
-    """The §8 protocol, once.
+    """The evaluation protocol, once.
 
     Per-fold train-on-complement, pooled out-of-fold predictions, plus a model trained
     on all CV crops for the test-only split.
@@ -162,7 +173,12 @@ def cv_out_of_fold(cv, test, fit_fn, predict_fn, verbose=True):
 
 
 def score_per_dataset(pooled_crops, pooled_preds, values):
-    """§8: per-dataset lines (never pooled for meter claims) then the ALL-CV pool."""
+    """Per-dataset score lines, then the pooled ALL-CV line.
+
+    Per dataset first because pooled meter claims are dominated by strata that
+    carry no meter signal (some corpora are 100% 4/4); the pooled line is only
+    the summary, never the finding.
+    """
     for dataset in sorted({c["dataset"] for c in pooled_crops}):
         sel = [i for i, c in enumerate(pooled_crops) if c["dataset"] == dataset]
         score(dataset, [pooled_crops[i] for i in sel],

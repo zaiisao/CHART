@@ -8,13 +8,14 @@ autocorrelation over lags -> conv over the lag axis -> psi logits), jointly with
     ELBO = E_q[log p_theta(y|m)] - KL(q_phi || p_psi(head(h)))
 
 The frontend stays frozen (SS6.1); the head is OUR evidence head, trained fold-honest.
-C2 holds: the deployable path is head(h) only; y enters only through emission/encoder.
+The deployable path stays annotation-blind: the head reads features only; the labels
+enter training solely through the emission and encoder terms of the ELBO.
 
 Experiment-level departures from SS5 defaults, deliberate and noted: minibatch Adam
 (18.9k crops x [T,512] cannot be full-batch), float32, GPU. The ELBO per crop is still an
 exact 3-term enumeration - nothing is sampled; the minibatching only chunks the mean.
 
-Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python experiments/stage0_e2e_head.py
+Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/vbpm/bin/python experiments/stage0_e2e_head.py
 """
 import sys
 
@@ -44,7 +45,7 @@ def emission_stats(y):
 # ELBO on a minibatch (exact 3-term enumeration per crop)
 # --------------------------------------------------------------------------------------
 def batch_elbo(head, scalars, log_m, x, lengths, Cs, masks):
-    """The shared §4.6 composition with the head's logits as the prior — no local re-derivation."""
+    """The shared ELBO composition with the head's logits as the prior — no local re-derivation."""
     em = emission_logp_from_counts(Cs, masks, log_m, scalars["alpha"], scalars["beta"])
     return elbo_mean_from(em, head(x, lengths), scalars["c"])
 

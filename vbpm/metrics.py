@@ -1,4 +1,4 @@
-"""§8 metrics and deployable baselines — the RUNTIME owner.
+"""Evaluation metrics and deployable baselines — the RUNTIME owner.
 
 tests/reference.py carries its own copies by design: the spec-side oracle must stay
 self-contained and must never import the implementation it judges, and the runtime
@@ -13,7 +13,11 @@ DEFAULT_VALUES = (2, 3, 4)
 
 
 def balanced_accuracy(true_m, pred_m, values=DEFAULT_VALUES) -> float:
-    """Mean over PRESENT classes of per-class recall (§8 primary metric)."""
+    """Mean over PRESENT classes of per-class recall — the primary metric.
+
+    Used instead of raw accuracy because the corpus is ~19:1 skewed toward 4/4:
+    an always-4 predictor scores 0.80 raw but exactly 1/K balanced.
+    """
     true_m = np.asarray(true_m)
     pred_m = np.asarray(pred_m)
     recalls = []
@@ -35,12 +39,12 @@ def confusion(true_m, pred_m, values=DEFAULT_VALUES) -> np.ndarray:
 
 
 def distinct_predicted(pred_m) -> int:
-    """§8 collapse detector: number of distinct predicted classes."""
+    """Collapse detector: number of distinct predicted classes (1 = degenerate)."""
     return int(len(set(int(p) for p in np.asarray(pred_m).ravel())))
 
 
 def majority_predict(train_m, values=DEFAULT_VALUES) -> int:
-    """§8 baseline: the training majority class (ties broken toward the smaller count)."""
+    """Baseline: the training majority class (ties broken toward the smaller count)."""
     counts = {m: 0 for m in values}
     for m in train_m:
         counts[int(m)] += 1
@@ -62,7 +66,7 @@ def pick_peaks(x, threshold: float = 0.5, min_distance: int = 2) -> np.ndarray:
 
 
 def peak_count_estimate(h, values=DEFAULT_VALUES, threshold: float = 0.5) -> int:
-    """§8 peak-count baseline: DEPLOYABLE, reads only h (as probabilities).
+    """The peak-count baseline: DEPLOYABLE, reads only h (as probabilities).
 
     beats-per-bar ~= (#peaks in the beat channel) / (#peaks in the downbeat channel).
     """

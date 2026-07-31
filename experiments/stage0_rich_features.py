@@ -2,11 +2,11 @@
 
 Does meter evidence survive where the compression loses it (asap 0.350 vs synth ceiling 0.988)?
 
-Frontend stays FROZEN (§6.1); we train only our own head (linear psi on a fixed reduction).
+The frontend stays frozen; we train only our own head (linear psi on a fixed reduction).
 [T,512] for 18.9k crops is ~60 GB, so reductions are computed inside the load pass and only
 the summary vectors are kept. Crops/labels/folds identical to the compressed-h run.
 
-Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python \
+Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/vbpm/bin/python \
          experiments/stage0_rich_features.py
 """
 import sys

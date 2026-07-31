@@ -1,4 +1,4 @@
-"""Sanity self-check: train Stage 0 on the synthetic bench (§6.4) and print §8 diagnostics.
+"""Sanity self-check: train Stage 0 on the synthetic bench and print the diagnostics.
 
 Not an experiment and not part of the pytest suite (no test_ prefix): the bench is the
 "simplest data imaginable", so balanced accuracy here should always be ~0.95+ — anything
@@ -6,7 +6,7 @@ less means the machinery is broken, not that the model is bad. Real training is 
 at the repo root.
 
 Usage:
-    /disk4/anaconda3/envs/chart/bin/python tests/synth_bench.py \
+    /disk4/anaconda3/envs/vbpm/bin/python tests/synth_bench.py \
         [--n-per-class 8] [--steps 500] [--lr 0.5] [--seed 0]
 """
 from __future__ import annotations
@@ -16,18 +16,18 @@ import argparse
 import numpy as np
 import torch
 
-import reference as R  # sibling module: the §6.4 bench + §8 metrics, spec-side code
+import reference as R  # sibling module: the synthetic bench + metrics, spec-side code
 
 from vbpm.stage0 import Stage0
 
 
 def main(argv=None):
-    """Train Stage 0 on the synthetic bench and print the §8 diagnostics."""
+    """Train Stage 0 on the synthetic bench and print the standard diagnostics."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--n-per-class", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=500)   # §5 defaults
+    ap.add_argument("--steps", type=int, default=500)   # the spec's training defaults
     ap.add_argument("--lr", type=float, default=0.5)
-    ap.add_argument("--seed", type=int, default=0, help="bench draw, not model noise (§4.6)")
+    ap.add_argument("--seed", type=int, default=0, help="bench draw; the model is deterministic")
     args = ap.parse_args(argv)
 
     values = R.DEFAULT_VALUES
@@ -47,7 +47,7 @@ def main(argv=None):
 
     print(f"ELBO after fit:  train {mean_elbo(train):+.4f}  held {mean_elbo(held):+.4f}")
 
-    # §8: score the DEPLOYABLE path (predict reads h only, C2) on held-out data
+    # score the DEPLOYABLE path (predict reads audio features only) on held-out data
     true = [s["m_true"] for s in held]
     pred = [model.to_value(int(model.predict(s["h"]).argmax())) for s in held]
     logits = np.stack([model.predict(s["h"]).detach().numpy() for s in held])
@@ -59,7 +59,7 @@ def main(argv=None):
     print(f"collapse ratio: {R.collapse_ratio(logits):.3f}")
     print(f"confusion (rows=true {values}):\n{R.confusion(true, pred, values)}")
 
-    # §4.7 / §10.2: every parameter must have moved off init — assert, don't assume
+    # every parameter must have moved off its initialisation — assert, don't assume
     fresh = Stage0(values)
     stuck = [n for n, p in model.named_params().items()
              if np.array_equal(p.detach().numpy(), fresh.named_params()[n].detach().numpy())]
