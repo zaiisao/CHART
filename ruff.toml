@@ -1,0 +1,17 @@
+# Style enforcement for the v2 tree. Two standards, both binding:
+#   - PEP 8 mechanical rules (pycodestyle E/W at the repo's 100-col convention, pyflakes F)
+#   - blank-line paragraphing (staycaffeinated 2020-05-27): imports / functions / logical
+#     phases separated, get+validate grouped. The E3xx rules enforce the mechanical half;
+#     the within-function half is reviewed, not linted.
+# Checked by .githooks/pre-commit locally and .github/workflows/lint.yml on push.
+
+line-length = 100
+
+[lint]
+select = ["E", "W", "F"]
+
+[lint.per-file-ignores]
+# tests/v2 is the acceptance suite and may not be edited (SPEC SS9); it carries 4
+# pre-existing long lines. Exempt exactly those files, nothing else.
+"tests/v2/mutants.py" = ["E501"]
+"tests/v2/test_reference_selftest.py" = ["E501"]
