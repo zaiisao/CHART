@@ -5,7 +5,8 @@ Frontend stays FROZEN (§6.1); we train only our own head (linear psi on a fixed
 [T,512] for 18.9k crops is ~60 GB, so reductions are computed inside the load pass and only
 the summary vectors are kept. Crops/labels/folds identical to the compressed-h run.
 
-Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python experiments/stage0_rich_features.py
+Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python \
+         experiments/stage0_rich_features.py
 """
 import math
 import sys
@@ -46,13 +47,13 @@ def reduce_novelty(X):
     L = min(T - 2, 320)
     if L < 20:
         return np.zeros(8)
-    r = np.array([float((nov[:-l] * nov[l:]).mean()) for l in range(1, L + 1)])
+    r = np.array([float((nov[:-lag] * nov[lag:]).mean()) for lag in range(1, L + 1)])
     lo, hi = 10, min(100, L)                       # beat period 0.2-2.0 s at 50 fps
     bl = lo + int(np.argmax(r[lo - 1:hi]))
 
     def at(mult):
-        l = int(round(bl * mult))
-        return r[l - 1] if l <= L else 0.0
+        lag = int(round(bl * mult))
+        return r[lag - 1] if lag <= L else 0.0
 
     return np.array([bl / FPS, at(1), at(2), at(3), at(4), at(6),
                      float(nov.mean()), float(np.log1p(T))])
