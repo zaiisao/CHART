@@ -15,20 +15,16 @@ Rubato timing is preserved because the bump times are the real annotated times.
 Run: /disk4/anaconda3/envs/chart/bin/python experiments/stage0_synth_h_control.py
 """
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
-import reference as R  # noqa: E402
+from vbpm import metrics as R
 
-from data.songs import iter_songs  # noqa: E402
-from vbpm.data import FPS, VALUES, extract_crops, to_prob  # noqa: E402
-from vbpm.reducers import REDUCERS  # noqa: E402
-from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+from data.songs import iter_songs
+from vbpm.data import FPS, VALUES, extract_crops, to_prob
+from vbpm.reducers import REDUCERS
+from vbpm.stage0 import Stage0
+from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,
                              score, score_per_dataset)
 
 SIGMA_S = 0.06          # the synthetic bench's bump width (§6.4)

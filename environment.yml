@@ -1,22 +1,28 @@
-# Minimal environment for VBPM. The default (cached-feature) path needs only the "core" deps below;
-# the optional end-to-end path (--divergence_end_to_end, uses external/beat_this) adds einops +
-# rotary_embedding_torch (+ torchaudio for computing spectrograms from raw audio).
-# torch pulls its own transitive deps (sympy, networkx, jinja2, nvidia-cu12 wheels, triton, ...).
-# The exact frozen lockfile from the pre-refactor codebase is preserved in git history and the archive.
+# The vbpm environment. Create + install (from the repo root):
+#
+#     conda env create -f environment.yml          # or: conda create -n vbpm python=3.10 pip
+#     conda run -n vbpm pip install -e . -e ./external/beat_this
+#
+# The two editable installs make `import vbpm` / `import beat_this` resolve to THIS tree
+# (edits reflect immediately, no reinstall) and eliminate every sys.path hack.
+# On this machine the env lives at /disk4/anaconda3/envs/vbpm.
 name: vbpm
 channels:
   - conda-forge
 dependencies:
-  # ---- core (required) ----
   - python=3.10
-  - pytorch=2.6.*          # the model + all tensor ops (CUDA build)
-  - numpy
-  - scipy                  # scipy.signal.find_peaks for peak-picking the read-out
-  - pyyaml                 # YAML config loader (config.py)
   - pip
   - pip:
-      - mir_eval           # beat/downbeat F-measure
-      # ---- optional: end-to-end feature extraction via external/beat_this ----
-      - einops
-      - rotary_embedding_torch
-      - torchaudio         # only needed to extract features from raw audio (not the cached path)
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.6.0+cu124
+      - torchaudio==2.6.0+cu124   # beat_this loads audio through it
+      - numpy
+      - scipy
+      - soundfile                 # audio I/O in the frontend pass
+      - mir_eval                  # beat/downbeat F-measure
+      - einops                    # beat_this
+      - rotary_embedding_torch    # beat_this
+      - soxr                      # beat_this resampling
+      - mido                      # madmom (beat_this transitive) needs it at import
+      - pytest                    # the acceptance suite
+      - ruff                      # style enforcement (ruff.toml)

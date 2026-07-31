@@ -19,15 +19,11 @@ Checkpoints (all cached locally under ~/.cache/torch/hub/checkpoints/):
   * "fold0".."fold7" -- the Beat This 8-fold protocol. For any number reported on our val folds,
     use the checkpoint whose held-out fold matches; final0 numbers on those songs are leakage.
 """
-import sys
-from pathlib import Path
 from typing import Optional
 
 import torch
 
 from frontends import Frontend
-
-_BEAT_THIS_ROOT = Path(__file__).resolve().parent.parent / "external" / "beat_this"
 
 
 class BeatThisFrontend(Frontend):
@@ -50,8 +46,7 @@ class BeatThisFrontend(Frontend):
             raise KeyError(f"unknown output mode {output!r} for {self.name} "
                            f"(have: {sorted(self.OUTPUT_MODES)})")
         self.output = output
-        if str(_BEAT_THIS_ROOT) not in sys.path:
-            sys.path.insert(0, str(_BEAT_THIS_ROOT))
+        # beat_this is editable-installed from external/beat_this (see environment.yml)
         from beat_this.inference import Audio2Frames
 
         self._audio2frames = Audio2Frames(checkpoint_path=checkpoint, device=device,
@@ -129,52 +124,3 @@ class BeatThisFrontend(Frontend):
         for start, chunk in reversed(list(zip(starts, feature_chunks))):      # keep_first
             piece[max(start + border, 0):start + chunk_size - border] = chunk[border:-border]
         return piece
-
-
-if __name__ == "__main__":
-    # Smoke test: a synthetic 120 BPM 4/4 click track through frontend -> both bar-pointer models.
-    import numpy as np
-
-    from tracker import Tracker
-
-    SR, SECONDS, BPM = 22050, 12, 120.0
-    signal = np.zeros(SR * SECONDS, dtype=np.float32)
-    click = (0.8 * np.sin(2 * np.pi * 1000 * np.arange(0.02 * SR) / SR)
-             * np.hanning(int(0.02 * SR))).astype(np.float32)
-    beat_samples = (np.arange(0, SECONDS * BPM / 60) * 60 / BPM * SR).astype(int)
-    for i, s in enumerate(beat_samples):
-        signal[s:s + len(click)] += click * (1.5 if i % 4 == 0 else 1.0)   # accent the downbeats
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    frontend = BeatThisFrontend(device=device)
-    print(f"frontend: {frontend.name} ckpt={frontend.checkpoint} fps={frontend.fps} "
-          f"form={frontend.ACTIVATION_FORM}")
-    features = frontend.get_features(signal, SR)
-    print(f"features: {tuple(features.shape)} (expect ~{SECONDS * 50} frames)")
-
-    for bar_pointer in ("madmom_dbn", "2016_dbn"):
-        kwargs = {} if bar_pointer == "madmom_dbn" else {"device": device}
-        events = Tracker(frontend, bar_pointer, **kwargs).track(signal, SR)
-        n_beats, n_downbeats = len(events["beats"]), len(events["downbeats"])
-        ibi = float(np.diff(events["beats"]).mean()) if n_beats > 1 else float("nan")
-        print(f"  {bar_pointer:16s}: {n_beats:3d} beats (expect ~{SECONDS * 2}), "
-              f"{n_downbeats:2d} downbeats (expect ~{SECONDS // 2}), "
-              f"mean IBI {ibi:.3f}s -> {60.0 / ibi:.1f} BPM (expect ~120)")
-
-    # Certify the "features" mode against the logits pipeline: the task heads are frame-wise, so
-    # heads(aggregated features) must reproduce the aggregated logits. Run on a long signal too,
-    # so the multi-chunk split/aggregate path is exercised, not just the single-chunk one.
-    features_frontend = BeatThisFrontend(device=device, output="features")
-    long_signal = np.concatenate([signal] * 4)                    # ~48 s -> multiple chunks
-    for label, sig in (("single-chunk", signal), ("multi-chunk", long_signal)):
-        features = features_frontend.get_features(sig, SR)
-        logits = frontend.get_features(sig, SR)
-        with torch.inference_mode():
-            heads = features_frontend._audio2frames.model.task_heads(
-                features.to(device).unsqueeze(0))
-        rederived = torch.stack([heads["beat"][0], heads["downbeat"][0]], dim=-1).cpu()
-        error = float((rederived - logits).abs().max())
-        assert features.shape == (logits.shape[0], features_frontend.num_channels)
-        assert error < 1e-4, f"features/logits misaligned ({label}): max|diff|={error}"
-        print(f"  features ({label:12s}): {tuple(features.shape)}, "
-              f"heads(features) vs logits max|diff| = {error:.2e}  OK")

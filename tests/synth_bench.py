@@ -12,17 +12,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import pathlib
-import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, str(pathlib.Path(__file__).parents[1]))
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import reference as R  # noqa: E402  (the §6.4 bench + §8 metrics, spec-side code)
+import reference as R  # sibling module: the §6.4 bench + §8 metrics, spec-side code
 
-from vbpm.stage0 import Stage0  # noqa: E402
+from vbpm.stage0 import Stage0
 
 
 def main(argv=None):

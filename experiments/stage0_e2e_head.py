@@ -17,17 +17,14 @@ exact 3-term enumeration - nothing is sampled; the minibatching only chunks the 
 Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python experiments/stage0_e2e_head.py
 """
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
-from vbpm.fitting import (cv_out_of_fold, elbo_mean_from, emission_counts,  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops
+from vbpm.fitting import (cv_out_of_fold, elbo_mean_from, emission_counts,
                              emission_logp_from_counts, score, score_per_dataset)
 
 K = len(VALUES)

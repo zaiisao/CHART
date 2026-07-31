@@ -10,17 +10,14 @@ Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python \
          experiments/stage0_rich_features.py
 """
 import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
-from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops
+from vbpm.stage0 import Stage0
+from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,
                              score, score_per_dataset)
 
 

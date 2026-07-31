@@ -10,14 +10,11 @@ Rejections are surfaced, never silent (§6.2): every excluded song is counted by
 from __future__ import annotations
 
 import math
-import sys
 from collections import Counter
-from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from data.songs import iter_songs  # noqa: E402
+from data.songs import iter_songs
 
 from .stage0 import DEFAULT_VALUES
 

@@ -7,6 +7,7 @@
 # Checked by .githooks/pre-commit locally and .github/workflows/lint.yml on push.
 
 line-length = 100    # deliberate deviation from Google's 80: the whole tree is written to 100
+extend-exclude = ["external"]   # third-party submodules are not ours to lint
 
 [lint]
 select = ["E", "W", "F", "D", "N"]

@@ -116,32 +116,3 @@ class BeatTransformerFrontend(Frontend):
                 raise RuntimeError(f"spleeter demixing failed "
                                    f"({self.demix_python}):\n{result.stderr[-2000:]}")
             return np.load(str(npz_path))["x"]
-
-
-if __name__ == "__main__":
-    # Smoke test on a real catalog song: track with Beat Transformer's OWN shipped decode
-    # (observation_lambda=6, num_tempi=None, threshold=0.2) through R0 and R1.
-    from data.songs import iter_songs
-    from tracker import Tracker
-
-    song = next(s for s in iter_songs() if s.audio_path is not None)
-    signal, sr = soundfile.read(str(song.audio_path), dtype="float32")
-    if signal.ndim > 1:
-        signal = signal.mean(axis=1)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    frontend = BeatTransformerFrontend(device=device)
-    print(f"frontend: {frontend.name} ckpt={frontend.checkpoint} fps={frontend.fps:.3f} "
-          f"form={frontend.ACTIVATION_FORM} bounding={frontend.BOUNDING}")
-    print(f"song: {song.dataset}/{song.audio_path.name}")
-
-    shipped = dict(observation_lambda=6, num_tempi=None, threshold=0.2)
-    for bar_pointer in ("madmom_dbn", "2016_dbn"):
-        kwargs = dict(shipped)
-        if bar_pointer != "madmom_dbn":
-            kwargs["device"] = device
-        events = Tracker(frontend, bar_pointer, **kwargs).track(signal, sr)
-        n_beats = len(events["beats"])
-        ibi = float(np.diff(events["beats"]).mean()) if n_beats > 1 else float("nan")
-        print(f"  {bar_pointer:12s}: {n_beats:3d} beats, {len(events['downbeats']):2d} downbeats, "
-              f"mean IBI {ibi:.3f}s -> {60.0 / ibi:.1f} BPM")

@@ -23,8 +23,8 @@ encoder / exact-enumeration ELBO. Stage 1 adds bar phase `φ`; Stage 2 adds temp
 ## Run
 
 ```bash
-# environment: conda env "chart" (no bare python; .venv lacks torch)
-PY=/disk4/anaconda3/envs/chart/bin/python
+# environment: see environment.yml (conda env "vbpm", editable-installed)
+PY=/disk4/anaconda3/envs/vbpm/bin/python
 
 $PY -m pytest tests --impl=vbpm -q        # acceptance: 142 passed, 2 skipped
 $PY train.py                              # fold-honest CV on real corpora (GPU + data)

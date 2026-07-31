@@ -2,21 +2,16 @@
 
 The per-crop ELBO is Appendix-A `Stage0.elbo`; `Batch` is its vectorized equivalent,
 VERIFIED against the per-crop method (`verify_vectorized`) — an unverified second
-objective is how this project got burned before. Entry points live at the repo root
-(train.py, train_real.py); this module is library only.
+objective is how this project got burned before. The entry point lives at the repo root
+(train.py); this module is library only.
 """
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
-import reference as R  # noqa: E402  (§8 metrics + baselines, spec-side code)
-
-from .stage0 import Stage0  # noqa: E402
+from . import metrics
+from .stage0 import Stage0
 
 MAX_OFFSETS = 4     # widest bar-offset axis: r ranges over 0..m-1, and max(values) = 4
 
@@ -127,11 +122,11 @@ def verify_vectorized(crops, values, reducer, s_dim):
 def score(tag, subset, preds, values):
     """Print one §8 scoring line: balanced/raw accuracy, class count, confusion."""
     true = [c["m_true"] for c in subset]
-    balanced = R.balanced_accuracy(true, preds, values)
+    balanced = metrics.balanced_accuracy(true, preds, values)
     raw = float(np.mean(np.asarray(true) == np.asarray(preds)))
     print(f"{tag:12s} n={len(subset):4d}  balanced={balanced:.3f}  raw={raw:.3f}  "
-          f"classes={R.distinct_predicted(preds)}  "
-          f"confusion={R.confusion(true, preds, values).tolist()}")
+          f"classes={metrics.distinct_predicted(preds)}  "
+          f"confusion={metrics.confusion(true, preds, values).tolist()}")
     return balanced
 
 

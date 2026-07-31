@@ -11,20 +11,16 @@ predicted m, grid decode with oracle m (separates meter cost from offset cost).
 Run: CUDA_VISIBLE_DEVICES=3 /disk4/anaconda3/envs/chart/bin/python \
          experiments/stage0_downbeat_decode.py
 """
-import sys
-from pathlib import Path
 
 import mir_eval.beat
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
-import reference as R  # noqa: E402
+from vbpm import metrics as R
 
-from vbpm.data import FPS, VALUES, load_crops, to_prob  # noqa: E402
-from vbpm.reducers import REDUCERS  # noqa: E402
-from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.fitting import cv_out_of_fold, fit_vectorized, predict_m  # noqa: E402
+from vbpm.data import FPS, VALUES, load_crops, to_prob
+from vbpm.reducers import REDUCERS
+from vbpm.stage0 import Stage0
+from vbpm.fitting import cv_out_of_fold, fit_vectorized, predict_m
 
 TOL_S = 0.07
 

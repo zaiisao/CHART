@@ -3,10 +3,10 @@
 #   git config core.hooksPath .githooks
 # Needs ruff on PATH or importable (pip install ruff).
 
-if command -v ruff >/dev/null 2>&1; then
+if [ -x /disk4/anaconda3/envs/vbpm/bin/ruff ]; then
+    RUFF=/disk4/anaconda3/envs/vbpm/bin/ruff
+elif command -v ruff >/dev/null 2>&1; then
     RUFF=ruff
-elif [ -x /tmp/lint/bin/ruff ]; then
-    RUFF=/tmp/lint/bin/ruff
 else
     echo "pre-commit: ruff not found (pip install ruff) -- refusing to commit unchecked" >&2
     exit 1

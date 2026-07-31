@@ -10,18 +10,13 @@ Usage:
     /disk4/anaconda3/envs/chart/bin/python train.py [--datasets asap ...] [--smoke]
 """
 import argparse
-import pathlib
-import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-sys.path.insert(0, str(pathlib.Path(__file__).parent / "tests"))
-import reference as R  # noqa: E402  (§8 baselines, spec-side code)
-
-from vbpm.data import VALUES, load_crops, to_prob  # noqa: E402
-from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m, score,  # noqa: E402
+from vbpm.data import VALUES, load_crops, to_prob
+from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m, score,
                           score_per_dataset, verify_vectorized)
-from vbpm.reducers import REDUCERS  # noqa: E402
-from vbpm.stage0 import Stage0  # noqa: E402
+from vbpm.metrics import majority_predict, peak_count_estimate
+from vbpm.reducers import REDUCERS
+from vbpm.stage0 import Stage0
 
 
 def main(argv=None):
@@ -70,12 +65,12 @@ def main(argv=None):
             score("gtzan", test, test_preds, VALUES)
 
     print("\n######## baselines (held-out, deployable) ########")
-    majority = R.majority_predict([c["m_true"] for c in cv], VALUES)
+    majority = majority_predict([c["m_true"] for c in cv], VALUES)
     score("majority", cv, [majority] * len(cv), VALUES)
-    peak_preds = [R.peak_count_estimate(to_prob(c["h"]), VALUES) for c in cv]
+    peak_preds = [peak_count_estimate(to_prob(c["h"]), VALUES) for c in cv]
     score("peak-count", cv, peak_preds, VALUES)
     if test:
-        peak_test = [R.peak_count_estimate(to_prob(c["h"]), VALUES) for c in test]
+        peak_test = [peak_count_estimate(to_prob(c["h"]), VALUES) for c in test]
         score("peak-gtzan", test, peak_test, VALUES)
 
 

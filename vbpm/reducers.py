@@ -12,23 +12,11 @@ import numpy as np
 import torch
 
 from .data import FPS
+from .metrics import pick_peaks
 from .stage0 import reduce_h as mean_max  # noqa: F401  (the §4.4 default)
 
 MEAN_MAX_DIM = 4        # 2D with D=2
 PEAK_SUMMARY_DIM = 10
-
-
-def _pick_peaks(x: np.ndarray, threshold: float = 0.5, min_distance: int = 2) -> np.ndarray:
-    """Strict local maxima above threshold, greedily thinned (same rule as the §8 baseline)."""
-    cand = [i for i in range(1, len(x) - 1)
-            if x[i] > threshold and x[i] >= x[i - 1] and x[i] > x[i + 1]]
-    out: list = []
-    for i in cand:
-        if not out or i - out[-1] >= min_distance:
-            out.append(i)
-        elif x[i] > x[out[-1]]:
-            out[-1] = i
-    return np.asarray(out, dtype=int)
 
 
 def peak_summary(h) -> torch.Tensor:
@@ -41,7 +29,7 @@ def peak_summary(h) -> torch.Tensor:
     prob = 1.0 / (1.0 + np.exp(-logits))
     T = max(len(prob), 1)
     beat, down = prob[:, 0], prob[:, 1]
-    beat_peaks, down_peaks = _pick_peaks(beat), _pick_peaks(down)
+    beat_peaks, down_peaks = pick_peaks(beat), pick_peaks(down)
     n_beat, n_down = len(beat_peaks), len(down_peaks)
     peak_ratio = n_beat / max(n_down, 1)          # ~beats per bar, the meter's signature
 
