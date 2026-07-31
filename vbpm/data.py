@@ -212,8 +212,13 @@ def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
             h_crop, t0 = slice_h(h, c["beats"])
             crops.append(make_entry(s, c, h_crop, t0))
 
+    class_counts_by_dataset: dict = {}
+    for c in crops:
+        class_counts_by_dataset.setdefault(c["dataset"], Counter())[c["m_true"]] += 1
+
     unmatched = rejects.pop("unmatched_downbeats", 0)
     report = {"usable": len(crops), "rejects": dict(rejects),
               "unmatched_downbeats": unmatched,
-              "per_dataset": dict(Counter((c["dataset"], c["m_true"]) for c in crops))}
+              "class_counts_by_dataset": {dataset: dict(counts) for dataset, counts
+                                          in class_counts_by_dataset.items()}}
     return crops, report

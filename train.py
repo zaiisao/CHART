@@ -39,12 +39,9 @@ def main(argv=None):
                                limit_per_fold=6 if args.smoke else None)
     print(f"usable: {report['usable']}  rejects: {report['rejects']}  "
           f"unmatched downbeats: {report['unmatched_downbeats']}")
-    per_dataset: dict = {}
-    for (dataset, m), n in sorted(report["per_dataset"].items()):
-        per_dataset.setdefault(dataset, {})[m] = n
-    for dataset, class_counts in per_dataset.items():
-        print(f"  {dataset:12s} " + "  ".join(f"m={m}:{class_counts.get(m, 0)}"
-                                              for m in VALUES))
+    for dataset, class_counts in sorted(report["class_counts_by_dataset"].items()):
+        counts = "  ".join(f"m={m}:{class_counts.get(m, 0)}" for m in VALUES)
+        print(f"  {dataset:12s} {counts}")
 
     cv = [c for c in crops if c["fold"] is not None]
     test = [c for c in crops if c["fold"] is None]
