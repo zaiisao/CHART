@@ -29,7 +29,7 @@ from frontends import Frontend
 class BeatThisFrontend(Frontend):
     """Official Beat This inference behind the Frontend surface; see module docstring."""
 
-    OUTPUT_MODES = {"activations": 2, "features": 512}
+    OUTPUT_MODES = {"activations": 2, "features": 512, "features+activations": 514}
 
     ACTIVATION_FORM = "logit"
     BOUNDING = "squeeze"       # Beat This's published convention: sigmoid(x)*(1-eps) + eps/2.
@@ -54,7 +54,8 @@ class BeatThisFrontend(Frontend):
         # The features width is the loaded checkpoint's transformer_dim (the frontend stack's final
         # linear projects into it); read it off the model so small checkpoints declare honestly.
         transformer_dim = self._audio2frames.model.frontend.linear.out_features
-        self.OUTPUT_MODES = {**self.OUTPUT_MODES, "features": transformer_dim}
+        self.OUTPUT_MODES = {**self.OUTPUT_MODES, "features": transformer_dim,
+                             "features+activations": transformer_dim + 2}
         self.checkpoint = checkpoint
         self.device = device
         self.fps = target_fps if target_fps is not None else self.NATIVE_FPS
@@ -65,11 +66,19 @@ class BeatThisFrontend(Frontend):
 
         Any sample rate (Beat This resamples internally). Channels: (beat, downbeat)
         LOGITS in "activations" mode, penultimate transformer_blocks features in
-        "features" mode.
+        "features" mode, and [features ⊕ beat ⊕ downbeat] ([T, C+2], activations LAST)
+        in "features+activations" mode — one forward pass for both depths, valid because
+        the task heads are frame-wise linears on the features (commutation with the
+        chunk aggregation is verified in _penultimate's docstring).
         """
         if self.output == "activations":
             beat_logits, downbeat_logits = self._audio2frames(signal, sample_rate)
             out = torch.stack([beat_logits, downbeat_logits], dim=-1)         # [T@50fps, 2]
+        elif self.output == "features+activations":
+            features = self._penultimate(signal, sample_rate)                 # [T@50fps, C]
+            heads = self._audio2frames.model.task_heads(features.unsqueeze(0))
+            out = torch.cat([features, heads["beat"][0, :, None],
+                             heads["downbeat"][0, :, None]], dim=-1)          # [T, C+2]
         else:
             out = self._penultimate(signal, sample_rate)                      # [T@50fps, C]
         if self.fps != self.NATIVE_FPS:

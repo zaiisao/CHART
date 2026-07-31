@@ -20,10 +20,10 @@ import sys
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 
 from vbpm.data import FPS, VALUES, load_crops
+from vbpm.heads import AutocorrHead
 from vbpm.fitting import (cv_out_of_fold, elbo_mean_from, emission_counts,
                              emission_logp_from_counts, score, score_per_dataset)
 
@@ -38,43 +38,6 @@ def emission_stats(y):
     """float32 view of the shared emission linearisation (vbpm.fitting.emission_counts)."""
     C, mask = emission_counts(y, VALUES)
     return C.astype(np.float32), mask.astype(np.float32)
-
-
-# --------------------------------------------------------------------------------------
-# the evidence head: [B, T, 512] -> [B, K] prior logits
-# --------------------------------------------------------------------------------------
-class AutocorrHead(nn.Module):
-    def __init__(self, in_dim=512, channels=16, n_lags=N_LAGS):
-        super().__init__()
-        self.n_lags = n_lags
-        self.proj = nn.Linear(in_dim, channels, bias=False)
-        self.conv = nn.Sequential(
-            nn.Conv1d(channels, 32, 9, stride=2, padding=4), nn.ReLU(),
-            nn.Conv1d(32, 32, 9, stride=2, padding=4), nn.ReLU(),
-            nn.Conv1d(32, 32, 9, stride=2, padding=4), nn.ReLU(),
-            nn.AdaptiveAvgPool1d(8))
-        self.out = nn.Sequential(nn.Flatten(), nn.Linear(32 * 8, 64), nn.ReLU(),
-                                 nn.Linear(64, K))
-
-    def forward(self, x, lengths):
-        """X [B, T, 512] zero-padded, lengths [B]. Exact masked autocorr via FFT."""
-        B, T, _ = x.shape
-        valid = (torch.arange(T, device=x.device)[None, :]
-                 < lengths[:, None]).to(x.dtype)                      # [B, T]
-        u = self.proj(x) * valid[..., None]                           # [B, T, C]
-        mean = u.sum(1) / lengths[:, None].to(x.dtype)
-        u = (u - mean[:, None, :]) * valid[..., None]                 # centred over valid
-        u = u.transpose(1, 2)                                         # [B, C, T]
-        n_fft = 2 * T
-        spec = torch.fft.rfft(u, n=n_fft)
-        r = torch.fft.irfft(spec.abs() ** 2, n=n_fft)[..., :self.n_lags + 1]  # [B, C, L+1]
-        # normalise: pads contribute zero to the numerator, so dividing by (T_i - l)
-        # and by the lag-0 variance makes this the exact per-crop autocorrelation
-        counts = (lengths[:, None].to(x.dtype)
-                  - torch.arange(self.n_lags + 1, device=x.device)[None, :]).clamp(min=1.0)
-        r = r / counts[:, None, :]
-        r = r[..., 1:] / (r[..., :1] + 1e-8)                          # [B, C, L]
-        return self.out(self.conv(r))
 
 
 # --------------------------------------------------------------------------------------
@@ -121,7 +84,7 @@ def emission_batch(crops, idx, device):
 # --------------------------------------------------------------------------------------
 def train_head(train_crops, device):
     torch.manual_seed(SEED)
-    head = AutocorrHead().to(device)
+    head = AutocorrHead(n_lags=N_LAGS).to(device)
     # SS4.7 split: alpha/beta are theta (emission), c is phi (encoder); head is psi
     scalars = {"alpha": torch.tensor(0.5, device=device, requires_grad=True),
                "beta": torch.tensor(-0.5, device=device, requires_grad=True),

@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from .data import FPS
+from .data import FPS, to_prob
 from .metrics import pick_peaks
 from .stage0 import reduce_h as mean_max  # noqa: F401  (the §4.4 default)
 
@@ -25,8 +25,7 @@ def peak_summary(h) -> torch.Tensor:
     Expresses the beat/downbeat rate ratio that mean⊕max provably cannot
     (measured 2026-07-31: 0.405 vs peak-count 0.702).
     """
-    logits = np.asarray(h, dtype=np.float64)
-    prob = 1.0 / (1.0 + np.exp(-logits))
+    prob = to_prob(h)
     T = max(len(prob), 1)
     beat, down = prob[:, 0], prob[:, 1]
     beat_peaks, down_peaks = pick_peaks(beat), pick_peaks(down)
