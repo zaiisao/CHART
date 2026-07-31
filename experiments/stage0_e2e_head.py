@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
 from vbpm.train_real import (cv_out_of_fold, elbo_mean_from, emission_counts,  # noqa: E402

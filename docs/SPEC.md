@@ -9,7 +9,7 @@ untrusted content.
 |---|---|---|
 | `ELBO_for_DBN` (Jaehoon Ahn, March 2026) — `git show 43ecf34:docs/ELBO_for_DBN.md` | **Authoritative.** The user's own paper. | the full model (§11), from which Stage 0 is carved |
 | `VAEBPM_fin.pdf` (professor's tutorial, 2026-07-10) | **Authoritative, NOT IN REPO.** Only 41 lines of working notes exist. | §7 — currently a stub. Every §7 citation is therefore **second-hand**. |
-| Repo code (`frontends/`, `data/`, `tests/v2/`) | Descriptive: what exists, not what is correct. | §6 |
+| Repo code (`frontends/`, `data/`, `tests/`) | Descriptive: what exists, not what is correct. | §6 |
 | Campaign measurements | Findings with provenance; cited where used. | §10 |
 | `SPEC_v2_stage0.md` | **Not trusted.** Do not cite. | — |
 
@@ -185,7 +185,7 @@ discards peakiness. Linear, because Stage 0's job is to expose breakage, not to 
 > temporal encoder; a hand-built autocorrelation summary) are an experimental axis, not a
 > revision of this spec.
 
-> **Do not copy the oracle's reducer.** `tests/v2/subject.py` scores `h` with a hand-built
+> **Do not copy the oracle's reducer.** `tests/subject.py` scores `h` with a hand-built
 > beat/downbeat peak-count ratio. That exists so the oracle can be trusted without training
 > anything; it is a stand-in, not a recommendation.
 >
@@ -221,7 +221,7 @@ shows is a fitting result rather than a capacity limit.
 > **Not a spec concept: `capacity`.** An earlier draft mandated three interchangeable encoders
 > (`"exact"` / `"full"` / `"coarse"`) so the amortization gap could be dialled. That is a
 > *test fixture*, not a model — your paper has one encoder and so does a deployed VBPM — and
-> it entered this document from `tests/v2/subject.py` rather than from any source in §0.
+> it entered this document from `tests/subject.py` rather than from any source in §0.
 > Removed 2026-07-30 (user).
 >
 > It was also inoperative. `"coarse"` only means anything if its summary of `y` is genuinely
@@ -510,7 +510,7 @@ Required controls, each of which has caught a real error here:
 > raw and balanced accuracy coincide there and an always-4 predictor scores 0.333 either way.
 > The real corpus is **19:1** — a completely different regime, and the one where a degenerate
 > predictor looks good. Every control in this section therefore has to run on real data;
-> `tests/v2` currently exercises none of them (`nll_true`, `confusion` and `majority_predict`
+> `tests` currently exercises none of them (`nll_true`, `confusion` and `majority_predict`
 > exist in the reference but no property calls them). Passing the synthetic suite says
 > nothing about class-imbalance behaviour.
 
@@ -518,7 +518,7 @@ Required controls, each of which has caught a real error here:
 
 ## 9. Testing
 
-`tests/v2/` is the executable half of this document, and is already Stage 0.
+`tests/` is the executable half of this document, and is already Stage 0.
 
 Properties are parameterised over an implementation and run against three things: a
 known-correct reference (**must pass**), 16 named corruptions (**15 must be caught, 1 is
@@ -526,10 +526,10 @@ provably equivalent and must SURVIVE**), and
 the real package (the verdict). "Passes ⟹ proper" cannot come from more assertions — the set
 of wrong programs isn't enumerable — so it comes from fixing a set of wrongnesses and proving
 each is caught. Provably-equivalent corruptions (e.g. downbeat off-by-one, §4.3) must
-**survive**; killing one means the suite over-specifies. See `tests/v2/README.md`.
+**survive**; killing one means the suite over-specifies. See `tests/README.md`.
 
 The suite is therefore the acceptance criterion, and **Appendix A is the interface it binds
-to**. Definition of done for Stage 0: `pytest tests/v2 --impl=vbpm` green, with
+to**. Definition of done for Stage 0: `pytest tests --impl=vbpm` green, with
 `_vbpm_factory()` a thin adapter — if the adapter has to do real work, the implementation has
 drifted from Appendix A and that is the finding.
 
@@ -743,9 +743,9 @@ Still open, and **not blocking implementation**:
 
 ## Appendix A — the interface (normative)
 
-`tests/v2/` is written against a concrete surface. An implementation that is correct but
+`tests/` is written against a concrete surface. An implementation that is correct but
 differently shaped cannot be scored, so this appendix is binding. The reference oracle in
-`tests/v2/subject.py` implements exactly this and can be read as the executable copy.
+`tests/subject.py` implements exactly this and can be read as the executable copy.
 
 Construction: `Stage0(values=(2,3,4))`. All log-probabilities natural (C5), all returns
 `float64` tensors of shape `[K]` ordered by `values`, all gradients live.
@@ -775,7 +775,7 @@ no mandated parameterisation**: §4.4 explicitly requires the reducer be swappab
 `g_φ` is an implementation choice. So nothing outside the implementation may name a ψ or φ
 tensor or assume its shape; reach them by group and by `p.shape`.
 
-> This is not a style rule. `tests/v2/subject.py` stores ψ as a `[3]` weight vector over three
+> This is not a style rule. `tests/subject.py` stores ψ as a `[3]` weight vector over three
 > hand-built per-class features; §4.4 specifies `W ∈ R^{K×2D}` = `[3,4]`. Both are called
 > `w_prior`, and `copy_` from one into the other **raises** — so a test that hardcoded the
 > oracle's shape did not merely fail a spec-conformant implementation, it crashed it. The
@@ -795,6 +795,6 @@ optimiser set — including tied parameters, once each.
 
 A song is `{"h": [T,D], "y": [n] of {0,1}, "m_true": int}`.
 
-Wiring: fill in `_vbpm_factory()` in `tests/v2/conftest.py` to return
-`(values=None) -> Stage0`, then run `pytest tests/v2 --impl=vbpm`. It currently
+Wiring: fill in `_vbpm_factory()` in `tests/conftest.py` to return
+`(values=None) -> Stage0`, then run `pytest tests --impl=vbpm`. It currently
 fails on purpose with this list.

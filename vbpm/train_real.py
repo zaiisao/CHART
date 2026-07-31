@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import reference as R  # noqa: E402  (§8 metrics + baselines, spec-side code)
 
 from .data import VALUES, load_crops, to_prob  # noqa: E402

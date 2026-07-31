@@ -26,11 +26,11 @@ ignore = [
 convention = "google"
 
 [lint.per-file-ignores]
-# tests/v2 is the acceptance suite and may not be edited (SPEC SS9): style rules that would
+# tests is the acceptance suite and may not be edited (SPEC SS9): style rules that would
 # require touching it are exempted there, nothing else.
-"tests/v2/mutants.py" = ["E501"]
-"tests/v2/test_reference_selftest.py" = ["E501"]
-"tests/v2/*" = ["D", "N"]
+"tests/mutants.py" = ["E501"]
+"tests/test_reference_selftest.py" = ["E501"]
+"tests/*" = ["D", "N"]
 # experiments are one-off measurement scripts: docstring FORMAT is enforced, but small
 # internal helpers need not carry docstrings
 "experiments/*" = ["D1"]

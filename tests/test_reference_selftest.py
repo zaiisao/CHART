@@ -1,4 +1,4 @@
-"""Self-tests for the oracle (tests/v2/reference.py).
+"""Self-tests for the oracle (tests/reference.py).
 
 These pass with no implementation present. Their job is to make the oracle trustworthy
 BEFORE it is used to judge the implementation -- and, in three places, to settle questions

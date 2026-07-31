@@ -1,6 +1,6 @@
-# tests/v2 — a suite that passes *iff* the implementation is proper and m is really a latent
+# tests — a suite that passes *iff* the implementation is proper and m is really a latent
 
-    /disk4/anaconda3/envs/chart/bin/python -m pytest tests/v2 -q
+    /disk4/anaconda3/envs/chart/bin/python -m pytest tests -q
 
 144 tests, all green today. Nothing under `vbpm/` is implemented yet — the suite runs
 against a reference implementation and against deliberately broken ones, which is what
@@ -68,7 +68,7 @@ Every mutant is either a bug v1 actually shipped or a plausible near-miss on the
 
 ## Running against the real package
 
-    pytest tests/v2 --impl=vbpm
+    pytest tests --impl=vbpm
 
 Fails loudly until `_vbpm_factory()` in `conftest.py` is written. That is deliberate: a
 guessed adapter that quietly smooths over an API mismatch is exactly how a suite starts

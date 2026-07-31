@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402

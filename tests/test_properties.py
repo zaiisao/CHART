@@ -7,7 +7,7 @@ where at least one must fail.
 
 Point the suite at the real package once it exists:
 
-    pytest tests/v2 --impl=vbpm
+    pytest tests --impl=vbpm
 """
 from __future__ import annotations
 

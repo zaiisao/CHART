@@ -16,7 +16,7 @@ import sys
 import numpy as np
 import torch
 
-sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tests" / "v2"))
+sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tests"))
 import reference as R  # noqa: E402  (the §6.4 bench + §8 metrics, spec-side code)
 
 from .stage0 import Stage0  # noqa: E402

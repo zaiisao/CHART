@@ -18,7 +18,7 @@ import mir_eval.beat
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import reference as R  # noqa: E402
 
 from vbpm.data import FPS, VALUES, load_crops, to_prob  # noqa: E402
