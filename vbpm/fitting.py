@@ -1,20 +1,12 @@
-"""Fold-honest Stage-0 training + §8 evaluation on the real corpora (§6.3).
+"""Shared fitting machinery: vectorized §5 training, the §8 CV protocol, scoring.
 
-Protocol (§8): 8-fold CV over the CV-eligible datasets, pooled out-of-fold predictions,
-balanced accuracy computed ONCE over the pool, reported per dataset (never pooled across
-datasets for meter claims). gtzan is test-only: scored with a model trained on all CV crops.
-
-The per-crop ELBO is Appendix-A `Stage0.elbo`; training uses a vectorized equivalent
-(precomputed per-crop emission sufficient statistics + reduced s(h)) that is VERIFIED
-against the per-crop method before any fit — an unverified second objective is how this
-project got burned before.
-
-Usage:
-    python -m vbpm.train_real [--datasets asap rwc ...] [--device cuda:1] [--smoke]
+The per-crop ELBO is Appendix-A `Stage0.elbo`; `Batch` is its vectorized equivalent,
+VERIFIED against the per-crop method (`verify_vectorized`) — an unverified second
+objective is how this project got burned before. Entry points live at the repo root
+(train.py, train_real.py); this module is library only.
 """
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -24,8 +16,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import reference as R  # noqa: E402  (§8 metrics + baselines, spec-side code)
 
-from .data import VALUES, load_crops, to_prob  # noqa: E402
-from .reducers import REDUCERS  # noqa: E402
 from .stage0 import Stage0  # noqa: E402
 
 MAX_OFFSETS = 4     # widest bar-offset axis: r ranges over 0..m-1, and max(values) = 4
@@ -183,64 +173,3 @@ def score_per_dataset(pooled_crops, pooled_preds, values):
         score(dataset, [pooled_crops[i] for i in sel],
               [pooled_preds[i] for i in sel], values)
     score("ALL-CV", pooled_crops, pooled_preds, values)
-
-
-def main(argv=None):
-    """Fold-honest CV + §8 report over the real corpora, one run per reducer."""
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--datasets", nargs="*", default=None)
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--steps", type=int, default=500)
-    ap.add_argument("--lr", type=float, default=0.5)
-    ap.add_argument("--smoke", action="store_true", help="6 songs per fold, quick wiring check")
-    ap.add_argument("--reducers", nargs="*", default=["meanmax", "peaks"],
-                    choices=sorted(REDUCERS), help="§4.4 reducer variants, one CV run each")
-    args = ap.parse_args(argv)
-
-    values = VALUES
-    print("loading crops (live fold-honest frontend pass)...", flush=True)
-    crops, report = load_crops(datasets=args.datasets, device=args.device,
-                               limit_per_fold=6 if args.smoke else None)
-    print(f"usable: {report['usable']}  rejects: {report['rejects']}  "
-          f"unmatched downbeats: {report['unmatched_downbeats']}")
-    per_dataset: dict = {}
-    for (dataset, m), n in sorted(report["per_dataset"].items()):
-        per_dataset.setdefault(dataset, {})[m] = n
-    for dataset, class_counts in per_dataset.items():
-        print(f"  {dataset:12s} " + "  ".join(f"m={m}:{class_counts.get(m, 0)}"
-                                              for m in values))
-
-    cv = [c for c in crops if c["fold"] is not None]
-    test = [c for c in crops if c["fold"] is None]
-
-    for name in args.reducers:
-        reducer, s_dim = REDUCERS[name]
-        print(f"\n######## reducer: {name} (s_dim={s_dim}) ########")
-        verify_vectorized(crops, values, reducer, s_dim)
-
-        def fit_fn(train_crops):
-            return fit_vectorized(Stage0(values, reducer=reducer, s_dim=s_dim),
-                                  train_crops, steps=args.steps, lr=args.lr)
-
-        pooled_crops, pooled_preds, test_preds = cv_out_of_fold(
-            cv, test, fit_fn, lambda model, cs: [predict_m(model, c["h"]) for c in cs])
-
-        print("\n== pooled out-of-fold (CV datasets), per dataset ==")
-        score_per_dataset(pooled_crops, pooled_preds, values)
-        if test:
-            print("\n== test-only (gtzan), model trained on all CV crops ==")
-            score("gtzan", test, test_preds, values)
-
-    # -- baselines (§8), reducer-independent ---------------------------------------------
-    print("\n######## baselines (held-out, deployable) ########")
-    majority = R.majority_predict([c["m_true"] for c in cv], values)
-    score("majority", cv, [majority] * len(cv), values)
-    peak_preds = [R.peak_count_estimate(to_prob(c["h"]), values) for c in cv]
-    score("peak-count", cv, peak_preds, values)
-    if test:
-        peak_test = [R.peak_count_estimate(to_prob(c["h"]), values) for c in test]
-        score("peak-gtzan", test, peak_test, values)
-
-
-if __name__ == "__main__":
-    main()

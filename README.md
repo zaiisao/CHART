@@ -11,7 +11,8 @@ encoder / exact-enumeration ELBO. Stage 1 adds bar phase `φ`; Stage 2 adds temp
 | path | what |
 |---|---|
 | `docs/SPEC.md` | the spec — model §4, training §5, data §6, evaluation §8, Appendix A interface |
-| `vbpm/` | the implementation: `stage0.py` (model+fit), `reducers.py`, `data.py` (crops), `train.py` (synthetic bench), `train_real.py` (fold-honest CV on real corpora) |
+| `vbpm/` | the library: `stage0.py` (model+fit), `reducers.py`, `data.py` (crops), `fitting.py` (vectorized training, CV protocol, scoring) |
+| `train.py`, `train_real.py` | entry points: synthetic bench / fold-honest CV on real corpora |
 | `tests/` | the acceptance suite: reference oracle + 16 mutants + property checks |
 | `experiments/` | one-off measurements (synthetic-h causal control, rich features, e2e evidence head, downbeat decode) |
 | `frontends/` | frozen feature extractors (Beat This, Beat Transformer) — VBPM trains no part of them |
@@ -25,8 +26,8 @@ encoder / exact-enumeration ELBO. Stage 1 adds bar phase `φ`; Stage 2 adds temp
 PY=/disk4/anaconda3/envs/chart/bin/python
 
 $PY -m pytest tests --impl=vbpm -q        # acceptance: 142 passed, 2 skipped
-$PY -m vbpm.train                            # Stage 0 on the synthetic bench
-$PY -m vbpm.train_real                       # fold-honest CV on real corpora (needs GPU + data)
+$PY train.py                                 # Stage 0 on the synthetic bench
+$PY train_real.py                            # fold-honest CV on real corpora (needs GPU + data)
 ```
 
 ## State of play (2026-07-31)

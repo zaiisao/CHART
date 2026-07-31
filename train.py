@@ -5,7 +5,8 @@ executed and this script must not silently become its first, untested consumer. 
 generator is reused from tests/v2/reference.py, the spec's executable copy of §6.4.
 
 Usage:
-    python -m vbpm.train [--n-per-class 8] [--steps 500] [--lr 0.5] [--seed 0]
+    /disk4/anaconda3/envs/chart/bin/python train.py \
+        [--n-per-class 8] [--steps 500] [--lr 0.5] [--seed 0]
 """
 from __future__ import annotations
 
@@ -16,10 +17,11 @@ import sys
 import numpy as np
 import torch
 
-sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / "tests"))
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "tests"))
 import reference as R  # noqa: E402  (the §6.4 bench + §8 metrics, spec-side code)
 
-from .stage0 import Stage0  # noqa: E402
+from vbpm.stage0 import Stage0  # noqa: E402
 
 
 def main(argv=None):

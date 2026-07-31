@@ -28,7 +28,7 @@ from data.songs import iter_songs  # noqa: E402
 from vbpm.data import FPS, VALUES, extract_crops, to_prob  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
                              score, score_per_dataset)
 
 SIGMA_S = 0.06          # the synthetic bench's bump width (§6.4)

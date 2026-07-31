@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
-from vbpm.train_real import (cv_out_of_fold, elbo_mean_from, emission_counts,  # noqa: E402
+from vbpm.fitting import (cv_out_of_fold, elbo_mean_from, emission_counts,  # noqa: E402
                              emission_logp_from_counts, score, score_per_dataset)
 
 K = len(VALUES)
@@ -38,7 +38,7 @@ SEED = 0
 
 
 def emission_stats(y):
-    """float32 view of the shared emission linearisation (vbpm.train_real.emission_counts)."""
+    """float32 view of the shared emission linearisation (vbpm.fitting.emission_counts)."""
     C, mask = emission_counts(y, VALUES)
     return C.astype(np.float32), mask.astype(np.float32)
 

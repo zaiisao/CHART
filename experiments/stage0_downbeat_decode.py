@@ -24,7 +24,7 @@ import reference as R  # noqa: E402
 from vbpm.data import FPS, VALUES, load_crops, to_prob  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import cv_out_of_fold, fit_vectorized, predict_m  # noqa: E402
+from vbpm.fitting import cv_out_of_fold, fit_vectorized, predict_m  # noqa: E402
 
 TOL_S = 0.07
 

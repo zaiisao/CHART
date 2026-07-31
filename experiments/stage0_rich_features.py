@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 from vbpm.data import FPS, VALUES, load_crops  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
-from vbpm.train_real import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
+from vbpm.fitting import (cv_out_of_fold, fit_vectorized, predict_m,  # noqa: E402
                              score, score_per_dataset)
 
 
