@@ -11,7 +11,6 @@ predicted m, grid decode with oracle m (separates meter cost from offset cost).
 Run: CUDA_VISIBLE_DEVICES=3 /disk4/anaconda3/envs/chart/bin/python \
          experiments/stage0_downbeat_decode.py
 """
-import math
 import sys
 from pathlib import Path
 
@@ -21,13 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 import reference as R  # noqa: E402
 
-from data.songs import iter_songs  # noqa: E402
-from vbpm.data import MIN_BEATS, VALUES, derive_m_true, derive_y, make_crops  # noqa: E402
+from vbpm.data import FPS, VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
 from vbpm.train_real import fit_vectorized  # noqa: E402
-
-FPS = 50.0
 TOL_S = 0.07
 
 
@@ -65,41 +61,15 @@ def grid_decode(m, down_at_beats, crop_beats):
 
 
 def load(device="cuda"):
-    import soundfile
-    from frontends.beat_this import BeatThisFrontend
-
-    by_fold = {}
-    for s in iter_songs():
-        by_fold.setdefault(s.fold, []).append(s)
+    """One crop entry per §5-valid crop, with activation h, beat grid and downbeats."""
     crops = []
-    for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        checkpoint = "final0" if fold is None else f"fold{fold}"
-        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device)
-        for s in members:
-            beat_times, downbeat_times = s.beats()
-            if len(downbeat_times) < 2:
-                continue
-            song_crops = []
-            for cb, bounds in make_crops(beat_times, downbeat_times):
-                m_true = derive_m_true(cb, bounds)
-                if m_true is None or m_true not in VALUES or len(cb) < MIN_BEATS:
-                    continue
-                y, _ = derive_y(cb, bounds[:-1])
-                song_crops.append((cb, bounds, y, m_true))
-            if not song_crops:
-                continue
-            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            H = frontend.get_features(signal, sample_rate).numpy()
-            for cb, bounds, y, m_true in song_crops:
-                lo = max(0, int(math.floor(cb[0] * FPS)))
-                hi = min(len(H), int(math.ceil(cb[-1] * FPS)) + 1)
-                crops.append({"h": H[lo:hi], "y": y, "m_true": m_true,
-                              "beats": cb, "downs": bounds[:-1], "t0": lo / FPS,
-                              "dataset": s.dataset, "fold": s.fold})
-        del frontend
-        print(f"  {checkpoint}: done ({len(crops)} crops)", flush=True)
+    for s, H in iter_frontend_features(device=device):
+        song_crops, _ = extract_crops(*s.beats())
+        for c in song_crops:
+            h_crop, t0 = slice_h(H, c["beats"])
+            crops.append({"h": h_crop, "y": c["y"], "m_true": c["m_true"],
+                          "beats": c["beats"], "downs": c["bounds"][:-1], "t0": t0,
+                          "dataset": s.dataset, "fold": s.fold})
     return crops
 
 

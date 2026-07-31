@@ -31,13 +31,15 @@ from .stage0 import Stage0  # noqa: E402
 MAX_OFFSETS = 4     # widest bar-offset axis: r ranges over 0..m-1, and max(values) = 4
 
 
-def crop_stats(crop, values, reducer):
-    """Per-crop constants: emission counts [K, MAX_OFFSETS, 4], offset mask, s(h).
+def emission_counts(y, values):
+    """(counts [K, MAX_OFFSETS, 4], offset_mask [K, MAX_OFFSETS]): the emission's statistics.
 
     log p(y|m,r) is linear in v = [lsig(a), lsig(-a), lsig(b), lsig(-b)] with integer
     coefficients: (#downbeat-slot ones, #downbeat-slot zeros, #other ones, #other zeros).
+    The single authority for this linearisation — it is objective math, and a second
+    hand-copy is an unverified second objective (how this project got burned before).
     """
-    y = np.asarray(crop["y"], dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
     n, total_ones = len(y), float(y.sum())
     counts = np.zeros((len(values), MAX_OFFSETS, 4))
     offset_mask = np.full((len(values), MAX_OFFSETS), -np.inf)   # additive: -inf = no such r
@@ -48,6 +50,12 @@ def crop_stats(crop, values, reducer):
             counts[k, r] = (on_ones, len(slots) - on_ones,
                             total_ones - on_ones, (n - len(slots)) - (total_ones - on_ones))
             offset_mask[k, r] = 0.0
+    return counts, offset_mask
+
+
+def crop_stats(crop, values, reducer):
+    """Per-crop constants: emission counts, offset mask, s(h)."""
+    counts, offset_mask = emission_counts(crop["y"], values)
     return counts, offset_mask, reducer(crop["h"]).numpy()
 
 
@@ -81,13 +89,7 @@ class Batch:
 def fit_vectorized(model, crops, steps=500, lr=0.5):
     """§5 training loop (Adam, full batch) on the vectorized objective."""
     batch = Batch(crops, model.values, model.reducer)
-
-    seen, params = set(), []
-    for p in model.named_params().values():
-        if p.requires_grad and id(p) not in seen:
-            seen.add(id(p))
-            params.append(p)
-    opt = torch.optim.Adam(params, lr=lr)
+    opt = torch.optim.Adam(model.trainable_params(), lr=lr)
 
     for _ in range(steps):
         opt.zero_grad()

@@ -9,7 +9,6 @@ the summary vectors are kept. Crops/labels/folds identical to the compressed-h r
 Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python \
          experiments/stage0_rich_features.py
 """
-import math
 import sys
 from pathlib import Path
 
@@ -19,12 +18,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 
-from data.songs import iter_songs  # noqa: E402
-from vbpm.data import MIN_BEATS, VALUES, derive_m_true, derive_y, make_crops  # noqa: E402
+from vbpm.data import FPS, VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
 from vbpm.train_real import fit_vectorized, score  # noqa: E402
-
-FPS = 50.0
 
 
 def reduce_meanmax(X):
@@ -66,45 +62,16 @@ REDUCTIONS = {"rich-meanmax": (reduce_meanmax, 1024),
 
 
 def load(limit_per_fold=None, device="cuda"):
-    import soundfile
-    from frontends.beat_this import BeatThisFrontend
-
-    by_fold = {}
-    for s in iter_songs():
-        by_fold.setdefault(s.fold, []).append(s)
-
     crops = []
-    for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        checkpoint = "final0" if fold is None else f"fold{fold}"
-        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device, output="features")
-        if limit_per_fold is not None:
-            members = members[:limit_per_fold]
-        for s in members:
-            beat_times, downbeat_times = s.beats()
-            if len(downbeat_times) < 2:
-                continue
-            song_crops = []
-            for ci, (cb, bounds) in enumerate(make_crops(beat_times, downbeat_times)):
-                m_true = derive_m_true(cb, bounds)
-                if m_true is None or m_true not in VALUES or len(cb) < MIN_BEATS:
-                    continue
-                y, _ = derive_y(cb, bounds[:-1])
-                song_crops.append((ci, cb, y, m_true))
-            if not song_crops:
-                continue
-            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            H = frontend.get_features(signal, sample_rate).numpy()      # [T, 512]
-            for ci, cb, y, m_true in song_crops:
-                lo = max(0, int(math.floor(cb[0] * FPS)))
-                hi = min(len(H), int(math.ceil(cb[-1] * FPS)) + 1)
-                X = H[lo:hi].astype(np.float64)
-                crops.append({"s": {k: fn(X) for k, (fn, _) in REDUCTIONS.items()},
-                              "y": y, "m_true": m_true, "dataset": s.dataset,
-                              "fold": s.fold, "stem": s.stem, "crop": ci})
-        del frontend
-        print(f"  {checkpoint}: done ({len(crops)} crops so far)", flush=True)
+    for s, H in iter_frontend_features(device=device, limit_per_fold=limit_per_fold,
+                                       output="features"):
+        song_crops, _ = extract_crops(*s.beats())
+        for c in song_crops:
+            X, _ = slice_h(H, c["beats"])
+            X = X.astype(np.float64)
+            crops.append({"s": {k: fn(X) for k, (fn, _) in REDUCTIONS.items()},
+                          "y": c["y"], "m_true": c["m_true"], "dataset": s.dataset,
+                          "fold": s.fold, "stem": s.stem, "crop": c["crop"]})
     return crops
 
 

@@ -19,9 +19,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.songs import iter_songs  # noqa: E402
 
+from .stage0 import DEFAULT_VALUES
+
 MIN_BARS = 3
 DOWNBEAT_TOL_S = 0.02
-VALUES = (2, 3, 4)
+VALUES = DEFAULT_VALUES  # single vocabulary authority (C1): vbpm.stage0 owns it
+FPS = 50.0               # single fps owner (C4): everything frame-related reads THIS;
+                         # the frontend pass asserts the frontend agrees
 MIN_BEATS = 12          # §5: n >= MIN_BARS bars at the largest legal m
 CROP_BARS = 8           # complete bars per crop: n = 16/24/32 beats at m = 2/3/4, all >= 12.
                         # One m per CROP (§4.1, forced by dropping phi) — a song is NOT one
@@ -81,76 +85,107 @@ def make_crops(beat_times, downbeat_times, crop_bars: int = CROP_BARS):
     return crops
 
 
+def extract_crops(beat_times, downbeat_times, values=VALUES):
+    """(crops, rejects): every §5-valid labeled crop of one song, and why the rest fell.
+
+    Each crop is {"crop": index, "beats": times, "bounds": bar bounds, "y": indicator,
+    "m_true": count}. The single authority for crop validity — experiments must not
+    re-implement this chain (a five-way copy is how policies silently diverge).
+    """
+    from collections import Counter
+    rejects: Counter = Counter()
+    if len(downbeat_times) == 0:
+        rejects["no_downbeat_annotation"] += 1
+        return [], rejects
+    if len(downbeat_times) - 1 < MIN_BARS:
+        rejects[f"fewer_than_{MIN_BARS}_bars"] += 1
+        return [], rejects
+
+    crops = []
+    for crop_index, (crop_beats, bar_bounds) in enumerate(
+            make_crops(beat_times, downbeat_times)):
+        m_true = derive_m_true(crop_beats, bar_bounds)
+        if m_true is None:
+            rejects["crop_fewer_bars_than_min"] += 1
+            continue
+        if m_true not in values:
+            rejects[f"crop_m_out_of_vocabulary({m_true})"] += 1
+            continue
+        if len(crop_beats) < MIN_BEATS:
+            rejects["crop_fewer_than_12_beats"] += 1
+            continue
+
+        # y against the crop's bar STARTS (bounds[:-1]); the closing bound is the next
+        # crop's first downbeat, not a downbeat of this crop
+        y, unmatched = derive_y(crop_beats, bar_bounds[:-1])
+        rejects["unmatched_downbeats"] += unmatched
+        crops.append({"crop": crop_index, "beats": crop_beats, "bounds": bar_bounds,
+                      "y": y, "m_true": m_true})
+    if not crops:
+        rejects["no_usable_crops"] += 1
+    return crops, rejects
+
+
+def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=None,
+                           output: str = "activations", verbose: bool = True):
+    """Yield (song, features) fold-honestly: each song through the checkpoint that held it out.
+
+    The single authority for the frontend pass (checkpoint selection, audio load, mono
+    mix) — this is where fold-honesty lives, so it must exist exactly once.
+    """
+    import soundfile
+    from frontends.beat_this import BeatThisFrontend
+
+    by_fold: dict = {}
+    for s in iter_songs(datasets=datasets):
+        by_fold.setdefault(s.fold, []).append(s)
+
+    for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
+        checkpoint = "final0" if fold is None else f"fold{fold}"
+        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device, output=output)
+        assert frontend.fps == FPS, f"frontend fps {frontend.fps} != vbpm.data.FPS {FPS} (C4)"
+        if limit_per_fold is not None:
+            members = members[:limit_per_fold]
+
+        for s in members:
+            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
+            if signal.ndim > 1:
+                signal = signal.mean(axis=1)
+            yield s, frontend.get_features(signal, sample_rate).numpy()
+
+        del frontend
+        if verbose:
+            print(f"  {checkpoint}: done", flush=True)
+
+
+def slice_h(features, crop_beats):
+    """The crop's frame window of a whole-song feature array (§5: "T tracks n")."""
+    lo = max(0, int(math.floor(crop_beats[0] * FPS)))
+    hi = min(len(features), int(math.ceil(crop_beats[-1] * FPS)) + 1)
+    return features[lo:hi], lo / FPS
+
+
 def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
                values=VALUES, verbose: bool = True):
     """(crops, report). Each entry is one CROP: {h, y, m_true, dataset, fold, stem, crop}.
 
     h is sliced to the frames spanned by the crop's beats (§5: "T tracks n").
     """
-    import soundfile
-    from frontends.beat_this import BeatThisFrontend
-
-    catalog = iter_songs(datasets=datasets)
-    by_fold: dict = {}
-    for s in catalog:
-        by_fold.setdefault(s.fold, []).append(s)
-
     crops, rejects = [], Counter()
-    total_unmatched = 0
-    for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        checkpoint = "final0" if fold is None else f"fold{fold}"
-        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device)
-        fps = frontend.fps
-        if limit_per_fold is not None:
-            members = members[:limit_per_fold]
-        for s in members:
-            beat_times, downbeat_times = s.beats()
-            if len(downbeat_times) == 0:
-                rejects["no_downbeat_annotation"] += 1
-                continue
-            if len(downbeat_times) - 1 < MIN_BARS:
-                rejects[f"fewer_than_{MIN_BARS}_bars"] += 1
-                continue
+    for s, h in iter_frontend_features(datasets=datasets, device=device,
+                                       limit_per_fold=limit_per_fold, verbose=verbose):
+        beat_times, downbeat_times = s.beats()
+        song_crops, song_rejects = extract_crops(beat_times, downbeat_times, values)
+        rejects.update(song_rejects)
 
-            song_crops = make_crops(beat_times, downbeat_times)
-            if not song_crops:
-                rejects["no_usable_crops"] += 1
-                continue
+        for c in song_crops:
+            h_crop, _ = slice_h(h, c["beats"])
+            crops.append({"h": h_crop, "y": c["y"], "m_true": c["m_true"],
+                          "dataset": s.dataset, "fold": s.fold,
+                          "stem": s.stem, "crop": c["crop"]})
 
-            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            h = frontend.get_features(signal, sample_rate).numpy()      # [T, 2] logits, 50 fps
-
-            for crop_index, (crop_beats, bar_bounds) in enumerate(song_crops):
-                # label the CROP, not the song (§4.1/§5): median over ITS complete bars
-                m_true = derive_m_true(crop_beats, bar_bounds)
-                if m_true is None:
-                    rejects["crop_fewer_bars_than_min"] += 1
-                    continue
-                if m_true not in values:
-                    rejects[f"crop_m_out_of_vocabulary({m_true})"] += 1
-                    continue
-                if len(crop_beats) < MIN_BEATS:
-                    rejects["crop_fewer_than_12_beats"] += 1
-                    continue
-
-                # y against the crop's bar STARTS (bounds[:-1]); the closing bound is the
-                # next crop's first downbeat, not a downbeat of this crop
-                y, unmatched = derive_y(crop_beats, bar_bounds[:-1])
-                total_unmatched += unmatched
-
-                lo = max(0, int(math.floor(crop_beats[0] * fps)))
-                hi = min(len(h), int(math.ceil(crop_beats[-1] * fps)) + 1)
-                crops.append({"h": h[lo:hi], "y": y, "m_true": m_true,
-                              "dataset": s.dataset, "fold": s.fold,
-                              "stem": s.stem, "crop": crop_index})
-        del frontend
-        if verbose:
-            print(f"  {checkpoint}: {sum(1 for c in crops if c['fold'] == fold)} crops loaded",
-                  flush=True)
-
+    unmatched = rejects.pop("unmatched_downbeats", 0)
     report = {"usable": len(crops), "rejects": dict(rejects),
-              "unmatched_downbeats": total_unmatched,
+              "unmatched_downbeats": unmatched,
               "per_dataset": dict(Counter((c["dataset"], c["m_true"]) for c in crops))}
     return crops, report

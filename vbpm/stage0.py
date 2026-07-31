@@ -132,11 +132,7 @@ class Stage0:
         """
         torch.manual_seed(seed)
 
-        seen, params = set(), []
-        for p in self.named_params().values():
-            if p.requires_grad and id(p) not in seen:
-                seen.add(id(p))
-                params.append(p)
+        params = self.trainable_params()
         if not params:
             return self
 
@@ -166,3 +162,12 @@ class Stage0:
         for group in self.param_groups().values():
             out.update(group)
         return out
+
+    def trainable_params(self) -> list:
+        """The optimiser set: each tied parameter exactly once (§5 — twice doubles its lr)."""
+        seen, params = set(), []
+        for p in self.named_params().values():
+            if p.requires_grad and id(p) not in seen:
+                seen.add(id(p))
+                params.append(p)
+        return params

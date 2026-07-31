@@ -16,7 +16,6 @@ exact 3-term enumeration - nothing is sampled; the minibatching only chunks the 
 
 Run: CUDA_VISIBLE_DEVICES=1 /disk4/anaconda3/envs/chart/bin/python experiments/stage0_e2e_head.py
 """
-import math
 import sys
 from pathlib import Path
 
@@ -26,12 +25,10 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
-import reference as R  # noqa: E402
 
-from data.songs import iter_songs  # noqa: E402
-from vbpm.data import MIN_BEATS, VALUES, derive_m_true, derive_y, make_crops  # noqa: E402
+from vbpm.data import VALUES, extract_crops, iter_frontend_features, slice_h  # noqa: E402
+from vbpm.train_real import emission_counts, score as score_line  # noqa: E402
 
-FPS = 50.0
 K = len(VALUES)
 N_LAGS = 250            # 5 s at 50 fps; longest bars here are ~4 s
 EPOCHS = 30
@@ -39,21 +36,10 @@ BATCH = 256
 SEED = 0
 
 
-# --------------------------------------------------------------------------------------
-# emission sufficient statistics (same linearisation as vbpm/train_real.py, float32)
-# --------------------------------------------------------------------------------------
 def emission_stats(y):
-    y = np.asarray(y, dtype=np.float64)
-    n, ones = len(y), float(y.sum())
-    C = np.zeros((K, 4, 4), dtype=np.float32)
-    mask = np.full((K, 4), -np.inf, dtype=np.float32)
-    for k, m in enumerate(VALUES):
-        for r in range(m):
-            slots = np.arange(r, n, m)
-            on1 = float(y[slots].sum())
-            C[k, r] = (on1, len(slots) - on1, ones - on1, (n - len(slots)) - (ones - on1))
-            mask[k, r] = 0.0
-    return C, mask
+    """float32 view of the shared emission linearisation (vbpm.train_real.emission_counts)."""
+    C, mask = emission_counts(y, VALUES)
+    return C.astype(np.float32), mask.astype(np.float32)
 
 
 # --------------------------------------------------------------------------------------
@@ -112,43 +98,15 @@ def batch_elbo(head, scalars, x, lengths, Cs, masks):
 # data
 # --------------------------------------------------------------------------------------
 def load(limit_per_fold=None, device="cuda"):
-    import soundfile
-    from frontends.beat_this import BeatThisFrontend
-
-    by_fold = {}
-    for s in iter_songs():
-        by_fold.setdefault(s.fold, []).append(s)
     crops = []
-    for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        checkpoint = "final0" if fold is None else f"fold{fold}"
-        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device, output="features")
-        if limit_per_fold is not None:
-            members = members[:limit_per_fold]
-        for s in members:
-            beat_times, downbeat_times = s.beats()
-            if len(downbeat_times) < 2:
-                continue
-            song_crops = []
-            for ci, (cb, bounds) in enumerate(make_crops(beat_times, downbeat_times)):
-                m_true = derive_m_true(cb, bounds)
-                if m_true is None or m_true not in VALUES or len(cb) < MIN_BEATS:
-                    continue
-                y, _ = derive_y(cb, bounds[:-1])
-                song_crops.append((cb, y, m_true))
-            if not song_crops:
-                continue
-            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            H = frontend.get_features(signal, sample_rate).numpy()
-            for cb, y, m_true in song_crops:
-                lo = max(0, int(math.floor(cb[0] * FPS)))
-                hi = min(len(H), int(math.ceil(cb[-1] * FPS)) + 1)
-                C, mask = emission_stats(y)
-                crops.append({"h16": H[lo:hi].astype(np.float16), "C": C, "mask": mask,
-                              "m_true": m_true, "dataset": s.dataset, "fold": s.fold})
-        del frontend
-        print(f"  {checkpoint}: done ({len(crops)} crops so far)", flush=True)
+    for s, H in iter_frontend_features(device=device, limit_per_fold=limit_per_fold,
+                                       output="features"):
+        song_crops, _ = extract_crops(*s.beats())
+        for c in song_crops:
+            X, _ = slice_h(H, c["beats"])
+            C, mask = emission_stats(c["y"])
+            crops.append({"h16": X.astype(np.float16), "C": C, "mask": mask,
+                          "m_true": c["m_true"], "dataset": s.dataset, "fold": s.fold})
     return crops
 
 
@@ -213,11 +171,8 @@ def predict(head, crops, device):
 
 
 def score(tag, subset, preds):
-    true = [c["m_true"] for c in subset]
-    ba = R.balanced_accuracy(true, preds, VALUES)
-    print(f"{tag:12s} n={len(subset):5d}  balanced={ba:.3f}  "
-          f"classes={R.distinct_predicted(preds)}  "
-          f"confusion={R.confusion(true, preds, VALUES).tolist()}", flush=True)
+    """One §8 line via the shared scorer."""
+    score_line(tag, subset, preds, VALUES)
 
 
 def main():

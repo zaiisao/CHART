@@ -25,14 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "v2"))
 import reference as R  # noqa: E402
 
 from data.songs import iter_songs  # noqa: E402
-from vbpm.data import MIN_BEATS, derive_m_true, derive_y, make_crops  # noqa: E402
+from vbpm.data import FPS, VALUES, extract_crops  # noqa: E402
 from vbpm.reducers import REDUCERS  # noqa: E402
 from vbpm.stage0 import Stage0  # noqa: E402
 from vbpm.train_real import fit_vectorized, score  # noqa: E402
 
-FPS = 50.0
 SIGMA_S = 0.06          # the synthetic bench's bump width (§6.4)
-VALUES = (2, 3, 4)
 
 
 def synth_h(crop_beats, crop_downs):
@@ -57,15 +55,11 @@ def main(datasets=None):
     crops = []
     for s in iter_songs(datasets=datasets):
         beat_times, downbeat_times = s.beats()
-        if len(downbeat_times) < 2:
-            continue
-        for ci, (cb, bounds) in enumerate(make_crops(beat_times, downbeat_times)):
-            m_true = derive_m_true(cb, bounds)
-            if m_true is None or m_true not in VALUES or len(cb) < MIN_BEATS:
-                continue
-            y, _ = derive_y(cb, bounds[:-1])
-            crops.append({"h": synth_h(cb, bounds[:-1]), "y": y, "m_true": m_true,
-                          "dataset": s.dataset, "fold": s.fold, "stem": s.stem, "crop": ci})
+        song_crops, _ = extract_crops(beat_times, downbeat_times)
+        for c in song_crops:
+            crops.append({"h": synth_h(c["beats"], c["bounds"][:-1]), "y": c["y"],
+                          "m_true": c["m_true"], "dataset": s.dataset, "fold": s.fold,
+                          "stem": s.stem, "crop": c["crop"]})
     n_by_m = {m: sum(1 for c in crops if c["m_true"] == m) for m in VALUES}
     print(f"synthetic-h crops: {len(crops)}  by class: {n_by_m}")
 
