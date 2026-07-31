@@ -1,6 +1,0 @@
-=== 00:12:22 starting D_c05 on gpu 3
-=== 01:06:02 done D_c05
-=== 01:06:02 starting D_cpi_tc on gpu 3
-=== 01:52:16 done D_cpi_tc
-=== 01:52:16 starting M_c05 on gpu 3
-=== 03:55:14 done M_c05

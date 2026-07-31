@@ -1,94 +1,38 @@
-# VBPM — the rungs ladder
+# VBPM v2 — Variational Bar-Pointer Model
 
-Beat & downbeat tracking on frozen frontend activations, built as a ladder of models where each
-rung changes EXACTLY ONE thing relative to the rung below it. The goal: by the time the top rung
-(a learned, audio-conditioned model) beats the bottom rung (the published madmom baseline), every
-point of improvement is attributable to a named change.
+Built staged, from scratch, against `docs/SPEC.md` (normative). v1 lives in git history
+(`master`, `vbpm-campaign-2026-07-26`); nothing here depends on it.
 
-(The previous VBPM incarnation — the bar-pointer DVAE and its ablation flags — is archived in
-`archive_2026-07-14/` and in git history at `43ecf34`, along with the old docs/, notebooks/ and
-experiments/.)
-
-## The ladder
-
-| rung | model | factors | status |
-|------|-------|---------|--------|
-| R0 | madmom's bar-pointer DBN, exactly as Beat This / Beat Transformer use it | hand-set | done |
-| R1 | the same model on OUR engine (torch, differentiable) | hand-set | done, **certified ≡ R0** |
-| R2 | same, but transition_lambda is learned by UNSUPERVISED exact EM (Baum-Welch) on the marginal likelihood — no annotations | learned scalar, generative MLE | done (`rungs/r2_em_dbn.py`) |
-| R3 | transitions conditioned on audio per frame — NOTE: this makes the model CONDITIONAL, p(z\|x), an input-output HMM, not a generative DBN; it previews R5's conditional prior | learned, audio-conditioned | prototype (`rungs/r3_conditioned_dbn.py`) |
-| R4 | neural emission + transition (Neural HMM) | learned networks | — |
-
-Not a rung: `experiments/bt_e2e/crf_baseline.py` learns the same transition_lambda by a SUPERVISED
-discriminative CRF objective p(z|x) on annotated paths — off-program for a generative ladder, kept
-as the comparison point (generative λ≈40 vs discriminative λ≈99 vs hand-set 100).
+**Stage 0** (current): one latent, `z = m` (beats per bar). Emission / conditional prior /
+encoder / exact-enumeration ELBO. Stage 1 adds bar phase `φ`; Stage 2 adds tempo `φ̇`.
 
 ## Layout
 
-```
-tracker.py               # by-name registries (frontends + bar-pointer models) + Tracker glue, above both packages
-track.py                 # CLI inference: python track.py song.wav [--config configs/track.yaml]
-configs/
-  track.yaml             # the tracker composition (frontend + bar-pointer model + their kwargs)
-frontends/
-  __init__.py            # Frontend interface only (selection/pairing lives in tracker.py)
-  beat_this.py           # wraps the OFFICIAL beat_this.inference.Audio2Frames (one script per frontend)
-  beat_transformer.py    # official Demixed_DilatedTransformerModel; Spleeter demix via subprocess
-  beat_transformer_demix.py  # the Spleeter 5-stem helper (RUNS in the analyze-smc env, not chart)
-rungs/
-  base.py                # the Rung contract: predict() -> events, coercion, Böck decorrelation
-  r0_madmom_dbn.py       # Baseline A: the official madmom DBN + the standard decorrelation
-  r1_2016_dbn.py         # the same model rebuilt on our engine (the certificate rung)
-  deployment.py          # model-independent deployment lessons (threshold crop), off by default
-  bar_pointer/           # the shared R1-R4 chassis (rungs change ONLY how factors are produced)
-    state_space.py       # Krebs 2015 bar-pointer state space (interval i owns i states)
-    structured_dp.py     # THE ENGINE: exact forward + Viterbi, O(K + M*V^2)/frame, GPU, autograd
-    inference.py         # the readable dense reference the engine is certified against
-    readout.py           # MAP state path -> beat/downbeat times (shared by all rungs)
-data/
-  songs.py               # live song catalog: official annotations + 8-fold splits + local audio
-tests/
-  test_inference.py      # dense DP vs hmmlearn AND torch-struct (independent oracles)
-  test_structured_dp.py  # structured engine vs dense DP + compact emission + gradient checks
-```
+| path | what |
+|---|---|
+| `docs/SPEC.md` | the spec — model §4, training §5, data §6, evaluation §8, Appendix A interface |
+| `vbpm/` | the implementation: `stage0.py` (model+fit), `reducers.py`, `data.py` (crops), `train.py` (synthetic bench), `train_real.py` (fold-honest CV on real corpora) |
+| `tests/v2/` | the acceptance suite: reference oracle + 16 mutants + property checks |
+| `experiments/` | one-off measurements (synthetic-h causal control, rich features, e2e evidence head, downbeat decode) |
+| `frontends/` | frozen feature extractors (Beat This, Beat Transformer) — VBPM trains no part of them |
+| `data/songs.py` | annotation + audio catalog, Beat This 8-fold splits structurally enforced |
+| `logs/stage0_*` | committed result records, 2026-07-31 campaign |
 
-## The certificate chain
-
-Nothing here is trusted by eye; every layer is machine-checked against something independent:
-
-1. `rungs/bar_pointer/inference.py` (readable, textbook) ≡ **hmmlearn** ≡ **torch-struct** (LL to ~1e-14, paths exact)
-2. `rungs/bar_pointer/structured_dp.py` (the engine) ≡ the dense reference (same model written out as a matrix)
-3. R1 on the engine ≡ **madmom**: per-meter Viterbi path agreement 1.0 vs madmom's own
-   `hmm.viterbi`, scores to ~1e-4 (madmom's observation densities are float32, ours float64), and
-   {3,4} meter selection agrees (margins are hundreds of nats, far beyond the float gap)
-4. R1 ≡ R0 **event-identical** — re-certified 2026-07-17 on the live 50 fps Beat This pipeline
-   (squeeze bounding), 30 songs across ballroom/beatles/gtzan/hainsworth/hjdb: **30/30 shipped**
-   (`num_tempi=60, threshold=0.05, correct=True`, R1's defaults) and **30/30 bare** (the opt-out
-   `num_tempi=None, threshold=0, correct=False`, the rung-comparison configuration). Caveat: on
-   degenerate constant-background synthetics, score-tie plateaus can split one frame apart between
-   float32 and float64 — the certificate is a real-song claim.
-
-Point 4 means the R0-vs-R1 F difference under defaults (~0.02) is entirely madmom's three deployment
-conveniences (fade-crop, peak-snap, tempo grid), each measured, none of them the model.
-
-## Running
+## Run
 
 ```bash
-PYTHONPATH=. python tests/test_inference.py       # certify the dense reference vs two libraries
-PYTHONPATH=. python tests/test_structured_dp.py   # certify the engine vs the dense reference
-PYTHONPATH=. python rungs/r1_2016_dbn.py   # synthetic smoke test
+# environment: conda env "chart" (no bare python; .venv lacks torch)
+PY=/disk4/anaconda3/envs/chart/bin/python
+
+$PY -m pytest tests/v2 --impl=vbpm -q        # acceptance: 142 passed, 2 skipped
+$PY -m vbpm.train                            # Stage 0 on the synthetic bench
+$PY -m vbpm.train_real                       # fold-honest CV on real corpora (needs GPU + data)
 ```
 
-Environment: needs torch + madmom (+ hmmlearn/torch-struct/mir_eval for tests). Known-good local
-interpreter: `/home/sogang/mnt/db_2/anaconda3/envs/chart/bin/python` (madmom is a source checkout
-at `~/jaehoon/madmom`, built for py3.10 — the repo's own `.venv` is py3.8 and cannot import it).
+## State of play (2026-07-31)
 
-NO ACTIVATION CACHES (decision 2026-07-15): activations are computed live through `frontends/`,
-so there is exactly one code path from audio to activations and live == eval by construction. The
-old `cache/acts/*` records were produced by a second, retired pipeline (different chunking/padding;
-activations correlate ~0.97 with the live path, predictions agree to mean |dF| 0.005 — measured, but
-never certified). `data/songs.py` enumerates the data: 2,304 songs live (1,305 across
-ballroom/beatles/hainsworth/hjdb with official 8-fold assignments + 999 GTZAN test-only);
-run `python data/songs.py` for the coverage report, including which annotated datasets lack
-local audio. Fold-honesty: evaluate song `s` with checkpoint `fold{s.fold}`; GTZAN (fold None) is
-held out of every checkpoint. `fps` is a property of the frontend, never a constant.
+Suite green. On real data (18,902 bar-aligned 8-bar crops): best deployable meter accuracy
+0.595 balanced (e2e evidence head on rich features); the pipeline's ceiling is 0.99
+(proven by synthetic-h intervention); the remaining gap is frontend evidence, dataset-dependent.
+Grid-constrained downbeat decode beats raw peak-picking on every dataset (F@±70 ms).
+Details: `logs/stage0_*`.
