@@ -78,16 +78,19 @@ class Batch:
 
 def fit_vectorized(model, crops, steps=500, lr=0.5):
     batch = Batch(crops, model.values, model.reducer)
+
     seen, params = set(), []
     for p in model.named_params().values():
         if p.requires_grad and id(p) not in seen:
             seen.add(id(p))
             params.append(p)
     opt = torch.optim.Adam(params, lr=lr)
+
     for _ in range(steps):
         opt.zero_grad()
         (-batch.elbo_mean(model)).backward()
         opt.step()
+
     return model
 
 

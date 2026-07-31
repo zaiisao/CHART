@@ -124,6 +124,7 @@ class Stage0:
         A tied parameter (e.g. beta := alpha) reaches the optimiser once (§5).
         """
         torch.manual_seed(seed)
+
         seen, params = set(), []
         for p in self.named_params().values():
             if p.requires_grad and id(p) not in seen:
@@ -131,13 +132,16 @@ class Stage0:
                 params.append(p)
         if not params:
             return self
+
         opt = torch.optim.Adam(params, lr=lr)
         cache = [(s["h"], s["y"]) for s in songs]
+
         for _ in range(steps):
             opt.zero_grad()
             loss = -torch.stack([self.elbo(h, y) for h, y in cache]).mean()
             loss.backward()
             opt.step()
+
         return self
 
     # -- introspection (§4.7 / §10.2) ----------------------------------------------

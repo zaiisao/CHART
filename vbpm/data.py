@@ -111,14 +111,17 @@ def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
             if len(downbeat_times) - 1 < MIN_BARS:
                 rejects[f"fewer_than_{MIN_BARS}_bars"] += 1
                 continue
+
             song_crops = make_crops(beat_times, downbeat_times)
             if not song_crops:
                 rejects["no_usable_crops"] += 1
                 continue
+
             signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
             if signal.ndim > 1:
                 signal = signal.mean(axis=1)
             h = frontend.get_features(signal, sample_rate).numpy()      # [T, 2] logits, 50 fps
+
             for crop_index, (crop_beats, bar_bounds) in enumerate(song_crops):
                 # label the CROP, not the song (§4.1/§5): median over ITS complete bars
                 m_true = derive_m_true(crop_beats, bar_bounds)
@@ -131,10 +134,12 @@ def load_crops(datasets=None, device: str = "cuda", limit_per_fold=None,
                 if len(crop_beats) < MIN_BEATS:
                     rejects["crop_fewer_than_12_beats"] += 1
                     continue
+
                 # y against the crop's bar STARTS (bounds[:-1]); the closing bound is the
                 # next crop's first downbeat, not a downbeat of this crop
                 y, unmatched = derive_y(crop_beats, bar_bounds[:-1])
                 total_unmatched += unmatched
+
                 lo = max(0, int(math.floor(crop_beats[0] * fps)))
                 hi = min(len(h), int(math.ceil(crop_beats[-1] * fps)) + 1)
                 crops.append({"h": h[lo:hi], "y": y, "m_true": m_true,
