@@ -162,6 +162,27 @@ than accidents:
 - Downbeat *phase* is unobservable: an implementation that places the downbeat one beat late
   is provably equivalent. Tests must not reject it.
 
+> **These three consequences are STAGE-SCOPED, and the third one inverts later.** All of them
+> follow from marginalising `r` — the proof for the third is that the offset-`r` mask
+> `{i : (i−r) mod m == 0}` shifted by one is `{i : (i−(r−1)) mod m == 0}`, and as `r` ranges
+> over `0..m−1` so does `(r−1) mod m`, so the two enumerate the SAME SET of masks in a
+> different order under a symmetric logsumexp. The moment `r` stops being marginalised and
+> becomes the latent — Stage P (`docs/SPEC_phase.md`), Stage 1 (`docs/SPEC_stage1.md`) —
+> the reordering is no longer invisible: it IS the answer, relabelled. Downbeat phase becomes
+> observable, cyclic-shift invariance ends, and `downbeat_off_by_one` must be **killed**
+> rather than survive.
+>
+> `tests/mutants.py`'s `EQUIVALENT = {"downbeat_off_by_one"}` and
+> `test_equivalent_mutant_survives` are therefore Stage-0 statements, correct here and not
+> portable. `tests/` stays frozen and unedited; a later stage carries its own registry in
+> which that same corruption is a must-kill. Recorded 2026-08-03 (user decision) so that
+> "the suite is green" keeps a defined meaning across stages.
+>
+> Note the registry already forbids the neighbouring assumption: `offset_fixed_at_zero`
+> ("bar offset never marginalised: assumes crops start on a bar") is a **must-kill** mutant.
+> The Stage-0 *dataset* satisfies that assumption in ~98% of crops (`SPEC_phase.md` §10.1),
+> which is exactly the gap this scoping note exists to keep visible.
+
 ### 4.4 Conditional prior — `p_ψ(m | h)`   ← the deployable path
 
     p_ψ(m | h) = softmax_k [ logits_ψ(h) ]
