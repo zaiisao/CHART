@@ -4,9 +4,11 @@ y (per-beat downbeat indicator) and m_true (beats per bar) come from the trusted
 beat/downbeat annotation files via data/songs.py. h is Beat This output computed through
 frontends/ — fold-honestly: each song goes through the checkpoint that held that song
 out of training (final0 for gtzan, which no checkpoint ever trained on). Features are
-memoized on disk (user decision 2026-08-01, revising the earlier no-caches rule: the
-cache stores the certified path's own output and every run re-verifies a sample against
-a live recompute, so it cannot silently become a second pipeline).
+memoized on disk (user decision 2026-08-01, revising the earlier no-caches rule: the cache
+stores the certified path's own output, and one song per checkpoint group is recomputed
+live each run and compared). That sampled check catches GLOBAL drift — a changed
+checkpoint, frontend or audio path — and does not catch per-song corruption; see
+``iter_frontend_features`` for the exact limits, which are narrower than "verified".
 
 Every excluded song or crop is counted by reason and reported — rejections are
 surfaced, never silent, because a silently absent corpus once looked like a fact
@@ -165,10 +167,15 @@ def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=N
     mix) — this is where fold-honesty lives, so it must exist exactly once.
 
     Features are memoized under cache_dir (cache_dir=None forces fully-live computation).
-    Trust is re-earned on every run: for each checkpoint group that served any cache hit,
-    one cached song is recomputed live and compared. ``folds`` filters which checkpoint
-    groups run (integers 0-7, or None-in-list for the test-only/final0 group) — the knob
-    that lets a multi-GPU warmer shard the pass.
+    For each checkpoint group that served any cache hit, ONE cached song is recomputed live
+    and compared. Be precise about what that buys: one probe per group detects GLOBAL drift
+    (a changed checkpoint, a changed frontend, a changed audio path) and cannot detect
+    per-song corruption of the other ~250 songs in the group. It is also an ``assert``, so
+    it disappears under ``python -O``, and it runs after the group has been yielded -- a
+    consumer that breaks out of the generator early never reaches it.
+
+    ``folds`` filters which checkpoint groups run (integers 0-7, or None-in-list for the
+    test-only/final0 group) — the knob that lets a multi-GPU warmer shard the pass.
 
     ``override_checkpoint`` forces EVERY song through one named checkpoint. It exists for
     the checkpoint-swap probe alone: it deliberately breaks fold-honesty (songs go through
@@ -209,7 +216,11 @@ def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=N
                 features = _compute_features(frontend, s)
                 if cache_path is not None:
                     group_dir.mkdir(parents=True, exist_ok=True)
-                    np.save(cache_path, features.astype(np.float32))
+                    # write-then-rename: a reader racing a warmer must never see a
+                    # half-written array (rename is atomic within a filesystem)
+                    partial = cache_path.with_suffix(".npy.partial")
+                    np.save(partial, features.astype(np.float32))
+                    partial.replace(cache_path)
             yield s, features
 
         if served_from_cache:

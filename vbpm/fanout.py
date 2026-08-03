@@ -3,9 +3,15 @@
 The serial protocol in ``cv_out_of_fold`` fits arms x folds one after another, and every
 experiment process rebuilds the crop set from scratch. Both are pure waste: the fits are
 mutually independent (each trains on its own fold complement) and the crop set is
-identical for all of them. This module keeps the arithmetic bit-identical -- the same
-``fit``/``predict`` calls, the same seed, the same train/held partition -- and changes
-only WHEN and WHERE each call happens.
+identical for all of them. This module changes only WHEN and WHERE each fit happens: the
+same ``fit``/``predict`` calls, the same seed, the same train/held partition (verified
+list-for-list against ``cv_out_of_fold``, order included).
+
+It does NOT make the numbers reproducible, and an earlier version of this docstring
+claimed it did. The FFT and attention arms accumulate through nondeterministic CUDA
+reductions, so two identical runs of those arms differ -- measured at +-0.08 balanced
+accuracy on gtzan transfer, which is larger than most effects being compared. Only the
+protocol is deterministic; the arithmetic is as reproducible as any GPU run.
 
 Two pieces:
 
@@ -29,6 +35,7 @@ A campaign module supplies the experiment-specific half:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import os
 import pathlib
@@ -84,7 +91,14 @@ def build_store(campaign, store_dir, limit_per_fold=None, device="cuda"):
 
 
 class _MappedCrop(dict):
-    """A crop whose per-frame fields are read on demand from the shared memmap."""
+    """A crop whose per-frame fields are read on demand from the shared memmap.
+
+    The mapped fields are NOT real dict entries -- only the spans are -- so every access
+    route has to be taught about them, not just ``__getitem__``. A half-taught mapping is
+    worse than none: ``dict(crop)`` or ``crop.get("h512")`` would hand a consumer a crop
+    with its features silently missing, and a missing feature does not raise, it just
+    produces a plausible wrong number.
+    """
 
     def __init__(self, entry, maps):
         super().__init__(entry)
@@ -96,6 +110,31 @@ class _MappedCrop(dict):
             return np.asarray(self._maps[key][start:end])
         return super().__getitem__(key)
 
+    def __contains__(self, key):
+        return key in self._maps or super().__contains__(key)
+
+    def get(self, key, default=None):
+        """dict.get over the mapped fields as well as the stored ones."""
+        return self[key] if key in self else default
+
+    def keys(self):
+        """The mapped field names alongside the stored keys."""
+        return list(super().keys()) + list(self._maps)
+
+    def items(self):
+        """Pairs for every key ``keys()`` reports, mapped fields materialised."""
+        return [(key, self[key]) for key in self.keys()]
+
+    def values(self):
+        """Values for every key ``keys()`` reports."""
+        return [self[key] for key in self.keys()]
+
+
+def _fingerprint(path):
+    """(size, mtime_ns) -- what has to match for a staged copy to still be the same file."""
+    stat = path.stat()
+    return (stat.st_size, stat.st_mtime_ns)
+
 
 def stage_in_ram(store_dir, ram_root="/dev/shm/vbpm_fanout"):
     """Copy a store to shared memory and return the new path.
@@ -103,16 +142,31 @@ def stage_in_ram(store_dir, ram_root="/dev/shm/vbpm_fanout"):
     Batch assembly reads the whole feature array once per epoch in random order. From disk
     that is ~8 s per batch against ~0.5 s of compute -- the fits are I/O bound, not GPU
     bound. In /dev/shm every worker mmaps ONE resident copy, so the read cost disappears
-    without any worker holding its own copy. Bytes are identical; only their address is.
+    without any worker holding its own copy.
+
+    Two things this has to get right, both found by review rather than by use:
+
+    - **Staleness.** A store rebuilt with the same crop set has arrays of *identical size*
+      and different bytes (new feature cache, fixed frontend, changed make_entry). Skipping
+      on size alone would keep serving the old features from RAM, silently, to every
+      worker. So the skip is keyed on size AND mtime, and the staged copy takes the
+      source's mtime so the comparison survives a restage.
+    - **Collision.** The staged names are the store's own (h512.npy, meta.pkl), so two
+      campaigns would overwrite each other under one fixed root. The target directory is
+      keyed by the absolute source path.
     """
-    source, target = pathlib.Path(store_dir), pathlib.Path(ram_root) / "store"
+    source = pathlib.Path(store_dir).resolve()
+    key = hashlib.sha1(str(source).encode()).hexdigest()[:12]
+    target = pathlib.Path(ram_root) / key
     target.mkdir(parents=True, exist_ok=True)
     for path in sorted(source.iterdir()):
+        assert path.is_file(), f"{path} is not a file: a store holds arrays + meta, nothing else"
         staged = target / path.name
-        if staged.exists() and staged.stat().st_size == path.stat().st_size:
+        if staged.exists() and _fingerprint(staged) == _fingerprint(path):
             continue
         print(f"  staging {path.name} ({path.stat().st_size / 2**30:.1f} GiB)", flush=True)
         shutil.copyfile(path, staged)
+        os.utime(staged, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns))
     return target
 
 
@@ -196,8 +250,11 @@ def main(argv=None):
     ap.add_argument("--arms", nargs="*", default=None, help="subset of arms to run")
     ap.add_argument("--rebuild", action="store_true", help="rebuild the crop store")
     ap.add_argument("--resume", action="store_true",
-                    help="skip fits whose predictions are already on disk (the fit is "
-                         "deterministic, so a completed one has nothing new to say)")
+                    help="skip fits whose predictions are already on disk. NOTE the "
+                         "prediction files are keyed by (arm, job) only: change EPOCHS, "
+                         "a model, or the store and this silently reuses stale results. "
+                         "Resumed folds also come from a different run than the rest, and "
+                         "GPU nondeterminism makes those genuinely different fits")
     ap.add_argument("--no-ram", action="store_true",
                     help="mmap the store from disk instead of staging it in /dev/shm")
     ap.add_argument("--limit-per-fold", type=int, default=None)

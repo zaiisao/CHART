@@ -10,10 +10,14 @@ categorical latent, against the incumbents on identical crops. Four fold-honest 
                cross-checkpoint feature-misalignment confound: the 2 channels are
                semantically pinned across checkpoints, the 512 are not
     tf512n     tf512 with per-crop feature normalisation (each channel centred and scaled
-               over the crop's own frames) — the second half of the same confound test:
-               it grants the transformer the protection the autocorr head gets for free,
-               so a constant cross-checkpoint feature shift can no longer survive as a
-               constant logit offset
+               over the crop's own frames) — removes any constant per-channel shift or
+               scale, so if a cross-checkpoint difference survives it, that difference is
+               not a shift or a scale.
+               (An earlier note here said this "grants the transformer the protection the
+               autocorr head gets for free". Wrong: AutocorrHead projects the 512 basis
+               through a LEARNED Linear before it centres anything, so it is not
+               basis-immune either — measured, it loses as much as tf512 under a
+               checkpoint swap.)
 
 Pre-registered criteria: PRIMARY = gtzan transfer (beat linear's 0.624 to claim the
 reducer's crown; ALL-CV alone does not count). Secondary = per-dataset, especially asap
@@ -65,8 +69,13 @@ def make_entry(song, crop, h_crop, t0):
 
 
 # ---- batching (length-bucketed, fp16 on the wire) -------------------------------------
-def bucket_chunks(crops, batch_size):
-    order = sorted(range(len(crops)), key=lambda i: len(crops[i]["h512"]))
+BUCKET_FIELD = "h512"       # the field whose length defines the length buckets; a campaign
+# with no h512 (e.g. a 2-channel-only frontend) overrides it. Default kept so the batch
+# composition of the existing arms -- and therefore their results -- is unchanged.
+
+
+def bucket_chunks(crops, batch_size, field=None):
+    order = sorted(range(len(crops)), key=lambda i: len(crops[i][field or BUCKET_FIELD]))
     return [order[i:i + batch_size] for i in range(0, len(order), batch_size)]
 
 
