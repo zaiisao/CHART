@@ -23,11 +23,18 @@ it is a diagnostic about feature geometry and is never a fold-honest score. If a
 is biased in the swap's FAVOUR -- final0 has seen these songs -- which makes a drop
 stronger evidence, not weaker.
 
-Run (after `python -m vbpm.warm_cache --gpus 0 1 3 --output features+activations` and
-`--override final0`, which is what --warm below does):
-    CUDA_VISIBLE_DEVICES=1 python experiments/stage0_checkpoint_swap.py
+Run it as a module (the package layout, not a loose script), after warming both feature
+passes -- the fold-honest one and the swapped one:
+
+    python -m vbpm.warm_cache --gpus 0 1 3 --output features+activations
+    python -m vbpm.warm_cache --gpus 0 1 3 --output features+activations --override final0
+    CUDA_VISIBLE_DEVICES=0 python -m experiments.stage0_checkpoint_swap --folds 0 1
+    ...                                                                 (one shard per GPU)
+    python -m experiments.stage0_checkpoint_swap --aggregate
 """
 import argparse
+import pathlib
+import pickle
 
 import numpy as np
 
@@ -55,13 +62,51 @@ def swapped_features(crops_by_song, device="cuda"):
     return swapped
 
 
+def aggregate(shard_dir, arms):
+    """Pool the shards' held-out predictions and report the two columns per arm."""
+    shards = sorted(pathlib.Path(shard_dir).glob("shard_*.pkl"))
+    assert shards, f"no shards under {shard_dir}"
+    merged: dict = {}
+    for path in shards:
+        with open(path, "rb") as fh:
+            for arm, (true, base, swap) in pickle.load(fh).items():
+                entry = merged.setdefault(arm, ([], [], []))
+                entry[0].extend(true)
+                entry[1].extend(base)
+                entry[2].extend(swap)
+
+    for arm in arms:
+        if arm not in merged:
+            continue
+        true, base_pred, swap_pred = merged[arm]
+        base = balanced_accuracy(true, base_pred, VALUES)
+        swap = balanced_accuracy(true, swap_pred, VALUES)
+        agree = float(np.mean(np.asarray(base_pred) == np.asarray(swap_pred)))
+        subset = [{"m_true": t} for t in true]
+        print(f"\n######## arm: {arm} ########  (n={len(true)})")
+        print(f"  fold-honest checkpoint : balanced={base:.3f}")
+        print(f"  {SWAP_CHECKPOINT} features       : balanced={swap:.3f}   "
+              f"(delta {swap - base:+.3f}, predictions agree on {agree:.3f})")
+        score(f"{arm}/baseline", subset, base_pred, VALUES)
+        score(f"{arm}/{SWAP_CHECKPOINT}", subset, swap_pred, VALUES)
+
+
 def main():
     """Baseline vs checkpoint-swapped scores for each arm, on identical crops."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit-per-fold", type=int, default=None)
     ap.add_argument("--arms", nargs="*", default=PROBE_ARMS)
+    ap.add_argument("--folds", nargs="*", type=int, default=None,
+                    help="this shard's held-out folds; omit for all")
+    ap.add_argument("--shard-dir", default="/disk4/jaehoon/vbpm_swap")
+    ap.add_argument("--aggregate", action="store_true",
+                    help="pool the shards written by earlier runs and report")
     args = ap.parse_args()
     device = "cuda"
+
+    if args.aggregate:
+        aggregate(args.shard_dir, args.arms)
+        return
 
     # crops keyed by song so the swapped pass can rebuild exactly the same ones
     crops_by_song: dict = {}
@@ -80,9 +125,14 @@ def main():
     print(f"swapped features for {len(swapped)} crops through {SWAP_CHECKPOINT}",
           flush=True)
 
+    folds = sorted({c["fold"] for c in cv})
+    if args.folds is not None:
+        folds = [f for f in folds if f in args.folds]
+    results: dict = {}
+
     for arm in args.arms:
         base_true, base_pred, swap_pred = [], [], []
-        for fold in sorted({c["fold"] for c in cv}):
+        for fold in folds:
             train = [c for c in cv if c["fold"] != fold]
             held = [c for c in cv if c["fold"] == fold]
             fitted = fit(arm, train, device)
@@ -93,16 +143,18 @@ def main():
             base_true += [c["m_true"] for c in held]
             print(f"  [{arm}] fold {fold} done", flush=True)
 
-        base = balanced_accuracy(base_true, base_pred, VALUES)
-        swap = balanced_accuracy(base_true, swap_pred, VALUES)
+        results[arm] = (base_true, base_pred, swap_pred)
         agree = float(np.mean(np.asarray(base_pred) == np.asarray(swap_pred)))
-        print(f"\n######## arm: {arm} ########")
-        print(f"  fold-honest checkpoint : balanced={base:.3f}")
-        print(f"  {SWAP_CHECKPOINT} features       : balanced={swap:.3f}   "
-              f"(delta {swap - base:+.3f}, predictions agree on {agree:.3f})")
-        subset = [{"m_true": t} for t in base_true]
-        score(f"{arm}/baseline", subset, base_pred, VALUES)
-        score(f"{arm}/{SWAP_CHECKPOINT}", subset, swap_pred, VALUES)
+        print(f"  [{arm}] shard folds {folds}: "
+              f"baseline={balanced_accuracy(base_true, base_pred, VALUES):.3f}  "
+              f"{SWAP_CHECKPOINT}={balanced_accuracy(base_true, swap_pred, VALUES):.3f}  "
+              f"agree={agree:.3f}", flush=True)
+
+    shard_dir = pathlib.Path(args.shard_dir)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    tag = "all" if args.folds is None else "-".join(str(f) for f in folds)
+    with open(shard_dir / f"shard_{tag}.pkl", "wb") as fh:
+        pickle.dump(results, fh)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ import importlib
 import os
 import pathlib
 import pickle
+import shutil
 import subprocess
 import sys
 import time
@@ -96,6 +97,25 @@ class _MappedCrop(dict):
         return super().__getitem__(key)
 
 
+def stage_in_ram(store_dir, ram_root="/dev/shm/vbpm_fanout"):
+    """Copy a store to shared memory and return the new path.
+
+    Batch assembly reads the whole feature array once per epoch in random order. From disk
+    that is ~8 s per batch against ~0.5 s of compute -- the fits are I/O bound, not GPU
+    bound. In /dev/shm every worker mmaps ONE resident copy, so the read cost disappears
+    without any worker holding its own copy. Bytes are identical; only their address is.
+    """
+    source, target = pathlib.Path(store_dir), pathlib.Path(ram_root) / "store"
+    target.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.iterdir()):
+        staged = target / path.name
+        if staged.exists() and staged.stat().st_size == path.stat().st_size:
+            continue
+        print(f"  staging {path.name} ({path.stat().st_size / 2**30:.1f} GiB)", flush=True)
+        shutil.copyfile(path, staged)
+    return target
+
+
 def load_store(store_dir):
     """Crop list backed by read-only memmaps; identical contents to the built crops."""
     store = pathlib.Path(store_dir)
@@ -134,21 +154,29 @@ def _jobs(crops, arms):
 
 
 def _schedule(commands, slots):
-    """Run commands over a fixed pool of (gpu) slots; return the failures."""
-    pending, running, failed = list(commands), [], []
+    """Run commands over a fixed pool of slots; return the failures.
+
+    Slots are addressed by POSITION, not by GPU id: with --per-gpu > 1 the same id appears
+    several times and is meant to be occupied several times over.
+    """
+    pending, failed = list(commands), []
+    running: dict = {}                                  # slot index -> (proc, label)
     while pending or running:
-        while pending and len(running) < len(slots):
-            gpu = [g for g in slots
-                   if g not in {r[1] for r in running}][0]
+        for slot in range(len(slots)):
+            if slot in running or not pending:
+                continue
             label, cmd = pending.pop(0)
-            env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)}
-            print(f"  -> [{label}] on GPU {gpu}", flush=True)
-            running.append((subprocess.Popen(cmd, env=env), gpu, label))
+            # cap threads per worker: torch would otherwise claim the whole machine in
+            # each of the N concurrent processes and spend the time context-switching
+            threads = max(1, (os.cpu_count() or 8) // (2 * len(slots)))
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(slots[slot]),
+                   "OMP_NUM_THREADS": str(threads), "MKL_NUM_THREADS": str(threads)}
+            print(f"  -> [{label}] on GPU {slots[slot]}", flush=True)
+            running[slot] = (subprocess.Popen(cmd, env=env), label)
         time.sleep(2.0)
-        for entry in list(running):
-            proc, _gpu, label = entry
+        for slot, (proc, label) in list(running.items()):
             if proc.poll() is not None:
-                running.remove(entry)
+                del running[slot]
                 status = "ok" if proc.returncode == 0 else f"FAILED ({proc.returncode})"
                 print(f"  <- [{label}] {status}", flush=True)
                 if proc.returncode != 0:
@@ -167,6 +195,11 @@ def main(argv=None):
                     help="concurrent fits per GPU; raise only if a fit underuses the GPU")
     ap.add_argument("--arms", nargs="*", default=None, help="subset of arms to run")
     ap.add_argument("--rebuild", action="store_true", help="rebuild the crop store")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip fits whose predictions are already on disk (the fit is "
+                         "deterministic, so a completed one has nothing new to say)")
+    ap.add_argument("--no-ram", action="store_true",
+                    help="mmap the store from disk instead of staging it in /dev/shm")
     ap.add_argument("--limit-per-fold", type=int, default=None)
     ap.add_argument("--worker", nargs=2, metavar=("ARM", "JOB"), default=None)
     args = ap.parse_args(argv)
@@ -189,16 +222,22 @@ def main(argv=None):
         print(f"building crop store at {store}", flush=True)
         build_store(campaign, store, limit_per_fold=args.limit_per_fold)
 
+    if not args.no_ram:
+        store = stage_in_ram(store)
     crops, report = load_store(store)
     print(f"store: {len(crops)} crops  rejects: {report['rejects']}", flush=True)
     arms = args.arms or list(campaign.ARMS)
     jobs = _jobs(crops, arms)
     preds_dir.mkdir(parents=True, exist_ok=True)
 
+    todo = [(arm, job) for arm, job in jobs
+            if not (args.resume and (preds_dir / f"{arm}.{job}.pkl").exists())]
+    if len(todo) < len(jobs):
+        print(f"resuming: {len(jobs) - len(todo)} fits already on disk", flush=True)
     commands = [(f"{arm}.{job}",
                  [sys.executable, "-m", "vbpm.fanout", args.campaign,
                   "--work", args.work, "--store", str(store), "--worker", arm, job])
-                for arm, job in jobs]
+                for arm, job in todo]
     slots = [g for g in args.gpus for _ in range(args.per_gpu)]
     print(f"{len(commands)} fits over {len(slots)} slots", flush=True)
     failed = _schedule(commands, slots)
