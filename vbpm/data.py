@@ -143,6 +143,109 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
     return crops, rejects
 
 
+# -----------------------------------------------------------------------------------
+# UN-ALIGNED crops: the data path for any model with a phase latent.
+#
+# ``make_crops`` above cuts at bar boundaries and derives y against those same bar starts,
+# so the crop's first beat IS a downbeat and the bar offset r is identically 0. Measured
+# 2026-08-03 over the whole live catalog: 18902 of 18902 crops have r = 0 -- an identity,
+# not a skew. A phase latent trained on that data has a CONSTANT target: it would score
+# 100% offset accuracy having learned nothing, and the number would be uninterpretable.
+#
+# So crops for a phase model are cut on the BEAT grid at a random offset, which is also the
+# deployment-honest choice: nothing at deployment tells you where a bar starts. Kept
+# strictly separate from make_crops/extract_crops so every existing number stays
+# reproducible. See docs/PHASE_PLAN.md.
+CROP_BEATS = 32     # 8 bars at m=4, ~10.7 at m=3, 16 at m=2 -- all well past MIN_BEATS
+
+
+def make_crops_unaligned(beat_times, downbeat_times, crop_beats: int = CROP_BEATS,
+                         rng=None):
+    """Beat-indexed crops cut at a RANDOM bar offset, so r is not free.
+
+    Windows of ``crop_beats`` consecutive beats, stride ``crop_beats``, starting at a
+    uniformly random offset in ``[0, crop_beats)``. A window is kept only if it holds at
+    least ``MIN_BARS + 1`` downbeats, so ``m_true`` is a median over >= MIN_BARS complete
+    bars lying INSIDE the window.
+
+    Args:
+        beat_times: the song's beat times in seconds.
+        downbeat_times: the song's downbeat times in seconds.
+        crop_beats: beats per crop.
+        rng: a numpy Generator; the start offset is the only random choice made here.
+
+    Returns:
+        A list of ``(crop_beat_times, crop_downbeat_times)`` pairs.
+    """
+    rng = np.random.default_rng(0) if rng is None else rng
+    beat_times = np.asarray(beat_times, dtype=np.float64)
+    downbeat_times = np.asarray(downbeat_times, dtype=np.float64)
+    n = len(beat_times)
+    if n < crop_beats:
+        return []
+
+    start = int(rng.integers(0, crop_beats))
+    crops = []
+    for lo in range(start, n - crop_beats + 1, crop_beats):
+        window = beat_times[lo:lo + crop_beats]
+        inside = downbeat_times[(downbeat_times >= window[0] - DOWNBEAT_TOL_S)
+                                & (downbeat_times <= window[-1] + DOWNBEAT_TOL_S)]
+        if len(inside) < MIN_BARS + 1:
+            continue
+        crops.append((window, inside))
+    return crops
+
+
+def extract_crops_unaligned(beat_times, downbeat_times, values=VALUES,
+                            crop_beats: int = CROP_BEATS, rng=None):
+    """(crops, rejects) for the phase path: the un-aligned twin of ``extract_crops``.
+
+    Each crop carries ``r0``, the bar offset of its first beat -- the quantity that is
+    identically 0 under ``extract_crops`` and is the whole reason this function exists.
+
+    Args:
+        beat_times: the song's beat times in seconds.
+        downbeat_times: the song's downbeat times in seconds.
+        values: the legal meter vocabulary.
+        crop_beats: beats per crop.
+        rng: a numpy Generator for the crop start offset.
+
+    Returns:
+        A tuple ``(crops, rejects)``; every dropped crop is counted by reason.
+    """
+    rejects: Counter = Counter()
+    if len(downbeat_times) < MIN_BARS + 1:
+        rejects[f"fewer_than_{MIN_BARS}_bars"] += 1
+        return [], rejects
+
+    crops = []
+    for crop_index, (window, inside) in enumerate(
+            make_crops_unaligned(beat_times, downbeat_times, crop_beats, rng)):
+        m_true = derive_m_true(window, inside)
+        if m_true is None:
+            rejects["crop_fewer_bars_than_min"] += 1
+            continue
+        if m_true not in values:
+            rejects[f"crop_m_out_of_vocabulary({m_true})"] += 1
+            continue
+
+        y, unmatched = derive_y(window, inside)
+        rejects["unmatched_downbeats"] += unmatched
+        ones = np.flatnonzero(y)
+        if len(ones) == 0:
+            rejects["crop_no_downbeat_on_grid"] += 1
+            continue
+        # r0 counts BACKWARD from the first downbeat inside the window, which is the bar
+        # offset of beat 0 exactly when the bar length there is m_true
+        crops.append({"crop": crop_index, "beats": window, "downs": inside, "y": y,
+                      "m_true": m_true, "r0": int((-int(ones[0])) % m_true),
+                      "downbeat_index": ones})
+
+    if not crops:
+        rejects["no_usable_crops"] += 1
+    return crops, rejects
+
+
 FEATURE_CACHE_DIR = "/disk4/jaehoon/vbpm_feature_cache"   # user decision 2026-08-01:
 # memoize the CERTIFIED pass's output (float32, verified against a live recompute on
 # every load) — this is not a second pipeline, it is the one pipeline remembered.
