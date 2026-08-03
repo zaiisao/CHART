@@ -1,11 +1,12 @@
 """Real data -> training CROPS {h, y, m_true} for Stage 0.
 
 y (per-beat downbeat indicator) and m_true (beats per bar) come from the trusted
-beat/downbeat annotation files via data/songs.py. h is live Beat This output computed
-through frontends/ — never cached (standing decision: a cache is a second, uncertified
-code path through the frontend) — and fold-honestly: each song goes through the
-checkpoint that held that song out of training (final0 for gtzan, which no checkpoint
-ever trained on).
+beat/downbeat annotation files via data/songs.py. h is Beat This output computed through
+frontends/ — fold-honestly: each song goes through the checkpoint that held that song
+out of training (final0 for gtzan, which no checkpoint ever trained on). Features are
+memoized on disk (user decision 2026-08-01, revising the earlier no-caches rule: the
+cache stores the certified path's own output and every run re-verifies a sample against
+a live recompute, so it cannot silently become a second pipeline).
 
 Every excluded song or crop is counted by reason and reported — rejections are
 surfaced, never silent, because a silently absent corpus once looked like a fact
@@ -14,6 +15,7 @@ about the data when it was a fact about the matcher.
 from __future__ import annotations
 
 import math
+import pathlib
 from collections import Counter
 
 import numpy as np
@@ -106,6 +108,7 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
     if len(downbeat_times) == 0:
         rejects["no_downbeat_annotation"] += 1
         return [], rejects
+
     if len(downbeat_times) - 1 < MIN_BARS:
         rejects[f"fewer_than_{MIN_BARS}_bars"] += 1
         return [], rejects
@@ -117,9 +120,11 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
         if m_true is None:
             rejects["crop_fewer_bars_than_min"] += 1
             continue
+
         if m_true not in values:
             rejects[f"crop_m_out_of_vocabulary({m_true})"] += 1
             continue
+
         if len(crop_beats) < MIN_BEATS:
             rejects[f"crop_fewer_than_{MIN_BEATS}_beats"] += 1
             continue
@@ -130,19 +135,46 @@ def extract_crops(beat_times, downbeat_times, values=VALUES):
         rejects["unmatched_downbeats"] += unmatched
         crops.append({"crop": crop_index, "beats": crop_beats, "bounds": bar_bounds,
                       "y": y, "m_true": m_true})
+
     if not crops:
         rejects["no_usable_crops"] += 1
     return crops, rejects
 
 
+FEATURE_CACHE_DIR = "/disk4/jaehoon/vbpm_feature_cache"   # user decision 2026-08-01:
+# memoize the CERTIFIED pass's output (float32, verified against a live recompute on
+# every load) — this is not a second pipeline, it is the one pipeline remembered.
+
+
+def _compute_features(frontend, song):
+    """One song through the frontend: audio load, mono mix, forward."""
+    import soundfile
+    signal, sample_rate = soundfile.read(str(song.audio_path), dtype="float32")
+    if signal.ndim > 1:
+        signal = signal.mean(axis=1)
+    return frontend.get_features(signal, sample_rate).numpy()
+
+
 def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=None,
-                           output: str = "activations", verbose: bool = True):
+                           output: str = "activations", verbose: bool = True,
+                           folds=None, cache_dir: str = FEATURE_CACHE_DIR,
+                           override_checkpoint: str | None = None):
     """Yield (song, features) fold-honestly: each song through the checkpoint that held it out.
 
     The single authority for the frontend pass (checkpoint selection, audio load, mono
     mix) — this is where fold-honesty lives, so it must exist exactly once.
+
+    Features are memoized under cache_dir (cache_dir=None forces fully-live computation).
+    Trust is re-earned on every run: for each checkpoint group that served any cache hit,
+    one cached song is recomputed live and compared. ``folds`` filters which checkpoint
+    groups run (integers 0-7, or None-in-list for the test-only/final0 group) — the knob
+    that lets a multi-GPU warmer shard the pass.
+
+    ``override_checkpoint`` forces EVERY song through one named checkpoint. It exists for
+    the checkpoint-swap probe alone: it deliberately breaks fold-honesty (songs go through
+    a checkpoint that trained on them), so its output is a diagnostic about the FEATURES
+    and must never be reported as a fold-honest score.
     """
-    import soundfile
     from frontends.beat_this import BeatThisFrontend
 
     by_fold: dict = {}
@@ -150,22 +182,54 @@ def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=N
         by_fold.setdefault(s.fold, []).append(s)
 
     for fold, members in sorted(by_fold.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        checkpoint = "final0" if fold is None else f"fold{fold}"
-        frontend = BeatThisFrontend(checkpoint=checkpoint, device=device, output=output)
-        assert frontend.fps == FPS, \
-            f"frontend fps {frontend.fps} != vbpm.data.FPS {FPS}: one module owns fps"
+        if folds is not None and fold not in folds:
+            continue
+        checkpoint = override_checkpoint or ("final0" if fold is None else f"fold{fold}")
         if limit_per_fold is not None:
             members = members[:limit_per_fold]
+        stems = [s.stem for s in members]
+        assert len(set(stems)) == len(stems), \
+            f"{checkpoint}: song stems are the cache key and are not unique in this group"
+        group_dir = (pathlib.Path(cache_dir) / checkpoint / output.replace("+", "_")
+                     if cache_dir else None)
 
+        frontend = None   # instantiated lazily: a fully-cached group may not need the GPU
+        served_from_cache = []
         for s in members:
-            signal, sample_rate = soundfile.read(str(s.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            yield s, frontend.get_features(signal, sample_rate).numpy()
+            cache_path = group_dir / f"{s.stem}.npy" if group_dir else None
+            if cache_path is not None and cache_path.exists():
+                features = np.load(cache_path)
+                served_from_cache.append(s)
+            else:
+                if frontend is None:
+                    frontend = BeatThisFrontend(checkpoint=checkpoint, device=device,
+                                                output=output)
+                    assert frontend.fps == FPS, \
+                        f"frontend fps {frontend.fps} != vbpm.data.FPS {FPS}"
+                features = _compute_features(frontend, s)
+                if cache_path is not None:
+                    group_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(cache_path, features.astype(np.float32))
+            yield s, features
+
+        if served_from_cache:
+            # re-earn trust: one cached song per group is recomputed live and compared
+            probe = served_from_cache[0]
+            if frontend is None:
+                frontend = BeatThisFrontend(checkpoint=checkpoint, device=device,
+                                            output=output)
+            live = _compute_features(frontend, probe)
+            cached = np.load(group_dir / f"{probe.stem}.npy")
+            drift = float(np.max(np.abs(live.astype(np.float64)
+                                        - cached.astype(np.float64))))
+            assert drift < 1e-3, (
+                f"feature cache DRIFT on {probe.stem} ({checkpoint}/{output}): "
+                f"max|live - cached| = {drift:.3e} — delete the cache and recompute")
 
         del frontend
         if verbose:
-            print(f"  {checkpoint}: done", flush=True)
+            print(f"  {checkpoint}: done ({len(served_from_cache)}/{len(members)} cached)",
+                  flush=True)
 
 
 def to_prob(h):

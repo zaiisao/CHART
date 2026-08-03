@@ -9,6 +9,11 @@ categorical latent, against the incumbents on identical crops. Four fold-honest 
     tf2        TransformerPrior on the compressed [T, 2] activations — isolates the
                cross-checkpoint feature-misalignment confound: the 2 channels are
                semantically pinned across checkpoints, the 512 are not
+    tf512n     tf512 with per-crop feature normalisation (each channel centred and scaled
+               over the crop's own frames) — the second half of the same confound test:
+               it grants the transformer the protection the autocorr head gets for free,
+               so a constant cross-checkpoint feature shift can no longer survive as a
+               constant logit offset
 
 Pre-registered criteria: PRIMARY = gtzan transfer (beat linear's 0.624 to claim the
 reducer's crown; ALL-CV alone does not count). Secondary = per-dataset, especially asap
@@ -34,13 +39,19 @@ EPOCHS = 30
 BATCH = 256
 SEED = 0
 
-# arm name -> (model builder, crop field holding its input, channel width)
+# arm name -> (model builder, crop field holding its input, channel width, normalise)
 ARMS = {
-    "linear": (lambda: torch.nn.Linear(10, K), "s10", None),
-    "autocorr": (lambda: AutocorrHead(), "h512", 512),
-    "tf512": (lambda: TransformerPrior(in_dim=512), "h512", 512),
-    "tf2": (lambda: TransformerPrior(in_dim=2), "h2", 2),
+    "linear": (lambda: torch.nn.Linear(10, K), "s10", None, False),
+    "autocorr": (lambda: AutocorrHead(), "h512", 512, False),
+    "tf512": (lambda: TransformerPrior(in_dim=512), "h512", 512, False),
+    "tf2": (lambda: TransformerPrior(in_dim=2), "h2", 2, False),
+    "tf512n": (lambda: TransformerPrior(in_dim=512), "h512", 512, True),
 }
+
+# --- vbpm.fanout campaign protocol ---
+OUTPUT = "features+activations"
+SEQ_FIELDS = {"h512": 512, "h2": 2}
+FLAT_FIELDS = ["s10", "C", "mask"]
 
 
 def make_entry(song, crop, h_crop, t0):
@@ -71,12 +82,28 @@ def stack_field(crops, idx, field, device):
     return torch.from_numpy(np.stack([crops[i][field] for i in idx])).to(device)
 
 
-def arm_logits(model, crops, idx, field, width, stats, device):
+def normalize_per_crop(x, lengths):
+    """Centre and scale each crop's channels over ITS OWN valid frames; pads stay zero.
+
+    Statistics come from the crop, never from the corpus, so nothing about which
+    checkpoint produced the features can leak in as a constant offset.
+    """
+    valid = (torch.arange(x.shape[1], device=x.device)[None, :]
+             < lengths[:, None]).to(x.dtype)[..., None]
+    n = lengths[:, None, None].to(x.dtype)
+    mean = (x * valid).sum(1, keepdim=True) / n
+    var = ((x - mean) * valid).pow(2).sum(1, keepdim=True) / n
+    return ((x - mean) / (var.sqrt() + 1e-5)) * valid
+
+
+def arm_logits(model, crops, idx, field, width, stats, device, normalize=False):
     """[B, K] prior logits for one arm on one index batch."""
     if width is None:                                   # linear arm reads z-scored s10
         mean, std = stats
         return model((stack_field(crops, idx, field, device) - mean) / std)
     x, lengths = pad_features(crops, idx, field, width, device)
+    if normalize:
+        x = normalize_per_crop(x, lengths)
     return model(x, lengths)
 
 
@@ -84,7 +111,7 @@ def arm_logits(model, crops, idx, field, width, stats, device):
 def train_arm(name, train_crops, stats, device):
     """Joint ELBO ascent on theta + psi(this arm's model) + phi. Same budget for all arms."""
     torch.manual_seed(SEED)
-    build, field, width = ARMS[name]
+    build, field, width, normalize = ARMS[name]
     model = build().to(device)
     scalars = {"alpha": torch.tensor(0.5, device=device, requires_grad=True),
                "beta": torch.tensor(-0.5, device=device, requires_grad=True),
@@ -99,7 +126,8 @@ def train_arm(name, train_crops, stats, device):
         total, n_batches = 0.0, 0
         rng.shuffle(chunks)
         for idx in chunks:
-            logits = arm_logits(model, train_crops, idx, field, width, stats, device)
+            logits = arm_logits(model, train_crops, idx, field, width, stats, device,
+                                normalize)
             em = emission_logp_from_counts(stack_field(train_crops, idx, "C", device),
                                            stack_field(train_crops, idx, "mask", device),
                                            log_m, scalars["alpha"], scalars["beta"])
@@ -118,14 +146,25 @@ def train_arm(name, train_crops, stats, device):
 
 
 @torch.no_grad()
-def predict(name, model, crops, stats, device):
-    _, field, width = ARMS[name]
+def predict_with(name, model, crops, stats, device):
+    _, field, width, normalize = ARMS[name]
     preds = []
     for i in range(0, len(crops), BATCH):
         idx = list(range(i, min(i + BATCH, len(crops))))
-        logits = arm_logits(model, crops, idx, field, width, stats, device)
+        logits = arm_logits(model, crops, idx, field, width, stats, device, normalize)
         preds += [VALUES[int(k)] for k in logits.argmax(-1).cpu()]
     return preds
+
+
+def fit(arm, train_crops, device="cuda"):
+    """vbpm.fanout protocol: one arm's fit on one train split (standardizer + model)."""
+    stats = standardizer(train_crops, device)
+    return (train_arm(arm, train_crops, stats, device), stats)
+
+
+def predict(arm, fitted, crops, device="cuda"):
+    """vbpm.fanout protocol: predictions for one held split."""
+    return predict_with(arm, fitted[0], crops, fitted[1], device)
 
 
 def standardizer(train_crops, device):
@@ -146,14 +185,9 @@ def main():
     test = [c for c in crops if c["fold"] is None]
 
     for name in ARMS:
-        def fit_fn(train_crops):
-            stats = standardizer(train_crops, device)
-            model = train_arm(name, train_crops, stats, device)
-            return (model, stats)
-
         pooled, preds, test_preds = cv_out_of_fold(
-            cv, test, fit_fn,
-            lambda fitted, cs: predict(name, fitted[0], cs, fitted[1], device),
+            cv, test, lambda cs, n=name: fit(n, cs, device),
+            lambda fitted, cs, n=name: predict(n, fitted, cs, device),
             verbose=False)
         print(f"\n######## arm: {name} ########")
         score_per_dataset(pooled, preds, VALUES)
