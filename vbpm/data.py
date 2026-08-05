@@ -219,7 +219,10 @@ def iter_frontend_features(datasets=None, device: str = "cuda", limit_per_fold=N
                     # write-then-rename: a reader racing a warmer must never see a
                     # half-written array (rename is atomic within a filesystem)
                     partial = cache_path.with_suffix(".npy.partial")
-                    np.save(partial, features.astype(np.float32))
+                    # np.save APPENDS ".npy" to any path not ending in it, silently
+                    # renaming the temp file; an open handle keeps the name as given
+                    with open(partial, "wb") as fh:
+                        np.save(fh, features.astype(np.float32))
                     partial.replace(cache_path)
             yield s, features
 

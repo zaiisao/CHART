@@ -32,6 +32,7 @@ convention = "google"
 "tests/mutants.py" = ["E501"]
 "tests/test_reference_selftest.py" = ["E501"]
 "tests/*" = ["D", "N"]
+"phasevae/tests/*" = ["D", "N"]
 # experiments are one-off measurement scripts: docstring FORMAT is enforced, but small
 # internal helpers need not carry docstrings
 "experiments/*" = ["D1"]
