@@ -24,11 +24,10 @@ import numpy as np
 
 from data.songs import iter_songs
 
-from .stage0 import DEFAULT_VALUES
-
 MIN_BARS = 3
 DOWNBEAT_TOL_S = 0.02
-VALUES = DEFAULT_VALUES  # the meter vocabulary has ONE owner (vbpm.stage0); alias only
+VALUES = (2, 3, 4)       # meter vocabulary; was owned by vbpm.stage0, inlined when the
+                         # Stage-0 library left this branch (phase-only VAE)
 FPS = 50.0               # frames-per-second has ONE owner (this module): everything
                          # frame-related reads THIS, and the frontend pass asserts the
                          # frontend agrees — frame/second confusions are silent otherwise

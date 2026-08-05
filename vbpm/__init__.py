@@ -1,7 +1,5 @@
-"""VBPM Stage 0: one discrete latent, m = beats per bar, per crop.
+"""Data plumbing kept for phasevae: fold-honest frontend features (vbpm.data).
 
-The library half of the project; docs/SPEC.md is the normative other half.
+The Stage-0 model library that lived here is deleted on this branch (phase-only VAE);
+recover it from git history or the master branch.
 """
-from .stage0 import Stage0
-
-__all__ = ["Stage0"]
