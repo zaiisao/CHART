@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ANNOTATIONS_ROOT = _REPO_ROOT / "dataset_store" / "beat_this_annotations"
 AUDIO_ROOT = (_REPO_ROOT / "dataset_store" / "beat_tracking_db1" / "beat-tracking"
               / "labeled_data")

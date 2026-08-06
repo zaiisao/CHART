@@ -1,0 +1,8 @@
+# The no-psi champion (2026-08-06): bar-rate + triangle. gtzan rule-g F 0.50 / CMLt 0.86.
+# Rationale for every key: docs/phasevae_decisions.md; defaults for omitted keys in run.py.
+emission: triangle
+drift_bound: 0.01
+bar_rate: true
+pos_weight: 1.0
+epochs: 60
+beta_warmup: 0        # measured irrelevant without psi (L2 0.496 vs banked 0.505)

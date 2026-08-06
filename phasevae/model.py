@@ -66,6 +66,11 @@ def inverse_softplus(value: float) -> float:
     return value if value > 30.0 else math.log(math.expm1(value))
 
 
+def vonmises_log_density(z, mu, kappa):
+    """Per-element log vM(z; mu, kappa): kappa cos(z - mu) - log(2 pi I0(kappa))."""
+    return kappa * torch.cos(z - mu) - math.log(TWO_PI) - log_i0(kappa)
+
+
 def vonmises_entropy(kappa):
     """H(vM(mu, kappa)) = log(2 pi I0(kappa)) - kappa A(kappa). Independent of mu."""
     return math.log(TWO_PI) + log_i0(kappa) - kappa * mean_resultant(kappa)
@@ -81,20 +86,41 @@ class Encoder(nn.Module):
     """
 
     def __init__(self, input_dim: int, hidden: int = 128, layers: int = 2,
-                 drift_bound: float = 0.0):
+                 drift_bound: float = 0.0, bar_rate: bool = False):
         super().__init__()
         self.drift_bound = drift_bound
+        self.bar_rate = bar_rate and drift_bound > 0
+
         self.proj = nn.Linear(input_dim, hidden)
         self.rnn = nn.GRU(hidden, hidden, num_layers=layers, batch_first=True,
                           bidirectional=True)
         # channels: 0,1 = (cos, sin) of the crop's phase offset, read at frame 0;
         # 2 = concentration; 3 = per-frame drift, only when the bound is active
         self.out = nn.Linear(2 * hidden, 4 if drift_bound > 0 else 3)
+
         # small but NOT zero: a zero output layer makes d(loss)/d(body) exactly zero at
         # step 0, which is how this project shipped a dead subnetwork three times.
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.zeros_(self.out.bias)
+
+        # Domain-informed birth state: with zero bias the offset head is atan2 of two
+        # tiny random numbers -- a UNIFORMLY RANDOM angle held with kappa~2000
+        # conviction. Biasing the cos component to 1 makes every network start at the
+        # physical prior's mode (phase 0, steady coast, zero drift), so two freshly
+        # initialised networks AGREE -- measured: the q-to-psi KL at epoch 0 drops from
+        # ~3.2M nats (confidence^2 x random disagreement) to its floor.
+        with torch.no_grad():
+            self.out.bias[1] = 1.0
+
         self.register_buffer("kappa_bias", torch.tensor(inverse_softplus(KAPPA_PHYSICAL)))
+
+    def features(self, x):
+        """[B, T, D] -> [B, T, 2*hidden]: the BiGRU trunk shared by every head.
+
+        Split from ``heads`` so a variant module can attach extra heads to the same
+        trunk without duplicating the body (see phasevae/psi.py).
+        """
+        return self.rnn(torch.tanh(self.proj(x)))[0]
 
     def forward(self, h, delta=None):
         """[B, T, D] -> (mu [B, T], kappa [B, T]).
@@ -114,15 +140,46 @@ class Encoder(nn.Module):
         expensive, and a 30x-weighted reconstruction outbids the penalty. Bounding the
         drift makes it unrepresentable instead. Free-q measurement: F 0.075 -> 0.911.
         """
-        out = self.out(self.rnn(torch.tanh(self.proj(h)))[0])
+        return self.heads(self.features(h), delta)
+
+    def heads(self, trunk, delta=None):
+        """Trunk -> (mu, kappa) under the structured-q parameterisation (see forward)."""
+        out = self.out(trunk)
         kappa = bounded_kappa(
             nn.functional.softplus(out[..., 2] + self.kappa_bias) + 1e-3)
+
         if self.drift_bound <= 0.0:
-            return torch.atan2(out[..., 0], out[..., 1]), kappa
+            mu = torch.atan2(out[..., 0], out[..., 1])
+            return mu, kappa
+
         offset = torch.atan2(out[:, :1, 0], out[:, :1, 1])       # ONE anchor per crop
         drift = self.drift_bound * torch.tanh(out[..., 3])       # its own channel
+
+        if self.bar_rate and delta is not None:
+            # ONE rate per bar-length segment: mean-pool tanh(g) over blocks of
+            # ~2*pi/delta frames, so within-bar step sizes are EXACTLY constant. This
+            # deletes the degrees of freedom the chimera's covert code was written in
+            # (per-frame step wiggles) rather than taxing or ignoring them, and is the
+            # classical bar pointer's between-boundaries-constant tempo, as a q family.
+            # Segments count from frame 0, not from the trajectory's own wraps: aligned
+            # to bar LENGTH, not bar position -- the cheap version, by design.
+            batch, length = drift.shape
+            frames_per_bar = torch.clamp(
+                torch.round(TWO_PI / delta[:, 0].clamp(min=1e-6)), min=1).long()
+            seg = (torch.arange(length, device=drift.device)[None, :]
+                   // frames_per_bar[:, None])
+            segments = int(seg.max()) + 1
+            sums = torch.zeros(batch, segments, device=drift.device
+                               ).scatter_add_(1, seg, drift)
+            counts = torch.zeros(batch, segments, device=drift.device
+                                 ).scatter_add_(1, seg, torch.ones_like(drift))
+            drift = (sums / counts.clamp(min=1.0)).gather(1, seg)
+
         advance = (delta if delta is not None else 0.0) + drift
-        mu = offset + torch.cumsum(advance, dim=1) - advance[:, :1]
+        # grouped so cumsum[0] - advance[0] cancels EXACTLY: mu[0] must equal the
+        # offset bitwise (delta-independent), which offset + a - a does not guarantee
+        # in floating point once the canonical-start init made offsets tiny
+        mu = offset + (torch.cumsum(advance, dim=1) - advance[:, :1])
         return mu, kappa
 
 
@@ -162,6 +219,7 @@ class EmissionTransformer(nn.Module):
                                            batch_first=True, norm_first=True)
         self.blocks = nn.TransformerEncoder(layer, layers)
         self.out = nn.Linear(d_model, 1)
+
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.constant_(self.out.bias, -3.4)       # ~= the 3.2% base rate, so training
                                                      # starts calibrated instead of spending
@@ -192,9 +250,12 @@ class BarPhaseVAE(nn.Module):
 
     def __init__(self, input_dim: int, hidden: int = 128, emission: str = "cosine",
                  emission_layers: int = 2, emission_dim: int = 64,
-                 emission_positional: bool = False, drift_bound: float = 0.0):
+                 emission_positional: bool = False, drift_bound: float = 0.0,
+                 bar_rate: bool = False):
         super().__init__()
-        self.encoder = Encoder(input_dim, hidden, drift_bound=drift_bound)
+        self.encoder = Encoder(input_dim, hidden, drift_bound=drift_bound,
+                               bar_rate=bar_rate)
+
         self.emission_kind = emission
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
         # no gradient, which the audit correctly refused -- and an audit that has to be
@@ -209,6 +270,7 @@ class BarPhaseVAE(nn.Module):
             # measured with it.
             self.emission_a = nn.Parameter(torch.tensor(-3.0))
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
+
         # Scheduled LOWER BOUND on the emission amplitude, set by the training loop
         # (0 = free). Rationale: broad-emission/imprecise-phase is a self-consistent
         # equilibrium -- while q's phase is off, the local gradient on b points DOWN
@@ -275,6 +337,7 @@ class BarPhaseVAE(nn.Module):
         cross = (KAPPA_PHYSICAL * resultant[:, 1:] * resultant[:, :-1] * torch.cos(drift)
                  - math.log(TWO_PI) - log_i0(torch.as_tensor(KAPPA_PHYSICAL,
                                                              device=mu.device)))
+
         neg_entropy = -(entropy * mask).sum(1)
         log_p = log_p_first * mask[:, 0] + (cross * mask[:, 1:]).sum(1)
         return neg_entropy - log_p
@@ -307,6 +370,7 @@ class BarPhaseVAE(nn.Module):
         weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
                                                     dtype=torch.float32),
                              torch.ones((), device=y.device, dtype=torch.float32)) * mask
+
         recon = 0.0
         for _ in range(samples):
             phi = mu + sample_vonmises(kappa)
@@ -314,7 +378,18 @@ class BarPhaseVAE(nn.Module):
                 self.emission_logits(phi), y.float(), reduction="none")
             recon = recon - (per_frame * weight).sum(1)
         recon = recon / samples
+
         return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa}
+
+    @property
+    def deployed_net(self):
+        """The inference network read at test time; controls assert ITS target-blindness.
+
+        The base model deploys the encoder (tutorial 8.1.2). A variant that deploys a
+        different object (e.g. a conditional prior) overrides this property, and the
+        controls follow it without knowing the variant exists.
+        """
+        return self.encoder
 
     @torch.no_grad()
     def infer_phase(self, h, delta=None):
@@ -327,9 +402,14 @@ class BarPhaseVAE(nn.Module):
         return self.encoder(h, delta)[0]
 
     @torch.no_grad()
-    def emission_probs(self, h):
-        """Alternative D (8.3.4): the emission evaluated at the encoder mean."""
-        return torch.sigmoid(self.emission_logits(self.infer_phase(h)))
+    def emission_probs(self, h, delta=None):
+        """Alternative D (8.3.4): the emission evaluated at the deployed mean path.
+
+        delta must be passed whenever the trajectory family uses it (drift_bound > 0):
+        omitting it silently built the path without its base advance -- the audit found
+        every bounded arm's emission-D column had been scored on that broken path.
+        """
+        return torch.sigmoid(self.emission_logits(self.infer_phase(h, delta)))
 
 
 def downbeat_frames(mu, mask=None):

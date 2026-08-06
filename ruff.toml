@@ -27,12 +27,5 @@ ignore = [
 convention = "google"
 
 [lint.per-file-ignores]
-# tests is the acceptance suite and may not be edited (SPEC SS9): style rules that would
-# require touching it are exempted there, nothing else.
-"tests/mutants.py" = ["E501"]
-"tests/test_reference_selftest.py" = ["E501"]
-"tests/*" = ["D", "N"]
+# the blind suite documents contracts in test names, not docstrings
 "phasevae/tests/*" = ["D", "N"]
-# experiments are one-off measurement scripts: docstring FORMAT is enforced, but small
-# internal helpers need not carry docstrings
-"experiments/*" = ["D1"]

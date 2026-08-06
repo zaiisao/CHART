@@ -48,6 +48,7 @@ def test_encoder_free_branch_per_frame_locality_and_shapes():
     mu, kappa = enc(h)
     assert mu.shape == (1, 20) and kappa.shape == (1, 20)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
+
     h2 = h.clone()
     h2[0, 7] += 5.0
     mu2, _ = enc(h2)
@@ -129,6 +130,7 @@ def test_emission_transformer_masked_frames_do_not_influence_unmasked():
     phi_a = torch.rand(1, 16) * TWO_PI
     phi_b = phi_a.clone()
     phi_b[0, 8:] = torch.rand(8) * TWO_PI
+
     la = net(phi_a, mask)
     lb = net(phi_b, mask)
     assert torch.allclose(la[0, :8], lb[0, :8], atol=1e-6), \
@@ -206,6 +208,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     h, delta, mask, y = _batch()
     out = model(h, delta, mask, y, samples=3, pos_weight=1.0)
     assert calls["n"] == 3
+
     with torch.no_grad():
         terms = []
         for off in offsets:
@@ -228,6 +231,7 @@ def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
     model = _tf_model()
     h, delta, mask, y = _batch(B=1, T=8)
     out = model(h, delta, mask, y, samples=1, pos_weight=1.0)
+
     with torch.no_grad():
         logits = model.emission_logits(out["mu"])   # forward passes no mask here
         ll = (y * torch.nn.functional.logsigmoid(logits)
@@ -337,6 +341,7 @@ def test_kl_free_posterior_one_frame_is_entropy_to_uniform():
         torch.tensor([[kappa_val]], dtype=torch.float64),
         torch.tensor([[0.05]], dtype=torch.float64),
         torch.ones(1, 1, dtype=torch.float64)).item()
+
     expected = -float(scipy_stats.vonmises(kappa=kappa_val).entropy()) \
         + math.log(TWO_PI)
     assert got == pytest.approx(expected, abs=1e-9)
@@ -357,7 +362,10 @@ def test_train_loss_formula_matches_documented_objective():
     """
     src = inspect.getsource(run_mod.train)
     assert 'frames = batch["mask"].sum(1)' in src
-    assert 'loss = -((out["recon"] - beta * out["kl"]) / frames).mean()' in src
+    # the objective formula lives in the hooks module now; run.train only wires it
+    assert 'loss = -(hooks.objective(out, beta, cfg) / frames).mean()' in src
+    from phasevae.variants import base
+    assert 'out["recon"] - beta * out["kl"]' in inspect.getsource(base.objective)
 
     model = _tf_model()
     h, delta, mask, y = _batch()
@@ -365,6 +373,7 @@ def test_train_loss_formula_matches_documented_objective():
     beta = run_mod.beta_at(1, types.SimpleNamespace(beta_start=0.2, beta_end=0.8,
                                                     beta_warmup=3))
     assert beta == pytest.approx(0.2 + (1 / 3) * 0.6)
+
     frames = mask.sum(1)
     loss = -((out["recon"] - beta * out["kl"]) / frames).mean()
     expected = -np.mean([

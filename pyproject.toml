@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vbpm"
+name = "phasevae"
 version = "0.1.0"
-description = "Variational Bar-Pointer Model — staged build against docs/SPEC.md"
+description = "Bar-phase VAE: a §7 bar-pointer model on frozen fold-honest frontends"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.6",
@@ -18,8 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 
-# Three top-level packages (SPEC boundaries): vbpm is the model library; data is the
-# annotation/audio catalog; frontends are the frozen feature extractors. tests/ and
-# experiments/ are deliberately NOT packaged — they consume the package.
+# ONE package. Inside it: model + hooks modules (mainline/psi) at the top, the data
+# layer (data.py catalog+features, songs.py, frontends/), checks/ diagnostics, and
+# configs/ YAML recipes. tests live in phasevae/tests and are not shipped.
 [tool.setuptools]
-packages = ["vbpm", "data", "frontends"]
+packages = ["phasevae", "phasevae.variants", "phasevae.data",
+            "phasevae.data.frontends", "phasevae.scoring", "phasevae.checks"]

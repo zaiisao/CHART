@@ -37,7 +37,7 @@ import numpy as np
 import soundfile
 import torch
 
-from frontends import Frontend
+from . import Frontend
 
 _BEAT_TRANSFORMER_ROOT = Path(__file__).resolve().parent.parent / "external" / "beat_transformer"
 _DEMIX_SCRIPT = Path(__file__).resolve().parent / "beat_transformer_demix.py"

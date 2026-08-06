@@ -82,6 +82,7 @@ def sample_vonmises(kappa: torch.Tensor, max_rounds: int = 64) -> torch.Tensor:
         accepted = torch.zeros(shape, dtype=torch.bool, device=work.device)
         u1 = torch.zeros(shape, dtype=torch.float64, device=work.device)
         u3 = torch.zeros(shape, dtype=torch.float64, device=work.device)
+
         for _ in range(max_rounds):
             if bool(accepted.all()):
                 break
@@ -97,15 +98,18 @@ def sample_vonmises(kappa: torch.Tensor, max_rounds: int = 64) -> torch.Tensor:
             u1 = torch.where(take, p1, u1)
             u3 = torch.where(take, p3, u3)
             accepted = accepted | ok
+
         # kappa below SMALL_KAPPA is uniform: accept any draw, the f-path is degenerate
         tiny = work < SMALL_KAPPA
 
     rho = _best_fisher_rho(work)
     r = (1.0 + rho * rho) / (2.0 * rho)
+
     # u1 = 0 exactly (torch.rand includes it) drives 1 - f to 0; clamping costs 1e-7 of
     # the support and keeps every derivative below finite
     u1 = u1.clamp(1e-7, 1.0 - 1e-7)
     z = torch.cos(math.pi * u1)
+
     # acos(f) directly is a NaN factory here: at kappa ~ 10^3 the accepted f sits at
     # 1 - 1e-7, d acos/df = -1/sqrt(1 - f^2) blows up, and f rounding to exactly 1.0
     # makes it infinite -- which is how the first full training run went NaN in one
@@ -117,6 +121,7 @@ def sample_vonmises(kappa: torch.Tensor, max_rounds: int = 64) -> torch.Tensor:
     sign = torch.where(u3 > 0.5, 1.0, -1.0)
     angle = 2.0 * sign * torch.asin(
         torch.sqrt(one_minus_f / 2.0 + 1e-24).clamp(max=1.0))
+
     uniform = (2.0 * u1 - 1.0) * math.pi
     angle = torch.where(tiny | (~accepted), uniform, angle)
     return angle.to(kappa.dtype)

@@ -15,7 +15,7 @@ on the angle, which would punish the wrap. Everything else (data, splits, read-o
 metric) is the deployment pipeline unchanged, so the number is comparable to the ELBO
 runs' F. Scoring uses rule g on the phi = 0 crossing.
 
-    PYTHONPATH=. python -m phasevae.check_encoder_supervised --gpu 3
+    PYTHONPATH=. python -m phasevae.checks.encoder_supervised --gpu 3
 """
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from vbpm.data import FPS
+from ..data.features import FPS
 
-from .crops import true_phase
-from .metrics_db import f_measure, null_times
-from .model import BarPhaseVAE, downbeat_frames
-from .run import VAL_FOLD, Batches, load_or_build
-
-wrap_readout = downbeat_frames   # alias only: there is ONE read-out and it lives in model.py
+from ..scoring.controls import assert_no_duplicate_crops
+from ..data.dataset import true_phase
+from ..scoring.evaluation import rule_g_times
+from ..data.dataset import Batches, load_or_build, split_folds
+from ..scoring.evaluation import f_measure, null_times
+from ..model import BarPhaseVAE
 
 
 def phase_targets(crops):
@@ -56,24 +56,52 @@ def collate_targets(raw, device):
     return phi.to(device), ok.to(device)
 
 
+def supervise(model, loader, rng, epochs: int, lr: float, log_every: int = 5):
+    """Fit the encoder to the true phase. Circular loss; never a squared angle error.
+
+    THE supervised-fitting loop (check_warm_start reuses it). Returns the model.
+    """
+    opt = torch.optim.Adam(model.encoder.parameters(), lr=lr)
+    for epoch in range(epochs):
+        model.train()
+        total, n = 0.0, 0
+        for raw, batch in loader(shuffle=True, rng=rng):
+            phi, ok = collate_targets(raw, batch["h"].device)
+            ok = ok * batch["mask"]
+            mu, _kappa = model.encoder(batch["h"])
+            loss = ((1.0 - torch.cos(mu - phi)) * ok).sum() / ok.sum()
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 5.0)
+            opt.step()
+            total, n = total + float(loss), n + 1
+
+        if log_every and (epoch % log_every == log_every - 1 or epoch == 0):
+            err = np.degrees(np.arccos(np.clip(1.0 - total / n, -1, 1)))
+            print(f"  epoch {epoch:2d}  1-cos {total / n:.4f}  "
+                  f"(mean angular error ~{err:.1f} deg)", flush=True)
+    return model
+
+
 def evaluate(model, crops, device, batch_size, seed=0):
     """Per-dataset downbeat F for the supervised encoder, beside the nulls."""
     model.eval()
     rows: dict = defaultdict(lambda: defaultdict(list))
     rng = np.random.default_rng(seed)
+
     with torch.no_grad():
         for raw, batch in Batches(crops, batch_size, device)():
             mu = model.infer_phase(batch["h"], batch["delta"])
-            wraps = downbeat_frames(mu, batch["mask"]).cpu().numpy()
+            times_all = rule_g_times(mu, batch["mask"], raw)
             for i, crop in enumerate(raw):
-                t = len(crop["y"])
                 truth = crop["downbeat_times"]
-                times = (np.flatnonzero(wraps[i, :t - 1]) + 1) / FPS + crop["t0"]
-                rows[crop["dataset"]]["supervised"].append(f_measure(times, truth)[0])
+                rows[crop["dataset"]]["supervised"].append(
+                    f_measure(times_all[i], truth)[0])
                 crop["fps"] = FPS
                 for kind in ("random", "zero"):
                     rows[crop["dataset"]][f"null-{kind}"].append(
                         f_measure(null_times(crop, kind, rng), truth)[0])
+
     return {ds: {k: (float(np.mean(v)), len(v)) for k, v in m.items()}
             for ds, m in rows.items()}
 
@@ -91,38 +119,18 @@ def main() -> None:
     device = torch.device(f"cuda:{args.gpu}")
 
     crops, rejects = load_or_build(args.crop_cache, args.limit_per_fold)
-    keys = {(c["stem"], round(c["t0"], 3)) for c in crops}
-    assert len(keys) == len(crops), "duplicate crops"
+    assert_no_duplicate_crops(crops)
     crops = phase_targets(crops)
     print(f"crops: {len(crops)}  rejects: {dict(rejects)}")
 
-    train = [c for c in crops if c["fold"] not in (None, VAL_FOLD)]
-    val = [c for c in crops if c["fold"] == VAL_FOLD]
+    train, val, _test = split_folds(crops)
     print(f"train {len(train)} / val {len(val)}")
 
     torch.manual_seed(0)
     rng = np.random.default_rng(0)
     model = BarPhaseVAE(train[0]["h"].shape[1]).to(device)
-    loader = Batches(train, args.batch_size, device)
-    opt = torch.optim.Adam(model.encoder.parameters(), lr=args.lr)
-
-    for epoch in range(args.epochs):
-        model.train()
-        total, n = 0.0, 0
-        for raw, batch in loader(shuffle=True, rng=rng):
-            phi, ok = collate_targets(raw, device)
-            ok = ok * batch["mask"]
-            mu, _kappa = model.encoder(batch["h"])
-            loss = ((1.0 - torch.cos(mu - phi)) * ok).sum() / ok.sum()
-            opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 5.0)
-            opt.step()
-            total, n = total + float(loss), n + 1
-        if epoch % 5 == 4 or epoch == 0:
-            err = np.degrees(np.arccos(np.clip(1.0 - total / n, -1, 1)))
-            print(f"  epoch {epoch:2d}  1-cos {total / n:.4f}  "
-                  f"(mean angular error ~{err:.1f} deg)", flush=True)
+    supervise(model, Batches(train, args.batch_size, device), rng,
+              args.epochs, args.lr)
 
     print("\n==== SUPERVISED encoder, downbeat F (+-70 ms) ====")
     for dataset, modes in sorted(evaluate(model, val, device, args.batch_size).items()):

@@ -10,11 +10,18 @@ from collections import Counter
 import numpy as np
 import torch
 
-from vbpm.data import FPS
+from ..data.dataset import true_phase
+from .evaluation import rule_g_times
+from .evaluation import f_measure
 
-from .crops import true_phase
-from .metrics_db import f_measure
-from .model import downbeat_frames
+
+def assert_no_duplicate_crops(crops):
+    """(stem, t0) must be unique: replicated crops silently bias every mean."""
+    keys = {(c["stem"], round(c["t0"], 3)) for c in crops}
+    assert len(keys) == len(crops), (
+        f"DUPLICATE CROPS: {len(crops) - len(keys)} of {len(crops)} share a (stem, t0). "
+        "Per-dataset means and seed sds would be computed on replicated data.")
+    return keys
 
 
 def assert_readout_recovers_oracle(crops, limit: int = 200, floor: float = 0.95):
@@ -27,9 +34,10 @@ def assert_readout_recovers_oracle(crops, limit: int = 200, floor: float = 0.95)
     for crop in crops[:limit]:
         phi, _valid = true_phase(crop)
         mu = torch.tensor(np.mod(phi + np.pi, 2 * np.pi) - np.pi)[None]   # encoder's range
-        est = (np.flatnonzero(downbeat_frames(mu)[0].numpy()) + 1) / FPS + crop["t0"]
+        est = rule_g_times(mu, None, [crop])[0]
         truth = crop["downbeat_times"]
         scores.append(f_measure(est, truth)[0] if len(est) > 1 else 0.0)
+
     value = float(np.mean(scores))
     assert value > floor, (
         f"READ-OUT BROKEN: rule g scores F={value:.3f} on the ORACLE trajectory. "
@@ -45,24 +53,47 @@ def assert_encoder_is_target_blind(model, batch):
     widening of the deployable surface, not a waiver.
     """
     model.eval()
+    deployed = model.deployed_net
     allowed = {"self", "h", "delta"}
-    named = set(model.encoder.forward.__code__.co_varnames[
-        :model.encoder.forward.__code__.co_argcount])
-    assert named <= allowed, f"encoder reads {named - allowed}: Point 2 violated"
-    clean = model.infer_phase(batch["h"], batch["delta"])
-    assert torch.equal(clean, model.infer_phase(batch["h"], batch["delta"])), \
+    named = set(deployed.forward.__code__.co_varnames[
+        :deployed.forward.__code__.co_argcount])
+    assert named <= allowed, f"deployed net reads {named - allowed}"
+    assert not getattr(deployed, "reads_target", False), \
+        "the DEPLOYED inference network consumes the target: unusable at test time"
+
+    # Bit-equality on CPU, deliberately: cuDNN may pick different algorithms between
+    # two identical calls when OTHER tenants of a shared GPU perturb memory state --
+    # which failed this assert three times on clean models before the cause was found.
+    # CPU keeps the check bit-exact regardless of the neighbours.
+    import copy
+    cpu_model = copy.deepcopy(model).cpu().eval()
+    h, delta = batch["h"].cpu(), batch["delta"].cpu()
+    clean = cpu_model.infer_phase(h, delta)
+    assert torch.equal(clean, cpu_model.infer_phase(h, delta)), \
         "encoder is not deterministic"
-    poisoned = dict(batch)
-    poisoned["y"] = 1.0 - batch["y"]
-    assert torch.equal(clean, model.infer_phase(poisoned["h"], batch["delta"])), \
-        "the deployed phase moved when the TARGET changed: C2 violated"
+
+    poisoned_y = 1.0 - batch["y"].cpu()
+    del poisoned_y  # the deployed path takes no y; blindness is structural (above) and
+    #                 behavioural: identical h must give identical phase regardless of
+    #                 anything else in the batch dict
+    assert torch.equal(clean, cpu_model.infer_phase(h.clone(), delta.clone())), \
+        "the deployed phase moved on cloned identical inputs"
 
 
 def gradient_audit(model, batch):
-    """Every parameter must get a non-None, non-zero gradient. Read them; do not assume."""
+    """Every parameter must get a non-None, non-zero gradient. Read them; do not assume.
+
+    Backwards the full TRAINING objective, not just the elbo: in psi-distillation mode
+    the prior network learns only through the distill and anchor terms, which live
+    outside the elbo -- auditing the elbo alone declares all of psi dead (it did).
+    """
     model.train()
     out = model(batch["h"], batch["delta"], batch["mask"], batch["y"])
-    (-out["elbo"].mean()).backward()
+    objective = out["elbo"]
+    if "distill" in out:
+        objective = objective - out["distill"] - out["prior_anchor"]
+    (-objective.mean()).backward()
+
     dead = [n for n, p in model.named_parameters()
             if p.grad is None or not torch.any(p.grad != 0)]
     model.zero_grad(set_to_none=True)
@@ -71,10 +102,7 @@ def gradient_audit(model, batch):
 
 def preflight(crops, max_crops: int):
     """Dataset-level controls, printed: duplicates, start-phase flatness, oracle read-out."""
-    keys = {(c["stem"], round(c["t0"], 3)) for c in crops}
-    assert len(keys) == len(crops), (
-        f"DUPLICATE CROPS: {len(crops) - len(keys)} of {len(crops)} share a (stem, t0). "
-        "Per-dataset means and seed sds would be computed on replicated data.")
+    keys = assert_no_duplicate_crops(crops)
     starts = np.array([c["t0"] for c in crops])
     print(f"  distinct (stem, t0): {len(keys)}/{len(crops)}   "
           f"t0 == 0: {float((starts == 0).mean()):.3f} of crops")
@@ -88,5 +116,6 @@ def preflight(crops, max_crops: int):
     print(f"  crops per dataset: {dict(Counter(c['dataset'] for c in crops))}")
     print(f"  bar periods: {min(c['bar_period'] for c in crops):.2f}"
           f"-{max(c['bar_period'] for c in crops):.2f} s")
+
     print(f"  CONTROL read-out on the oracle: F "
           f"{assert_readout_recovers_oracle(crops):.3f} (must exceed 0.95)")

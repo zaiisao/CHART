@@ -23,7 +23,7 @@ from typing import Optional
 
 import torch
 
-from frontends import Frontend
+from . import Frontend
 
 
 class BeatThisFrontend(Frontend):

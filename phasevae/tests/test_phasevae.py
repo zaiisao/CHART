@@ -15,15 +15,16 @@ import numpy as np
 import pytest
 import torch
 
-from phasevae import controls as controls_mod
 from phasevae import run as run_mod
-from phasevae.crops import bar_period, build_crop, song_crops, true_phase, MIN_DOWNBEATS
-from phasevae.metrics_db import f_measure, null_times, peak_times
+from phasevae.data.dataset import bar_period, build_crop, song_crops, true_phase, MIN_DOWNBEATS
+from phasevae.scoring.evaluation import f_measure, null_times, peak_times
 from phasevae.model import (BarPhaseVAE, Encoder, KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI,
                             bounded_kappa, downbeat_frames, inverse_softplus,
                             vonmises_entropy)
 
-FPS = 50.0
+from phasevae.data.features import FPS, atomic_save_npy
+
+assert FPS == 50.0, "synthetic fixtures below are built around 50 fps"
 
 # ---------------------------------------------------------------------------- helpers
 
@@ -200,14 +201,17 @@ def test_build_crop_target_widened():
     """
     crop = _oracle_crop(period=2.0, lo_t=3.0)
     y = crop["y"]
+
     for t in crop["downbeat_times"]:
         centre = int(round(t * FPS)) - int(round(3.0 * FPS))
         if centre >= len(y):        # the boundary downbeat at exactly hi_t
             continue
         assert y[centre] == 1.0
         assert y[max(0, centre - 1)] == 1.0 and y[min(len(y) - 1, centre + 1)] == 1.0
+
     # a frame far from any downbeat is 0
     assert y[centre - 25] == 0.0
+
     # widening is tight: 2 frames away from a mid-crop downbeat is 0
     mid = int(round(crop["downbeat_times"][2] * FPS)) - int(round(3.0 * FPS))
     assert y[mid + 2] == 0.0 and y[mid - 2] == 0.0
@@ -260,6 +264,7 @@ def test_true_phase_invalid_outside_annotated_span():
     downbeats = np.arange(10.0, 40.0, 2.0)
     crop = build_crop(features, downbeats, 5.0, FPS, 40.0)
     assert crop is not None
+
     phase, valid = true_phase(crop)
     assert not valid[0]                       # 5.0 s < first downbeat 10.0 s
     assert not valid[-1]                      # 45.0 s > last downbeat 38.0 s
@@ -313,6 +318,7 @@ def test_bounded_kappa_identity_and_bound():
     """
     small = torch.tensor([1.0, 100.0, 2000.0], dtype=torch.float64)
     assert torch.allclose(bounded_kappa(small), small, rtol=1e-3)
+
     big = bounded_kappa(torch.tensor([1e6, 1e7], dtype=torch.float64))
     # mathematically tanh < 1 always; in floats tanh saturates to exactly 1.0 once
     # 1 - tanh underflows (raw >~ 19*MAX), so assert strictness where representable
@@ -398,18 +404,15 @@ def test_encoder_free_mode_per_frame_unconstrained():
 
 
 def test_encoder_target_blind():
-    """Point 2: the encoder reads AUDIO ONLY. Its signature admits nothing but h and
-    delta, and its output is a deterministic function of them (bit-identical repeat).
+    """Point 2: the base encoder reads AUDIO ONLY -- structurally. Its forward
+    has no target parameter at all (the psi variant's posterior subclass adds one),
+    so target-blindness is a property of the signature, not a flag to keep off.
     """
     _seed()
     enc = Encoder(input_dim=4, hidden=8)
-    code = enc.forward.__code__
-    named = set(code.co_varnames[:code.co_argcount])
-    assert named <= {"self", "h", "delta"}
-    h = torch.randn(1, 10, 4)
-    mu1, k1 = enc(h)
-    mu2, k2 = enc(h)
-    assert torch.equal(mu1, mu2) and torch.equal(k1, k2)
+    named = enc.forward.__code__.co_varnames[:enc.forward.__code__.co_argcount]
+    assert "y" not in named
+    assert not getattr(enc, "reads_target", False)
 
 
 def test_emission_logits_cosine_shape():
@@ -419,14 +422,17 @@ def test_emission_logits_cosine_shape():
     _seed()
     model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
     phi = torch.linspace(-math.pi, math.pi, 101)[None]
+
     logits = model.emission_logits(phi)[0]
     peak = model.emission_logits(torch.zeros(1, 1))[0, 0]
     trough = model.emission_logits(torch.full((1, 1), math.pi))[0, 0]
     assert torch.all(logits <= peak + 1e-6)
     assert torch.all(logits >= trough - 1e-6)
+
     a, b = model.emission_a.item(), model.emission_b.item()
     assert peak.item() == pytest.approx(a + b, abs=1e-5)
     assert trough.item() == pytest.approx(a - b, abs=1e-5)
+
     sym = model.emission_logits(-phi)[0]
     assert torch.allclose(logits, sym, atol=1e-6)
     period = model.emission_logits(phi + TWO_PI)[0]
@@ -443,12 +449,15 @@ def test_emission_logits_triangle_shape():
 
     def at(p):
         return model.emission_logits(torch.tensor([[p]]))[0, 0].item()
+
     assert at(0.0) == pytest.approx(a + b, abs=1e-5)
     assert at(math.pi) == pytest.approx(a - b, abs=1e-4)
+
     # linearity: value at phi is a + b*(1 - 2 phi/pi) for phi in (0, pi)
     for p in (0.3, 1.0, 2.5):
         assert at(p) == pytest.approx(a + b * (1 - 2 * p / math.pi), abs=1e-4)
         assert at(-p) == pytest.approx(at(p), abs=1e-6)          # symmetry
+
     # continuity at the wrap: pi - eps and pi + eps (== -pi + eps) agree
     eps = 1e-3
     assert at(math.pi - eps) == pytest.approx(at(math.pi + eps), abs=5e-3)
@@ -464,6 +473,7 @@ def test_emission_b_floor_semantics():
     assert model.emission_b_floor == 0.0
     sp = torch.nn.functional.softplus(model.emission_b_raw).item()
     assert model.emission_b.item() == pytest.approx(sp)
+
     model.emission_b_floor.fill_(5.0)   # a BUFFER: mutate in place, never rebind
     assert model.emission_b.item() == pytest.approx(5.0 + sp)
     assert model.emission_b.item() >= 5.0
@@ -526,6 +536,7 @@ def test_kl_to_physical_prior_analytic_two_frame():
     cross = (KAPPA_PHYSICAL * A(800.0) * A(1200.0) * math.cos(0.5 - 0.3 - 0.06)
              - math.log(TWO_PI) - log_i0_p)
     expected = -(h1 + h2) - (-math.log(TWO_PI) + cross)
+
     # tolerance limited by scipy's own vonmises.entropy precision at large kappa
     assert got == pytest.approx(expected, abs=1e-3)
 
@@ -555,6 +566,7 @@ def test_forward_elbo_identity_and_unweighted_recon(monkeypatch):
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
     model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+
     B, T = 2, 12
     h = torch.randn(B, T, 4)
     delta = torch.full((B, T), 0.06)
@@ -563,8 +575,10 @@ def test_forward_elbo_identity_and_unweighted_recon(monkeypatch):
     y = torch.zeros(B, T)
     y[0, 3] = 1.0
     y[1, 5] = 1.0
+
     out = model(h, delta, mask, y, samples=1, pos_weight=1.0)
     assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
+
     with torch.no_grad():
         logits = model.emission_logits(out["mu"])
         ll = (y * torch.nn.functional.logsigmoid(logits)
@@ -581,14 +595,17 @@ def test_forward_pos_weight_scales_positive_frames(monkeypatch):
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
     model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+
     B, T = 1, 10
     h = torch.randn(B, T, 4)
     delta = torch.full((B, T), 0.06)
     mask = torch.ones(B, T)
     y = torch.zeros(B, T)
     y[0, 4] = 1.0
+
     out1 = model(h, delta, mask, y, pos_weight=1.0)
     out3 = model(h, delta, mask, y, pos_weight=3.0)
+
     with torch.no_grad():
         logits = model.emission_logits(out1["mu"])
         pos_ll = torch.nn.functional.logsigmoid(logits[0, 4])
@@ -639,6 +656,7 @@ def test_infer_phase_requires_eval_mode():
     model.train()
     with pytest.raises(AssertionError):
         model.infer_phase(torch.randn(1, 5, 4))
+
     model.eval()
     out = model.infer_phase(torch.randn(1, 5, 4))
     assert out.shape == (1, 5)
@@ -681,8 +699,10 @@ def test_collate_padding_mask_dtype_delta():
     """
     batch = _tiny_crops()
     out = _pin_or_skip(run_mod.collate, batch)
+
     length = max(len(c["y"]) for c in batch)
     assert out["h"].shape == (4, length, 3) and out["h"].dtype == torch.float16
+
     for i, crop in enumerate(batch):
         t = len(crop["y"])
         assert out["mask"][i].sum().item() == t
@@ -736,7 +756,10 @@ def test_readout_oracle_control_raises_on_broken_readout(monkeypatch):
     """
     def broken(mu, mask=None):
         return torch.diff(mu, dim=-1) < -math.pi
-    monkeypatch.setattr(controls_mod, "downbeat_frames", broken)
+    # the wraps-to-times conversion has ONE home (evaluation.rule_g_times); breaking
+    # the read-out there breaks every scorer at once, and the control must notice
+    from phasevae.scoring import evaluation as evaluation_mod
+    monkeypatch.setattr(evaluation_mod, "downbeat_frames", broken)
     crops = [_oracle_crop(period=2.0, lo_t=lo) for lo in (3.0, 5.0, 8.0)]
     with pytest.raises(AssertionError, match="READ-OUT BROKEN"):
         run_mod.assert_readout_recovers_oracle(crops)
@@ -760,6 +783,7 @@ def test_target_blindness_control_detects_leak():
         calls["n"] += 1
         return real(h, delta) + (0.1 if calls["n"] > 2 else 0.0)
     leaky.infer_phase = cheating
+
     with pytest.raises(AssertionError):
         run_mod.assert_encoder_is_target_blind(leaky, batch)
 
@@ -768,13 +792,10 @@ def test_target_blindness_control_detects_leak():
 
 
 def _cache_write(group_dir: pathlib.Path, stem: str, features: np.ndarray):
-    """Replicates vbpm.data.iter_frontend_features' write-then-rename block verbatim."""
+    """Exercises vbpm.data.atomic_save_npy, the single write-then-rename authority."""
     cache_path = group_dir / f"{stem}.npy"
     group_dir.mkdir(parents=True, exist_ok=True)
-    partial = cache_path.with_suffix(".npy.partial")
-    with open(partial, "wb") as fh:
-        np.save(fh, features.astype(np.float32))
-    partial.replace(cache_path)
+    atomic_save_npy(cache_path, features)
     return cache_path
 
 

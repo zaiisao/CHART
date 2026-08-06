@@ -8,7 +8,7 @@ and every number taken through it was worthless. Three independent checks:
 plus a finite-difference check that d E[cos x] / d kappa flows (the sample is
 reparameterised, not detached).
 
-Run: PYTHONPATH=. python -m phasevae.check_sampler
+Run: PYTHONPATH=. python -m phasevae.checks.sampler
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from scipy import stats
 
-from .vonmises import mean_resultant, sample_vonmises
+from ..vonmises import mean_resultant, sample_vonmises
 
 KAPPAS = (0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 100.0, 2000.0, 10000.0)
 
@@ -25,6 +25,7 @@ def check(n: int = 200_000, seed: int = 0) -> list[dict]:
     """Sample at each kappa and compare to scipy/analytic. Returns one row per kappa."""
     torch.manual_seed(seed)
     rows = []
+
     for kappa in KAPPAS:
         k = torch.full((n,), kappa, dtype=torch.float64)
         x = sample_vonmises(k).numpy()
@@ -47,6 +48,7 @@ def check_gradient(kappa: float = 3.0, n: int = 400_000) -> tuple[float, float]:
     k = torch.full((n,), kappa, dtype=torch.float64, requires_grad=True)
     torch.cos(sample_vonmises(k)).mean().backward()
     pathwise = float(k.grad.sum())
+
     eps = 1e-3
     lo = float(mean_resultant(torch.tensor(kappa - eps, dtype=torch.float64)))
     hi = float(mean_resultant(torch.tensor(kappa + eps, dtype=torch.float64)))
@@ -61,13 +63,16 @@ def main() -> None:
     print(" ".join(f"{h:>14s}" for h in header))
     for row in rows:
         print(" ".join(f"{row[h]:>14.6f}" for h in header))
+
     worst = max(r["abs err"] for r in rows)
     worst_ks = max(r["KS D"] for r in rows)
     min_p = min(r["KS p"] for r in rows)
     print(f"\nworst |E[cos] - A(kappa)| = {worst:.2e}   worst KS D = {worst_ks:.4f} "
           f"(min p = {min_p:.3f})")
+
     pathwise, finite = check_gradient()
     print(f"d E[cos]/d kappa: pathwise {pathwise:.5f} vs finite-difference {finite:.5f}")
+
     assert worst < 5e-3, "sampler does not match A(kappa)"
     assert min_p > 1e-3, "sampler distribution differs from scipy (KS)"
     print("\nSAMPLER OK")
