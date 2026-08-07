@@ -1,7 +1,7 @@
 """Train and evaluate the bar-phase VAE: one continuous latent, no meter, no beat grid.
 
 The latent is a phase turning once per bar; the bar PERIOD is given (one constant per
-crop, from annotations) and the model finds the bar's PHASE from audio.
+window, from annotations) and the model finds the bar's PHASE from audio.
 
 The RECIPE (model + training) lives in a YAML config; the CLI carries only run
 mechanics (device, seeds, paths). The config's ``variant:`` key names the hooks
@@ -10,6 +10,18 @@ conditional prior) and is itself just the default variant. run.py drives whichev
 module is named through five hooks (build_model / optimizer / objective / on_epoch /
 epoch_note) and never branches on which one it is: a new variant is a new module and
 a new config, never a flag here.
+
+DATA (2026-08-07): Beat This-style excerpts over the plug-and-play Frontend contract.
+Each song's model INPUT (the frontend's frozen preprocessing, e.g. its log-mel) is
+cached once per frontend; every epoch draws a FRESH random window per song; the frozen
+frontend turns windows into features INSIDE the training loop -- features never touch
+disk. The config's ``frontend:``/``frontend_checkpoint:`` keys pick the frontend
+(default beat_this/final0); ONE checkpoint serves train/val/test alike: fold-honesty
+is phase-gated
+(gtzan was held out of EVERY checkpoint, so the decision metric stays clean; CV-dataset
+train/val scores are optimistic diagnostics; 8-fold routing returns before any
+baseline-comparable claim). Val/gtzan are scored through the existing certified path
+via materialize_crops.
 
 Usage:
     PYTHONPATH=. python -m phasevae.run --config phasevae/configs/baseline.yaml --gpu 1
@@ -28,16 +40,13 @@ import numpy as np
 import torch
 import yaml
 
-from .data.features import FPS
-
 from .scoring.controls import (assert_encoder_is_target_blind,  # noqa: F401  (re-export)
                                assert_readout_recovers_oracle, gradient_audit,
                                preflight)
 from .scoring.evaluation import evaluate, print_table
-from .data.dataset import (MAX_CROP_SECONDS, MAX_CROPS,        # noqa: F401  (re-export)
-                           MIN_CROP_SECONDS, VAL_FOLD, Batches, collate,
-                           load_dataset, load_gtzan_through, load_or_build,
-                           split_folds, to_device)
+from .data.dataset import split_songs
+from .data.excerpts import (ExcerptDataset, collate_excerpts, materialize_crops,
+                            warm_input_cache)
 
 # Every config key the MAINLINE understands, with its default. Variant-specific keys
 # live in the variant module's own DEFAULTS; anything else in a config is an error.
@@ -59,6 +68,11 @@ COMMON = dict(
     beta_warmup=4,                # epochs to ramp beta; 0 disables annealing
     emission_sharpness=0.0,       # scheduled floor on emission amplitude b; 0 = free
     sharpness_warmup=30,
+    excerpt_seconds=45.0,         # window length; below ~45 s the ELBO cannot separate
+                                  # tracking the truth from coasting (see MAX_CROP_SECONDS)
+    frontend="beat_this",         # frontends.<name> module; the frontend is part of the
+    frontend_checkpoint="final0",  # model (see phasevae-checkpoint-artifact). final0 is
+                                  # Beat This's; beat_transformer wants e.g. fold_0.
 )
 
 
@@ -85,14 +99,44 @@ def beta_at(epoch: int, cfg) -> float:
     return cfg.beta_start + fraction * (cfg.beta_end - cfg.beta_start)
 
 
-def train(crops, device, cfg, hooks, seed: int):
-    """One seed: run the controls, then fit the objective the hooks define."""
-    torch.manual_seed(seed)
-    rng = np.random.default_rng(seed)
-    model = hooks.build_model(cfg, crops[0]["h"].shape[1]).to(device)
+def _seed_worker(_worker_id: int) -> None:
+    """Reseed np.random per DataLoader worker.
 
-    loader = Batches(crops, cfg.batch_size, device)
-    _raw, probe = next(iter(loader()))
+    Fork copies ONE numpy state into every worker, which would otherwise make them all
+    draw IDENTICAL windows.
+    """
+    np.random.seed(torch.initial_seed() % 2**32)
+
+
+def to_model_batch(batch: dict, frontend, device) -> dict:
+    """Collated excerpt batch -> the model's (h, delta, mask, y) contract.
+
+    The frozen frontend runs here, inside the loop; ``.clone()`` lifts the features out
+    of inference mode so autograd may save them for the VAE's backward. delta broadcasts
+    to per-frame [B, T] -- one constant per window, see bar_period for why.
+    """
+    h = frontend.forward_features(batch["input"]).clone()
+    return {"h": h,
+            "delta": batch["delta"].to(device)[:, None].expand(-1, h.shape[1]),
+            "mask": batch["mask"].to(device, non_blocking=True),
+            "y": batch["y"].to(device, non_blocking=True)}
+
+
+def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
+    """One seed: run the controls, then fit the objective the hooks define.
+
+    Windows come fresh from the DataLoader every epoch; the frontend is frozen, so its
+    forward runs under no_grad and only the VAE trains.
+    """
+    torch.manual_seed(seed)
+    model = hooks.build_model(cfg, frontend.num_channels).to(device)
+
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=workers,
+        collate_fn=collate_excerpts, pin_memory=True, worker_init_fn=_seed_worker,
+        persistent_workers=workers > 0,
+        generator=torch.Generator().manual_seed(seed))
+    probe = to_model_batch(next(iter(loader)), frontend, device)
 
     dead = gradient_audit(model, probe)
     print(f"  CONTROL gradient audit: {len(dead)} dead parameters"
@@ -112,12 +156,14 @@ def train(crops, device, cfg, hooks, seed: int):
         hooks.on_epoch(model, cfg, epoch)
 
         totals, steps = np.zeros(3), 0
-        for _raw, batch in loader(shuffle=True, rng=rng):
+        for raw in loader:
+            batch = to_model_batch(raw, frontend, device)
             out = model(batch["h"], batch["delta"], batch["mask"], batch["y"],
                         samples=cfg.samples, pos_weight=cfg.pos_weight)
 
-            # per-frame normalisation and beta-annealed loss; reported elbo is beta=1
-            frames = batch["mask"].sum(1)
+            # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
+            # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.
+            frames = batch["mask"].sum(1).clamp(min=1.0)
             loss = -(hooks.objective(out, beta, cfg) / frames).mean()
 
             opt.zero_grad()
@@ -149,39 +195,44 @@ def parse_args():
     p.add_argument("--gpu", type=int, default=1, choices=(1, 3))
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--limit-per-fold", type=int, default=None)
+    p.add_argument("--workers", type=int, default=4,
+                   help="DataLoader workers (window draws + mmap reads)")
     p.add_argument("--save-dir", default=None,
                    help="save each seed's model to <save-dir>/seed<k>.pt")
-    p.add_argument("--gtzan-checkpoint", default=None,
-                   help="rebuild gtzan crops through this fold checkpoint (not final0)")
-    p.add_argument("--crop-cache", default=None)
     return p.parse_args()
 
 
 def main() -> None:
-    """Load crops, run the controls, train every seed, print the per-dataset table."""
+    """Catalog, warm the input cache, train every seed, print the per-dataset table."""
     args = parse_args()
     cfg, hooks = load_config(args.config, args.set)
     device = torch.device(f"cuda:{args.gpu}")
     print(f"config {args.config}  ->  {vars(cfg)}", flush=True)
 
-    print("loading crops (fold-honest features, random time windows)...", flush=True)
-    crops, rejects = load_or_build(args.crop_cache, args.limit_per_fold)
-    print(f"\ncrops: {len(crops)}   rejects: {dict(rejects)}")
+    train_songs, val_songs, test_songs = split_songs(args.limit_per_fold)
+    frontend_class = importlib.import_module(
+        f"phasevae.data.frontends.{cfg.frontend}").FRONTEND
+    frontend = frontend_class(checkpoint=cfg.frontend_checkpoint,
+                              device=f"cuda:{args.gpu}", output="features+activations")
+    cached, failed = warm_input_cache(train_songs + val_songs + test_songs, frontend)
 
-    preflight(crops, MAX_CROPS)
+    train_set = ExcerptDataset(train_songs, frontend, cfg.excerpt_seconds)
+    val_set = ExcerptDataset(val_songs, frontend, cfg.excerpt_seconds, deterministic=True)
+    test_set = ExcerptDataset(test_songs, frontend, cfg.excerpt_seconds, deterministic=True)
+    val_crops = materialize_crops(val_set, frontend)
+    test_crops = materialize_crops(test_set, frontend)
 
-    train_crops, val_crops, test_crops = split_folds(crops)
-    if args.gtzan_checkpoint:
-        test_crops, gt_rejects = load_gtzan_through(args.gtzan_checkpoint)
-        print(f"  gtzan rebuilt through {args.gtzan_checkpoint}: {len(test_crops)} "
-              f"crops, rejects {dict(gt_rejects)}")
-    print(f"\ntrain {len(train_crops)} / val {len(val_crops)} / "
-          f"gtzan-test {len(test_crops)}")
+    print(f"songs: train {len(train_songs)} / val {len(val_songs)} / "
+          f"gtzan-test {len(test_songs)}   cache {cached} ready"
+          + (f", {len(failed)} FAILED" if failed else ""))
+    print(f"train: {len(train_set)} songs, fresh {cfg.excerpt_seconds:.0f}s window "
+          f"per epoch, rejects {len(train_set.rejects)}")
+    preflight(val_crops + test_crops)
 
     per_seed: dict = defaultdict(dict)
     for seed in args.seeds:
         print(f"\n===== seed {seed} =====", flush=True)
-        model = train(train_crops, device, cfg, hooks, seed)
+        model = train(train_set, frontend, device, cfg, hooks, seed, args.workers)
         if args.save_dir:
             save_dir = pathlib.Path(args.save_dir)
             save_dir.mkdir(parents=True, exist_ok=True)
@@ -196,7 +247,8 @@ def main() -> None:
                     per_seed[(name, dataset, mode)][seed] = (value, count)
 
     print_table(per_seed)
-    print(f"\nfps={FPS}  crop={MIN_CROP_SECONDS}-{MAX_CROP_SECONDS}s (per song)  "
+    print(f"\nfps={frontend.FPS}  excerpt={cfg.excerpt_seconds}s (fresh window per epoch)  "
+          f"frontend={frontend.name}/{cfg.frontend_checkpoint}  "
           f"no meter, no beat grid, no offset")
 
 

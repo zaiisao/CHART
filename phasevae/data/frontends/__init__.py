@@ -1,11 +1,12 @@
 """Feature extractors (frontends): audio -> [num_frames, num_channels] activations/features.
 
-One script per frontend (beat_this.py, later mert.py, ...). A frontend wraps the official upstream
-model behind a small property surface -- WHAT it emits (`fps`, `output`, `ACTIVATION_FORM`) and HOW
-to get it (`get_features(signal, sample_rate) -> [num_frames, num_channels]` -- frontends are
-feature extractors, and the [T, 2] activations are just the most compressed feature). Selecting a
-frontend by name (build_frontend) and pairing it with a bar-pointer model is tracker.py's job, one
-level up -- this package only defines the interface and its implementations.
+One script per frontend (beat_this.py, beat_transformer.py, later mert.py, ...). A frontend wraps
+the official upstream model behind a small property surface -- WHAT it emits (`fps`, `output`,
+`ACTIVATION_FORM`) and HOW to get it (`get_features(signal, sample_rate) ->
+[num_frames, num_channels]` -- frontends are feature extractors, and the [T, 2] activations are
+just the most compressed feature). Each module declares its class as ``FRONTEND``, so callers
+select one by module name exactly the way run.py selects a variant:
+``importlib.import_module(f"phasevae.data.frontends.{name}").FRONTEND``.
 
 Output modes: a frontend can usually emit at more than one depth of its network. The classic cut is
 the FINAL layer -- [T, 2] (beat, downbeat) activations, what the HMM-family rungs consume -- vs the
@@ -22,14 +23,30 @@ not in YAML, until we have enough frontends to need config files again.
 
 
 class Frontend:
-    """Interface. A frontend turns audio into [num_frames, num_channels] in its output mode."""
+    """Interface. A frontend turns audio into [num_frames, num_channels] in its output mode.
+
+    Two routes to the same channels, and both are part of the contract:
+
+      * ``get_features(signal, sample_rate)`` -- audio in, features out, one song at a
+        time. The certified single-song path (feature caches, eval, demos).
+      * ``prepare_input`` + ``forward_features`` -- the TRAINING-LOOP factorization.
+        ``prepare_input`` is the frontend's frozen, checkpoint-independent preprocessing
+        (its mel recipe, its demixing, whatever it demands), returning a TIME-FIRST
+        array at the frontend's FPS that the excerpt dataset caches per song and slices windows
+        from; ``forward_features`` is the frozen model forward over a BATCH of such
+        windows. Everything frontend-specific -- axis layout, sample rate, chunking
+        limits, subprocess demixing -- lives inside the frontend class, so the dataset
+        and training loop never branch on which frontend they hold.
+    """
 
     OUTPUT_MODES: dict = {"activations": 2}
     ACTIVATION_FORM: str = "probability"
     BOUNDING: str = "clip"
+    FPS: float                 # the frame rate this frontend's output ticks at -- fixed
+                               # by its STFT hop, not chosen. Everything downstream
+                               # (targets, scoring) reads THIS; there is no global grid.
 
     output: str = "activations"
-    fps: float
 
     @property
     def name(self) -> str:
@@ -58,4 +75,23 @@ class Frontend:
 
     def get_features(self, signal, sample_rate: int):
         """[num_samples] mono audio -> [num_frames, num_channels] in the instance's output mode."""
+        raise NotImplementedError
+
+    def prepare_input(self, signal, sample_rate: int):
+        """[num_samples] mono audio -> np.float32 model input, TIME-FIRST at self.FPS.
+
+        The frozen preprocessing this frontend demands of its input (log-mel spectrogram,
+        demixed mel stack, ...). Checkpoint-INDEPENDENT by contract: this is what the
+        excerpt dataset caches per song -- cache what is model-free, run the model live.
+        Axis 0 is time so the dataset can slice windows without knowing the layout.
+        """
+        raise NotImplementedError
+
+    def forward_features(self, batch):
+        """[B, T, ...] batched ``prepare_input`` windows -> [B, T, num_channels].
+
+        The frozen model forward in the instance's output mode. Frontend-specific
+        demands (chunk-size limits, axis permutations, autocast) are handled HERE,
+        inside the class -- callers hand over windows and get channels back.
+        """
         raise NotImplementedError

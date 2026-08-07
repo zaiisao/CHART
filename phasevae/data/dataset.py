@@ -36,7 +36,8 @@ import pathlib
 import pickle
 import torch
 
-from .features import FPS, iter_frontend_features
+from .features import FEATURE_CACHE_DIR, FPS, atomic_save_npy, compute_features
+from .songs import ANNOTATIONS_ROOT, AUDIO_BY_STEM, Song
 from collections import Counter
 
 MAX_CROP_SECONDS = 45.0  # MEASURED, not chosen. Scoring the true phase trajectory against
@@ -128,7 +129,7 @@ def build_crop(features, downbeat_times, lo_t: float, fps: float = FPS,
     return {"h": h, "delta": float(2.0 * np.pi / (period * fps)), "y": y,
             "downbeat_times": np.asarray(inside, dtype=np.float64),
             "anchors": np.asarray(anchors, dtype=np.float64), "t0": float(lo_t),
-            "bar_period": period}
+            "bar_period": period, "fps": float(fps)}
 
 
 def song_crops(features, song, rng, max_crops: int = 3, fps: float = FPS,
@@ -175,7 +176,7 @@ def song_crops(features, song, rng, max_crops: int = 3, fps: float = FPS,
         if crop is None:
             rejects["window_has_too_few_downbeats"] += 1
             continue
-        crop.update(dataset=song.dataset, stem=song.stem)
+        crop.update(dataset=song.dataset, stem=song.stem, fold=song.fold)
         crops.append(crop)
 
     if not crops:
@@ -183,15 +184,16 @@ def song_crops(features, song, rng, max_crops: int = 3, fps: float = FPS,
     return crops, rejects
 
 
-def true_phase(crop, fps: float = FPS):
+def true_phase(crop):
     """(phase [T], valid [T]) -- the true bar phase per frame. SCORING ONLY.
 
     Linear interpolation between consecutive annotated downbeats, so phase is exactly 0 at
     each one and 2*pi just before the next. Frames outside the annotated span are marked
     invalid rather than extrapolated. Nothing on the deployable path may read this.
+    The frame grid comes from the crop itself (``fps`` key) -- there is no global grid.
     """
     n = len(crop["y"])
-    times = crop["t0"] + np.arange(n) / fps
+    times = crop["t0"] + np.arange(n) / crop["fps"]
     downbeats = crop["anchors"]
     turns = 2.0 * np.pi * np.arange(len(downbeats))
     phase = np.interp(times, downbeats, turns, left=np.nan, right=np.nan)
@@ -204,18 +206,115 @@ MAX_CROPS = 3         # per song; a SAMPLING cap, not a filter
 VAL_FOLD = 7
 
 
-def load_dataset(seed: int = 0, limit_per_fold=None, verbose: bool = True):
-    """(crops, rejects) for every song whose fold-honest features are available."""
+def load_catalog(datasets=None) -> dict:
+    """The song catalog, grouped by CV fold (fold -> [Song]).
+
+    Every song with BOTH a .beats annotation and an audio link. Links are named by
+    annotation stem (built and VERIFIED by unify_audio_layout.py) so the lookup is
+    exact -- no name matching here. A dataset with no audio is silently absent;
+    songs.coverage_report() shows it. fold None = the test-only/gtzan group, held out
+    of EVERY checkpoint.
+    """
+    songs_by_fold: dict = {}
+    for dataset_dir in sorted(ANNOTATIONS_ROOT.iterdir()):
+        dataset = dataset_dir.name
+        if datasets is not None and dataset not in datasets:
+            continue
+        beats_dir = dataset_dir / "annotations" / "beats"
+        audio_dir = AUDIO_BY_STEM / dataset
+        if not beats_dir.is_dir() or not audio_dir.is_dir():
+            continue
+        audio_by_stem = {p.stem: p for p in audio_dir.iterdir()}
+        split_file = dataset_dir / "8-folds.split"
+        if split_file.exists():
+            entries = [line.split("\t") for line in split_file.read_text().splitlines()]
+        else:
+            # No CV split = a test-only dataset in the Beat This protocol (gtzan).
+            entries = [(p.stem, None) for p in sorted(beats_dir.glob("*.beats"))]
+        for stem, fold in entries:
+            audio_path = audio_by_stem.get(stem)
+            if audio_path is not None and (beats_dir / f"{stem}.beats").exists():
+                fold = int(fold) if fold is not None else None
+                songs_by_fold.setdefault(fold, []).append(
+                    Song(stem, dataset, fold, audio_path, beats_dir / f"{stem}.beats"))
+    return songs_by_fold
+
+
+def load_dataset(seed: int = 0, limit_per_fold=None, datasets=None,
+                 override_checkpoint: str | None = None):
+    """(crops, rejects) for every song, each through the checkpoint that held it out.
+
+    THE frontend pass — checkpoint routing is where fold-honesty lives, so it exists
+    exactly once, here. Features are memoized under FEATURE_CACHE_DIR; the memo-cache
+    is re-certified every run by the per-group drift probe below.
+
+    ``override_checkpoint`` forces EVERY song through one named checkpoint. For gtzan
+    (no checkpoint trained on it) that is still fold-honest — see load_gtzan_through;
+    for any song whose checkpoint trained on it, the output is a diagnostic about the
+    FEATURES and must never be reported as a fold-honest score.
+    """
+    from .frontends.beat_this import BeatThisFrontend
+
     rng = np.random.default_rng(seed)
     crops, rejects = [], Counter()
-    for song, features in iter_frontend_features(limit_per_fold=limit_per_fold,
-                                                 output="features+activations",
-                                                 verbose=verbose):
-        got, rej = song_crops(features, song, rng, MAX_CROPS)
-        for crop in got:
-            crop["fold"] = song.fold
-        crops += got
-        rejects.update(rej)
+    songs_by_fold = load_catalog(datasets)
+
+    fold_order = sorted(fold for fold in songs_by_fold if fold is not None)
+    if None in songs_by_fold:
+        fold_order.append(None)           # the fold-None/test group (gtzan) runs last
+
+    for fold in fold_order:
+        songs = songs_by_fold[fold]
+        if limit_per_fold is not None:
+            songs = songs[:limit_per_fold]
+
+        # Fold-honesty itself: this fold's songs go through the Beat This checkpoint
+        # that HELD THEM OUT of its training ("final0" for the fold-None test group,
+        # which no fold checkpoint trained on) -- unless the caller forces one.
+        checkpoint = override_checkpoint or ("final0" if fold is None else f"fold{fold}")
+
+        # song.stem names each song's cache file, so a repeated stem would silently
+        # serve one song's features as another's.
+        stems = [song.stem for song in songs]
+        assert len(set(stems)) == len(stems), \
+            f"{checkpoint}: duplicate song stems in this group"
+        group_dir = pathlib.Path(FEATURE_CACHE_DIR) / checkpoint / "features_activations"
+
+        frontend = BeatThisFrontend(checkpoint=checkpoint, device="cuda",
+                                    output="features+activations")
+        assert frontend.FPS == FPS, \
+            f"frontend fps {frontend.FPS} != phasevae.features.FPS {FPS}"
+
+        served_from_cache = []
+        for song in songs:
+            cache_path = group_dir / f"{song.stem}.npy"
+            if cache_path.exists():
+                features = np.load(cache_path)
+                served_from_cache.append(song)
+            else:
+                features = compute_features(frontend, song)
+                group_dir.mkdir(parents=True, exist_ok=True)
+                atomic_save_npy(cache_path, features)
+
+            got, rej = song_crops(features, song, rng, MAX_CROPS)
+            crops += got
+            rejects.update(rej)
+
+        if served_from_cache:
+            # re-earn trust: one cached song per group is recomputed live and compared
+            probe = served_from_cache[0]
+            live = compute_features(frontend, probe)
+            cached = np.load(group_dir / f"{probe.stem}.npy")
+            drift = float(np.max(np.abs(live.astype(np.float64)
+                                        - cached.astype(np.float64))))
+            assert drift < 1e-3, (
+                f"feature cache DRIFT on {probe.stem} ({checkpoint}): "
+                f"max|live - cached| = {drift:.3e} — delete the cache and recompute")
+
+        del frontend
+        print(f"  {checkpoint}: done ({len(served_from_cache)}/{len(songs)} cached)",
+              flush=True)
+
     return crops, rejects
 
 
@@ -232,6 +331,21 @@ def load_or_build(cache, limit_per_fold):
         with open(cache, "wb") as fh:
             pickle.dump((crops, rejects), fh)
     return crops, rejects
+
+
+def split_songs(limit_per_fold=None):
+    """(train, val, test) Song lists: train folds / fold VAL_FOLD / fold None (gtzan).
+
+    The song-level counterpart of split_folds -- same policy, one owner. limit_per_fold
+    trims each fold for smoke runs.
+    """
+    songs_by_fold = load_catalog()
+    if limit_per_fold is not None:
+        songs_by_fold = {fold: songs[:limit_per_fold]
+                         for fold, songs in songs_by_fold.items()}
+    train = [song for fold, group in songs_by_fold.items()
+             if fold not in (None, VAL_FOLD) for song in group]
+    return train, songs_by_fold.get(VAL_FOLD, []), songs_by_fold.get(None, [])
 
 
 def split_folds(crops):
@@ -252,17 +366,7 @@ def load_gtzan_through(checkpoint: str):
     activation space the encoder never sees in training, which alone cost the supervised
     probe 0.75 -> 0.06.
     """
-    rng = np.random.default_rng(0)
-    crops, rejects = [], Counter()
-    for song, features in iter_frontend_features(datasets=["gtzan"],
-                                                 output="features+activations",
-                                                 override_checkpoint=checkpoint):
-        got, rej = song_crops(features, song, rng, MAX_CROPS)
-        for crop in got:
-            crop["fold"] = song.fold
-        crops += got
-        rejects.update(rej)
-    return crops, rejects
+    return load_dataset(seed=0, datasets=["gtzan"], override_checkpoint=checkpoint)
 
 
 def collate(batch):

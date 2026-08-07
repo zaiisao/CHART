@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from phasevae import run as run_mod
+from phasevae.data import dataset as dataset_mod
 from phasevae.data.dataset import bar_period, build_crop, song_crops, true_phase, MIN_DOWNBEATS
 from phasevae.scoring.evaluation import f_measure, null_times, peak_times
 from phasevae.model import (BarPhaseVAE, Encoder, KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI,
@@ -698,7 +699,7 @@ def test_collate_padding_mask_dtype_delta():
     over its valid frames (0 in the padding).
     """
     batch = _tiny_crops()
-    out = _pin_or_skip(run_mod.collate, batch)
+    out = _pin_or_skip(dataset_mod.collate, batch)
 
     length = max(len(c["y"]) for c in batch)
     assert out["h"].shape == (4, length, 3) and out["h"].dtype == torch.float16
@@ -719,7 +720,7 @@ def test_batches_length_sorted_buckets():
     crop lengths must be non-decreasing, and every crop appears exactly once.
     """
     crops = _tiny_crops()
-    loader = _pin_or_skip(run_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
+    loader = _pin_or_skip(dataset_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
     flat = [c for chunk in loader.chunks for c in chunk]
     lengths = [len(c["y"]) for c in flat]
     assert lengths == sorted(lengths)
@@ -731,7 +732,7 @@ def test_batches_shuffle_permutes_bucket_order_only():
     membership -- 'bucket order, not membership' per the docstring.
     """
     crops = _tiny_crops() * 3   # 12 crops -> 6 buckets of 2
-    loader = _pin_or_skip(run_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
+    loader = _pin_or_skip(dataset_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
     base = [tuple(id(c) for c in chunk) for chunk, _ in loader()]
     rng = np.random.default_rng(0)
     shuffled = [tuple(id(c) for c in chunk) for chunk, _ in loader(shuffle=True, rng=rng)]

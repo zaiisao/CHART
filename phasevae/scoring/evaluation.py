@@ -18,8 +18,6 @@ import mir_eval
 import numpy as np
 import torch
 
-from ..data.features import FPS
-
 from ..data.dataset import Batches
 from ..model import downbeat_frames
 
@@ -94,16 +92,17 @@ def null_times(crop, kind: str, rng):
     return crop["t0"] + offset + np.arange(0.0, max(duration, 0.0), period)
 
 
-def rule_g_times(mu, mask, raw, fps: float = FPS):
+def rule_g_times(mu, mask, raw):
     """Rule-g downbeat TIMES per crop: wrap frames of ``mu`` -> seconds from t0.
 
     THE wraps-to-times conversion. It existed in four hand-rolled copies before
     (evaluation, both check scripts, controls), one of which dropped ``delta`` on the
     way to ``infer_phase`` -- the same bug class the emission-D audit caught. Every
-    scorer now goes through this one.
+    scorer now goes through this one. The frame grid comes from each crop's ``fps``
+    key -- whatever the frontend that made it ticks at.
     """
     wraps = downbeat_frames(mu, mask).cpu().numpy()
-    return [(np.flatnonzero(wraps[i, :len(c["y"]) - 1]) + 1) / fps + c["t0"]
+    return [(np.flatnonzero(wraps[i, :len(c["y"]) - 1]) + 1) / c["fps"] + c["t0"]
             for i, c in enumerate(raw)]
 
 
@@ -163,10 +162,9 @@ def evaluate(model, crops, device, batch_size: int, seed: int = 0):
                 per["rule-g AMLt"].append(amlt)
                 per["est/ref"].append(len(rule_g) / max(len(truth), 1))
 
-                alt_d = peak_times(probs[i, :t], FPS, crop["bar_period"]) + crop["t0"]
+                alt_d = peak_times(probs[i, :t], crop["fps"], crop["bar_period"]) + crop["t0"]
                 per["emission-D"].append(f_measure(alt_d, truth)[0])
 
-                crop["fps"] = FPS
                 for kind in ("random", "zero"):
                     per[f"null-{kind}"].append(
                         f_measure(null_times(crop, kind, rng), truth)[0])

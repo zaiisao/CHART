@@ -100,22 +100,26 @@ def gradient_audit(model, batch):
     return dead
 
 
-def preflight(crops, max_crops: int):
-    """Dataset-level controls, printed: duplicates, start-phase flatness, oracle read-out."""
-    keys = assert_no_duplicate_crops(crops)
+def preflight(crops):
+    """Dataset-level controls, one line each.
+
+    Duplicates (silent unless failing), the two phase-leak tripwires, and the oracle
+    read-out that certifies the scorer itself.
+    """
+    assert_no_duplicate_crops(crops)
+
     starts = np.array([c["t0"] for c in crops])
-    print(f"  distinct (stem, t0): {len(keys)}/{len(crops)}   "
-          f"t0 == 0: {float((starts == 0).mean()):.3f} of crops")
-    print(f"  NOTE {max_crops} crops/song is a sampling cap, not a filter")
+    print(f"  windows: {dict(Counter(c['dataset'] for c in crops))}, "
+          f"bar periods {min(c['bar_period'] for c in crops):.2f}-"
+          f"{max(c['bar_period'] for c in crops):.2f} s, "
+          f"{float((starts == 0).mean()):.0%} starting at t=0 "
+          f"(short songs use the whole song)")
 
     phases = [true_phase(c) for c in crops]
     firsts = np.array([float(p[0]) for p, valid in phases if valid[0]])
     hist, _ = np.histogram(firsts, bins=8, range=(0.0, 2 * np.pi))
-    print(f"\nCONTROL crop-start phase, 8 bins (want flat): {hist.tolist()} "
-          f" n={len(firsts)}")
-    print(f"  crops per dataset: {dict(Counter(c['dataset'] for c in crops))}")
-    print(f"  bar periods: {min(c['bar_period'] for c in crops):.2f}"
-          f"-{max(c['bar_period'] for c in crops):.2f} s")
+    print(f"  CONTROL start-phase spread over 8 bins (a peak = phase leak): "
+          f"{hist.tolist()}  n={len(firsts)}")
 
-    print(f"  CONTROL read-out on the oracle: F "
+    print(f"  CONTROL scorer on the TRUE phase: F "
           f"{assert_readout_recovers_oracle(crops):.3f} (must exceed 0.95)")

@@ -5,10 +5,18 @@ split-predict-aggregate, their checkpoint loading -- rather than re-plumbing the
 the property surface the Tracker needs (fps, ACTIVATION_FORM) and optional resampling of the
 activation grid.
 
+Training-loop factorization (the Frontend data contract):
+  * ``prepare_input`` = their exact log-mel (22050 Hz, n_fft 1024, hop 441, 128 mels,
+    log1p(1000x), Audio2Frames.signal2spect verbatim) -> [T, 128] float32 at 50 fps.
+    Checkpoint-independent, so the excerpt dataset caches ONE copy per song for all folds.
+  * ``forward_features`` = batched frozen forward on mel windows. Their model is trained
+    on 1500-frame chunks and their inference splits longer input at 1500 with 6-frame
+    borders (keep_first) -- windows longer than one chunk get the SAME split-predict-
+    aggregate here, applied batch-wise, because that is this frontend's own demand.
+
 Properties of what this emits:
-  * native grid is EXACTLY 50 fps (22050 Hz audio, hop 441); pass target_fps to linearly
-    interpolate the logits onto another grid (our activation caches historically use
-    86.1328125 = 22050/256, so cached and live activations line up frame for frame).
+  * the grid is EXACTLY 50 fps (22050 Hz audio, hop 441) -- FPS is a fact of the hop,
+    and every consumer reads it off the class rather than assuming it.
   * activations are LOGITS (ACTIVATION_FORM="logit"): Beat This's own DBN path feeds
     sigmoid(logits) to madmom, and the Tracker applies the same conversion where a bar-pointer
     model wants probabilities.
@@ -19,8 +27,6 @@ Checkpoints (all cached locally under ~/.cache/torch/hub/checkpoints/):
   * "fold0".."fold7" -- the Beat This 8-fold protocol. For any number reported on our val folds,
     use the checkpoint whose held-out fold matches; final0 numbers on those songs are leakage.
 """
-from typing import Optional
-
 import torch
 
 from . import Frontend
@@ -37,11 +43,10 @@ class BeatThisFrontend(Frontend):
                                # the official Audio2Beats(dbn=True) (verified 8/8 GTZAN songs);
                                # with "clip" it diverged on 1/8 -- the convention is NOT always
                                # event-neutral, though mean F is identical to 4 decimals.
-    NATIVE_FPS = 50.0
+    FPS = 50.0                 # 22050 Hz / hop 441: a fact of their spectrogram, not a knob
 
     def __init__(self, checkpoint: str = "final0", device: str = "cuda",
-                 target_fps: Optional[float] = None, float16: bool = False,
-                 output: str = "activations"):
+                 float16: bool = False, output: str = "activations"):
         if output not in self.OUTPUT_MODES:
             raise KeyError(f"unknown output mode {output!r} for {self.name} "
                            f"(have: {sorted(self.OUTPUT_MODES)})")
@@ -58,11 +63,10 @@ class BeatThisFrontend(Frontend):
                              "features+activations": transformer_dim + 2}
         self.checkpoint = checkpoint
         self.device = device
-        self.fps = target_fps if target_fps is not None else self.NATIVE_FPS
 
     @torch.no_grad()
     def get_features(self, signal, sample_rate: int) -> torch.Tensor:
-        """[num_samples] mono audio -> [num_frames, num_channels] at self.fps.
+        """[num_samples] mono audio -> [num_frames, num_channels] at FPS (50).
 
         Any sample rate (Beat This resamples internally). Channels: (beat, downbeat)
         LOGITS in "activations" mode, penultimate transformer_blocks features in
@@ -81,12 +85,74 @@ class BeatThisFrontend(Frontend):
                              heads["downbeat"][0, :, None]], dim=-1)          # [T, C+2]
         else:
             out = self._penultimate(signal, sample_rate)                      # [T@50fps, C]
-        if self.fps != self.NATIVE_FPS:
-            num_target = int(round(out.shape[0] * self.fps / self.NATIVE_FPS))
-            out = torch.nn.functional.interpolate(
-                out.t().unsqueeze(0), size=num_target, mode="linear", align_corners=False
-            ).squeeze(0).t()
         return out.cpu()
+
+    def prepare_input(self, signal, sample_rate: int):
+        """[num_samples] mono audio -> [T, 128] float32 log-mel at 50 fps (their recipe)."""
+        import numpy as np
+        spect = self._audio2frames.signal2spect(signal, sample_rate)
+        return np.ascontiguousarray(spect.cpu().numpy(), dtype=np.float32)
+
+    @torch.no_grad()
+    def forward_features(self, batch) -> torch.Tensor:
+        """[B, T, 128] mel windows -> [B, T, num_channels] in the instance's output mode.
+
+        T <= 1500 is one forward; longer runs their split-predict-aggregate (chunk 1500,
+        border 6, keep_first) batch-wise -- window starts depend only on T, so one split
+        serves the whole batch.
+        """
+        batch = batch.to(self.device)
+        num_frames = batch.shape[1]
+        if num_frames <= self._CHUNK_SIZE:
+            return self._head_channels(self._features_forward(batch))
+
+        from beat_this.inference import split_piece
+        _chunks, starts = split_piece(batch[0], self._CHUNK_SIZE,
+                                      border_size=self._BORDER_SIZE, avoid_short_end=True)
+        border, chunk_size = self._BORDER_SIZE, self._CHUNK_SIZE
+        # split_piece's starts begin at -border with zero-PADDED first/last chunks;
+        # padding the whole batch once makes every chunk the slice
+        # padded[:, start+border : start+border+chunk_size], exactly their zeropad.
+        padded = torch.nn.functional.pad(batch, (0, 0, border, border))
+        out = None
+        for start in reversed(list(starts)):                                  # keep_first
+            window = padded[:, start + border:start + border + chunk_size]
+            piece = self._head_channels(self._features_forward(window))[:, border:-border]
+            if out is None:
+                out = piece.new_zeros(batch.shape[0], num_frames, piece.shape[-1])
+            # their aggregate_prediction's write region, verbatim
+            out[:, start + border:start + border + piece.shape[1]] = piece
+        return out
+
+    def _features_forward(self, batch: torch.Tensor) -> torch.Tensor:
+        """[B, <=1500, 128] -> [B, T, transformer_dim] via the transformer_blocks hook."""
+        model = self._audio2frames.model
+        captured = []
+        handle = model.transformer_blocks.register_forward_hook(
+            lambda module, inputs, output: captured.append(output))
+        try:
+            with torch.inference_mode():
+                with torch.autocast(enabled=self._audio2frames.float16,
+                                    device_type=self._audio2frames.device.type):
+                    model(batch)
+        finally:
+            handle.remove()
+        return captured[0].float()
+
+    def _head_channels(self, features: torch.Tensor) -> torch.Tensor:
+        """[B, T, C] features -> the instance's output mode ([B, T, 2/C/C+2]).
+
+        The task heads are frame-wise linears on the features, so computing them here is
+        exactly the model's own logits path (verified in _penultimate's docstring).
+        """
+        if self.output == "features":
+            return features
+        heads = self._audio2frames.model.task_heads(features)
+        activations = torch.cat([heads["beat"][..., None],
+                                 heads["downbeat"][..., None]], dim=-1)
+        if self.output == "activations":
+            return activations
+        return torch.cat([features, activations], dim=-1)
 
     # spect2frames' chunking constants (external/beat_this/beat_this/inference.py) -- the features
     # path MUST split/aggregate identically or feature frames misalign with the logits pipeline.
@@ -133,3 +199,6 @@ class BeatThisFrontend(Frontend):
         for start, chunk in reversed(list(zip(starts, feature_chunks))):      # keep_first
             piece[max(start + border, 0):start + chunk_size - border] = chunk[border:-border]
         return piece
+
+
+FRONTEND = BeatThisFrontend        # the module's class, for by-name selection
