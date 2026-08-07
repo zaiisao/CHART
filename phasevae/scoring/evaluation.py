@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from ..data.dataset import Batches
+from ..data.excerpts import collate_excerpts, to_model_batch
 from ..model import downbeat_frames
 
 TOLERANCE_S = 0.070
@@ -131,24 +132,59 @@ def evaluate_pooled(model, crops, device, batch_size: int):
     return tuple(np.array(rows).mean(0))
 
 
-def evaluate(model, crops, device, batch_size: int, seed: int = 0):
+def scoring_records(raw) -> list:
+    """Collated excerpt batch -> per-item scoring records, trimmed to valid frames.
+
+    THE excerpt-to-scorer bridge: the record vocabulary (y/fps/t0/bar_period/...) is
+    what every metric helper and control consumes. A fully-masked backstop item
+    (nothing scorable) yields None so row alignment with the batch tensors survives.
+    """
+    records = []
+    for i in range(len(raw["y"])):
+        valid = int(raw["mask"][i].sum())
+        if valid == 0:
+            records.append(None)
+            continue
+        records.append({"y": raw["y"][i, :valid].numpy(),
+                        "fps": float(raw["fps"][i]), "t0": float(raw["t0"][i]),
+                        "bar_period": float(raw["bar_period"][i]),
+                        "delta": float(raw["delta"][i]),
+                        "downbeat_times": np.asarray(raw["downbeat_times"][i]),
+                        "anchors": np.asarray(raw["anchors"][i]),
+                        "dataset": raw["dataset"][i], "stem": raw["stem"][i]})
+    return records
+
+
+def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
     """Per-dataset downbeat metrics for both read-outs, beside the nulls.
 
-    rule-g reads the encoder mean alone; emission-D is the tutorial's Alternative D.
-    CMLt/AMLt sit beside F so a metrical mistake (F low, AMLt high) is distinguishable
-    from noise (both low); AMLt is never a training target.
+    Consumes the deterministic excerpt dataset directly: the frozen frontend turns
+    each batch's windows into features inline (the same call training uses), and each
+    item is scored on its valid frames. rule-g reads the encoder mean alone;
+    emission-D is the tutorial's Alternative D. CMLt/AMLt sit beside F so a metrical
+    mistake (F low, AMLt high) is distinguishable from noise (both low); AMLt is
+    never a training target.
     """
+    assert dataset.deterministic, "evaluation scores FIXED windows"
     model.eval()
     rows: dict = defaultdict(lambda: defaultdict(list))
     rng = np.random.default_rng(seed)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
+                                         collate_fn=collate_excerpts)
 
     with torch.no_grad():
-        for raw, batch in Batches(crops, batch_size, device)():
-            mu = model.infer_phase(batch["h"], batch["delta"])
-            times = rule_g_times(mu, batch["mask"], raw)
-            probs = model.emission_probs(batch["h"], batch["delta"]).cpu().numpy()
+        for raw in loader:
+            records = scoring_records(raw)
+            keep = [i for i, c in enumerate(records) if c is not None]
+            if not keep:
+                continue
+            crops = [records[i] for i in keep]
+            batch = to_model_batch(raw, frontend, device)
+            mu = model.infer_phase(batch["h"], batch["delta"])[keep]
+            times = rule_g_times(mu, batch["mask"][keep], crops)
+            probs = model.emission_probs(batch["h"], batch["delta"])[keep].cpu().numpy()
 
-            for i, crop in enumerate(raw):
+            for i, crop in enumerate(crops):
                 t = len(crop["y"])
                 truth = np.asarray(crop["downbeat_times"])
                 rule_g = times[i]
@@ -173,12 +209,12 @@ def evaluate(model, crops, device, batch_size: int, seed: int = 0):
             for ds, per_mode in rows.items()}
 
 
-def print_table(per_seed):
-    """The final mean +- sd table over seeds, one row per (split, dataset, mode)."""
-    print("\n==== downbeat F (+-70 ms), mean +- sd over seeds ====")
-    for key in sorted(per_seed):
-        split, dataset, mode = key
-        values = [v for v, _ in per_seed[key].values()]
-        count = next(iter(per_seed[key].values()))[1]
-        print(f"  {split:6s} {mode:15s} {dataset:11s} F {np.mean(values):.3f} "
-              f"+-{np.std(values):.3f}  (n={count})")
+def print_table(results):
+    """One row per (split, dataset, mode). One run = one seed; sweeps aggregate outside."""
+    print("\n==== downbeat F (+-70 ms) ====")
+    rows = sorted((split, dataset, mode, value, count)
+                  for split, per_dataset in results.items()
+                  for dataset, modes in per_dataset.items()
+                  for mode, (value, count) in modes.items())
+    for split, dataset, mode, value, count in rows:
+        print(f"  {split:6s} {mode:15s} {dataset:11s} F {value:.3f}  (n={count})")

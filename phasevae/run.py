@@ -4,7 +4,7 @@ The latent is a phase turning once per bar; the bar PERIOD is given (one constan
 window, from annotations) and the model finds the bar's PHASE from audio.
 
 The RECIPE (model + training) lives in a YAML config; the CLI carries only run
-mechanics (device, seeds, paths). The config's ``variant:`` key names the hooks
+mechanics (device, seed, paths). The config's ``variant:`` key names the hooks
 module that owns the model -- ``base`` is tutorial §7 (encoder-deployed, no
 conditional prior) and is itself just the default variant. run.py drives whichever
 module is named through five hooks (build_model / optimizer / objective / on_epoch /
@@ -20,8 +20,8 @@ disk. The config's ``frontend:``/``frontend_checkpoint:`` keys pick the frontend
 is phase-gated
 (gtzan was held out of EVERY checkpoint, so the decision metric stays clean; CV-dataset
 train/val scores are optimistic diagnostics; 8-fold routing returns before any
-baseline-comparable claim). Val/gtzan are scored through the existing certified path
-via materialize_crops.
+baseline-comparable claim). Val/gtzan are scored straight off their
+deterministic excerpt datasets -- same frontend call as training, valid frames only.
 
 Usage:
     PYTHONPATH=. python -m phasevae.run --config phasevae/configs/baseline.yaml --gpu 1
@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import pathlib
-from collections import defaultdict
 from types import SimpleNamespace
 
 import numpy as np
@@ -45,8 +44,8 @@ from .scoring.controls import (assert_encoder_is_target_blind,  # noqa: F401  (r
                                preflight)
 from .scoring.evaluation import evaluate, print_table
 from .data.dataset import split_songs
-from .data.excerpts import (ExcerptDataset, collate_excerpts, materialize_crops,
-                            warm_input_cache)
+from .data.excerpts import (ExcerptDataset, collate_excerpts,
+                            to_model_batch)
 
 # Every config key the MAINLINE understands, with its default. Variant-specific keys
 # live in the variant module's own DEFAULTS; anything else in a config is an error.
@@ -109,20 +108,6 @@ def _seed_worker(_worker_id: int) -> None:
     draw IDENTICAL windows.
     """
     np.random.seed(torch.initial_seed() % 2**32)
-
-
-def to_model_batch(batch: dict, frontend, device) -> dict:
-    """Collated excerpt batch -> the model's (h, delta, mask, y) contract.
-
-    The frozen frontend runs here, inside the loop; ``.clone()`` lifts the features out
-    of inference mode so autograd may save them for the VAE's backward. delta broadcasts
-    to per-frame [B, T] -- one constant per window, see bar_period for why.
-    """
-    h = frontend.forward_features(batch["input"]).clone()
-    return {"h": h,
-            "delta": batch["delta"].to(device)[:, None].expand(-1, h.shape[1]),
-            "mask": batch["mask"].to(device, non_blocking=True),
-            "y": batch["y"].to(device, non_blocking=True)}
 
 
 def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
@@ -196,60 +181,49 @@ def parse_args():
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a config key for this run (repeatable)")
     p.add_argument("--gpu", type=int, default=1, choices=(1, 3))
-    p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    p.add_argument("--seed", type=int, default=0,
+                   help="one run = one seed; sweep seeds with an outer script")
     p.add_argument("--limit-per-fold", type=int, default=None)
     p.add_argument("--workers", type=int, default=4,
                    help="DataLoader workers (window draws + mmap reads)")
     p.add_argument("--save-dir", default=None,
-                   help="save each seed's model to <save-dir>/seed<k>.pt")
+                   help="save the model to <save-dir>/seed<k>.pt")
     return p.parse_args()
 
 
 def main() -> None:
-    """Catalog, warm the input cache, train every seed, print the per-dataset table."""
+    """Catalog, train, evaluate, print the per-dataset table."""
     args = parse_args()
     cfg, hooks = load_config(args.config, args.set)
     device = torch.device(f"cuda:{args.gpu}")
-    print(f"config {args.config}  ->  {vars(cfg)}", flush=True)
+    print(f"config {args.config}  seed {args.seed}  ->  {vars(cfg)}", flush=True)
 
     train_songs, val_songs, test_songs = split_songs(args.limit_per_fold)
     frontend_class = importlib.import_module(
         f"phasevae.data.frontends.{cfg.frontend}").FRONTEND
     frontend = frontend_class(checkpoint=cfg.frontend_checkpoint,
                               device=f"cuda:{args.gpu}", output="features+activations")
-    cached, failed = warm_input_cache(train_songs + val_songs + test_songs, frontend)
 
     train_set = ExcerptDataset(train_songs, frontend, cfg.excerpt_seconds)
     val_set = ExcerptDataset(val_songs, frontend, cfg.excerpt_seconds, deterministic=True)
     test_set = ExcerptDataset(test_songs, frontend, cfg.excerpt_seconds, deterministic=True)
-    val_crops = materialize_crops(val_set, frontend)
-    test_crops = materialize_crops(test_set, frontend)
 
     print(f"songs: train {len(train_songs)} / val {len(val_songs)} / "
-          f"gtzan-test {len(test_songs)}   cache {cached} ready"
-          + (f", {len(failed)} FAILED" if failed else ""))
+          f"gtzan-test {len(test_songs)}")
     print(f"train: {len(train_set)} songs, fresh {cfg.excerpt_seconds:.0f}s window "
           f"per epoch, rejects {len(train_set.rejects)}")
-    preflight(val_crops + test_crops)
+    preflight(val_set, test_set)
 
-    per_seed: dict = defaultdict(dict)
-    for seed in args.seeds:
-        print(f"\n===== seed {seed} =====", flush=True)
-        model = train(train_set, frontend, device, cfg, hooks, seed, args.workers)
-        if args.save_dir:
-            save_dir = pathlib.Path(args.save_dir)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(model.state_dict(), save_dir / f"seed{seed}.pt")
+    model = train(train_set, frontend, device, cfg, hooks, args.seed, args.workers)
+    if args.save_dir:
+        save_dir = pathlib.Path(args.save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), save_dir / f"seed{args.seed}.pt")
 
-        for split, name in ((val_crops, "val"), (test_crops, "gtzan")):
-            if not split:
-                continue
-            for dataset, modes in evaluate(model, split, device, cfg.batch_size,
-                                           seed=seed).items():
-                for mode, (value, count) in modes.items():
-                    per_seed[(name, dataset, mode)][seed] = (value, count)
-
-    print_table(per_seed)
+    results = {name: evaluate(model, split, frontend, device, cfg.batch_size,
+                              seed=args.seed)
+               for split, name in ((val_set, "val"), (test_set, "gtzan")) if len(split)}
+    print_table(results)
     print(f"\nfps={frontend.FPS}  excerpt={cfg.excerpt_seconds}s (fresh window per epoch)  "
           f"frontend={frontend.name}/{cfg.frontend_checkpoint}  "
           f"no meter, no beat grid, no offset")

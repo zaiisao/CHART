@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from phasevae.data.excerpts import (ExcerptDataset, collate_excerpts,
-                                    input_cache_path, warm_input_cache)
+                                    input_cache_path)
 
 
 class _StubFrontend:
@@ -129,7 +129,7 @@ def test_collate_stacks_and_lists(tmp_path):
     assert isinstance(batch["downbeat_times"], list) and len(batch["stem"]) == 3
 
 
-def test_warm_input_cache_writes_and_skips(tmp_path):
+def test_construction_computes_and_reuses_the_input_cache(tmp_path):
     frontend = _StubFrontend()
     song = _Song("tone", np.arange(0.0, 10.0, 2.0))
     import soundfile
@@ -138,14 +138,16 @@ def test_warm_input_cache_writes_and_skips(tmp_path):
     song.audio_path = audio_dir / "tone.wav"
     soundfile.write(str(song.audio_path), np.zeros(22050 * 2, dtype=np.float32), 22050)
 
-    done, failed = warm_input_cache([song], frontend, str(tmp_path), verbose=False)
-    assert (done, failed) == (1, [])
+    ds = ExcerptDataset([song], frontend, cache_root=str(tmp_path))
     path = input_cache_path("stub", song, str(tmp_path))
+    assert len(ds) == 1 and ds.rejects == []
     assert path.exists() and np.load(path).shape == (100, 4)
-    done, failed = warm_input_cache([song], frontend, str(tmp_path), verbose=False)
-    assert (done, failed) == (1, [])                     # second pass is a no-op
+
+    stamp = path.stat().st_mtime_ns
+    ds = ExcerptDataset([song], frontend, cache_root=str(tmp_path))
+    assert len(ds) == 1 and path.stat().st_mtime_ns == stamp   # second run reuses the file
 
     broken = _Song("broken", np.arange(0.0, 10.0, 2.0))
     broken.audio_path = audio_dir / "nope.wav"
-    done, failed = warm_input_cache([broken], frontend, str(tmp_path), verbose=False)
-    assert done == 0 and len(failed) == 1
+    ds = ExcerptDataset([broken], frontend, cache_root=str(tmp_path))
+    assert len(ds) == 0 and ds.rejects == ["broken"]

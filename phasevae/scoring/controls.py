@@ -11,8 +11,8 @@ import numpy as np
 import torch
 
 from ..data.dataset import true_phase
-from .evaluation import rule_g_times
-from .evaluation import f_measure
+from ..data.excerpts import collate_excerpts
+from .evaluation import f_measure, rule_g_times, scoring_records
 
 
 def assert_no_duplicate_crops(crops):
@@ -100,12 +100,20 @@ def gradient_audit(model, batch):
     return dead
 
 
-def preflight(crops):
-    """Dataset-level controls, one line each.
+def preflight(*datasets):
+    """Dataset-level controls over the deterministic eval datasets, one line each.
 
     Duplicates (silent unless failing), the two phase-leak tripwires, and the oracle
-    read-out that certifies the scorer itself.
+    read-out that certifies the scorer itself. No features and no model: the controls
+    read only the scoring records.
     """
+    crops = []
+    for dataset in datasets:
+        loader = torch.utils.data.DataLoader(dataset, batch_size=64,
+                                             collate_fn=collate_excerpts)
+        for raw in loader:
+            crops += [c for c in scoring_records(raw) if c is not None]
+
     assert_no_duplicate_crops(crops)
 
     starts = np.array([c["t0"] for c in crops])

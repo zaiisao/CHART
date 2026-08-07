@@ -17,10 +17,10 @@ What they disagree on, and the choice made here:
     chunking) lives in the Frontend class — this module only ever assumes "axis 0 of
     the cached array is time, at frontend.FPS".
 
-The cache layout mirrors Beat This's spectrogram store one-to-one
-(<cache>/<frontend>/<dataset>/<stem>/track.npy) so their precomputed pitch/tempo
-augmentation scheme (variant files next to track.npy) can drop in later without a
-relayout.
+The cache is one flat file per song (<cache>/<frontend>/<dataset>/<stem>.npy).
+Beat This's directory-per-song store existed to hold precomputed pitch/tempo
+augmentation variants beside the plain spectrogram; that augmentation was tried on
+the SMC mission and did not help, so the folder level is gone with it.
 
 The VAE-side contract per item matches build_crop's: the window carries ONE constant
 bar period (median over its downbeats — a per-frame period would leak bar positions
@@ -42,43 +42,18 @@ INPUT_CACHE_DIR = "/disk4/jaehoon/vbpm_input_cache"
 
 
 def input_cache_path(frontend_name: str, song, cache_root: str = INPUT_CACHE_DIR):
-    """<cache>/<frontend>/<dataset>/<stem>/track.npy — Beat This's store layout."""
-    return pathlib.Path(cache_root) / frontend_name / song.dataset / song.stem / "track.npy"
+    """<cache>/<frontend>/<dataset>/<stem>.npy — one flat file per song."""
+    return pathlib.Path(cache_root) / frontend_name / song.dataset / f"{song.stem}.npy"
 
 
-def warm_input_cache(songs, frontend, cache_root: str = INPUT_CACHE_DIR, verbose=True):
-    """Compute and store every missing per-song model input; returns (done, failed).
-
-    One-time per frontend (prepare_input is checkpoint-independent by contract). Audio
-    loading matches features.compute_features: soundfile, mono mix. Failures are
-    collected, not fatal — a corrupt file should cost one song, not the warm pass.
-    """
+def _compute_input(frontend, song):
+    """Audio file -> the frontend's model input (soundfile, mono mix, their recipe)."""
     import soundfile
 
-    if verbose:
-        print(f"input cache: checking {len(songs)} songs for {frontend.name} "
-              f"(first run computes, later runs skip)...", flush=True)
-    done, failed = 0, []
-    for song in songs:
-        path = input_cache_path(frontend.name, song, cache_root)
-        if path.exists():
-            done += 1
-            continue
-        try:
-            signal, sample_rate = soundfile.read(str(song.audio_path), dtype="float32")
-            if signal.ndim > 1:
-                signal = signal.mean(axis=1)
-            array = frontend.prepare_input(signal, sample_rate)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_save_npy(path, array)
-            done += 1
-        except Exception as error:                     # noqa: BLE001 — collected, reported
-            failed.append((song.stem, repr(error)))
-        if verbose and done % 200 == 0:
-            print(f"  input cache: {done}/{len(songs)}", flush=True)
-    if verbose and failed:
-        print(f"  input cache FAILURES ({len(failed)}): {failed[:5]}...", flush=True)
-    return done, failed
+    signal, sample_rate = soundfile.read(str(song.audio_path), dtype="float32")
+    if signal.ndim > 1:
+        signal = signal.mean(axis=1)
+    return frontend.prepare_input(signal, sample_rate)
 
 
 class ExcerptDataset(torch.utils.data.Dataset):
@@ -91,6 +66,11 @@ class ExcerptDataset(torch.utils.data.Dataset):
 
     Songs whose annotations can never yield a valid window (fewer than MIN_DOWNBEATS
     downbeats overall) are rejected at construction and counted in ``rejects``.
+
+    A song missing from the input cache is computed HERE — construction is the only
+    moment the live frontend is in hand (prepare_input is checkpoint-independent by
+    contract, so this happens once per frontend, ever). A song whose audio cannot be
+    read joins ``rejects`` rather than killing the run.
     """
 
     RETRIES = 8            # window draws per __getitem__ before conceding the middle
@@ -104,13 +84,26 @@ class ExcerptDataset(torch.utils.data.Dataset):
         self.cache_root = cache_root
 
         self.items, self.rejects = [], []
+        computed = 0
         for song in songs:
             _beat_times, downbeat_times = song.beats()
             downbeat_times = np.asarray(downbeat_times, dtype=np.float64)
-            path = input_cache_path(self.frontend_name, song, cache_root)
-            if len(downbeat_times) < MIN_DOWNBEATS or not path.exists():
+            if len(downbeat_times) < MIN_DOWNBEATS:
                 self.rejects.append(song.stem)
                 continue
+            path = input_cache_path(self.frontend_name, song, cache_root)
+            if not path.exists():
+                try:
+                    array = _compute_input(frontend, song)
+                except Exception as error:  # noqa: BLE001 — one bad file costs one song
+                    print(f"  input FAILED for {song.stem}: {error!r}", flush=True)
+                    self.rejects.append(song.stem)
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_save_npy(path, array)
+                computed += 1
+                if computed % 200 == 0:
+                    print(f"  input cache: {computed} computed...", flush=True)
             self.items.append((song, downbeat_times, path))
 
     def __len__(self) -> int:
@@ -188,36 +181,6 @@ class ExcerptDataset(torch.utils.data.Dataset):
                 "anchors": np.asarray(anchors, dtype=np.float64)}
 
 
-def materialize_crops(dataset: ExcerptDataset, frontend, batch_size: int = 16) -> list:
-    """Deterministic excerpt items -> crop dicts for the EXISTING scorers.
-
-    The bridge that lets the excerpt pipeline reuse every certified evaluation path
-    (evaluate, preflight, Batches/collate) unchanged: features are computed ONCE
-    through the frozen frontend, trimmed to the valid frames, with all scoring fields
-    carried over. Val/test only -- training draws live windows.
-    """
-    assert dataset.deterministic, "materialize is for val/test; training draws live windows"
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
-                                         collate_fn=collate_excerpts)
-    crops = []
-    for batch in loader:
-        h = frontend.forward_features(batch["input"]).cpu().numpy()
-        for i in range(len(h)):
-            valid = int(batch["mask"][i].sum())
-            if valid == 0:                      # backstop item; nothing scorable in it
-                continue
-            crops.append({"h": np.asarray(h[i, :valid], dtype=np.float32),
-                          "y": batch["y"][i, :valid].numpy(),
-                          "delta": float(batch["delta"][i]),
-                          "bar_period": float(batch["bar_period"][i]),
-                          "t0": float(batch["t0"][i]), "fps": float(batch["fps"][i]),
-                          "downbeat_times": batch["downbeat_times"][i],
-                          "anchors": batch["anchors"][i],
-                          "dataset": batch["dataset"][i], "stem": batch["stem"][i],
-                          "fold": batch["fold"][i]})
-    return crops
-
-
 def collate_excerpts(batch: list) -> dict:
     """Fixed-size fields stack to tensors; variable/scoring fields stay python lists.
 
@@ -232,3 +195,17 @@ def collate_excerpts(batch: list) -> dict:
     for key in ("downbeat_times", "anchors", "dataset", "stem", "fold"):
         out[key] = [item[key] for item in batch]
     return out
+
+
+def to_model_batch(batch: dict, frontend, device) -> dict:
+    """Collated excerpt batch -> the model's (h, delta, mask, y) contract.
+
+    The frozen frontend runs here, inside the loop; ``.clone()`` lifts the features out
+    of inference mode so autograd may save them for the VAE's backward. delta broadcasts
+    to per-frame [B, T] -- one constant per window, see bar_period for why.
+    """
+    h = frontend.forward_features(batch["input"]).clone()
+    return {"h": h,
+            "delta": batch["delta"].to(device)[:, None].expand(-1, h.shape[1]),
+            "mask": batch["mask"].to(device, non_blocking=True),
+            "y": batch["y"].to(device, non_blocking=True)}
