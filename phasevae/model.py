@@ -86,9 +86,11 @@ class Encoder(nn.Module):
     """
 
     def __init__(self, input_dim: int, hidden: int = 128, layers: int = 2,
-                 drift_bound: float = 0.0, bar_rate: bool = False):
+                 drift_bound: float = 0.0, bar_rate: bool = False,
+                 kappa_physical: float = KAPPA_PHYSICAL):
         super().__init__()
         self.drift_bound = drift_bound
+        self.kappa_physical = float(kappa_physical)
         self.bar_rate = bar_rate and drift_bound > 0
 
         self.proj = nn.Linear(input_dim, hidden)
@@ -112,7 +114,7 @@ class Encoder(nn.Module):
         with torch.no_grad():
             self.out.bias[1] = 1.0
 
-        self.register_buffer("kappa_bias", torch.tensor(inverse_softplus(KAPPA_PHYSICAL)))
+        self.register_buffer("kappa_bias", torch.tensor(inverse_softplus(self.kappa_physical)))
 
     def features(self, x):
         """[B, T, D] -> [B, T, 2*hidden]: the BiGRU trunk shared by every head.
@@ -251,10 +253,11 @@ class BarPhaseVAE(nn.Module):
     def __init__(self, input_dim: int, hidden: int = 128, emission: str = "cosine",
                  emission_layers: int = 2, emission_dim: int = 64,
                  emission_positional: bool = False, drift_bound: float = 0.0,
-                 bar_rate: bool = False):
+                 bar_rate: bool = False, kappa_physical: float = KAPPA_PHYSICAL):
         super().__init__()
+        self.kappa_physical = float(kappa_physical)
         self.encoder = Encoder(input_dim, hidden, drift_bound=drift_bound,
-                               bar_rate=bar_rate)
+                               bar_rate=bar_rate, kappa_physical=kappa_physical)
 
         self.emission_kind = emission
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
@@ -334,9 +337,9 @@ class BarPhaseVAE(nn.Module):
         log_p_first = -math.log(TWO_PI)                         # phi_1 ~ Uniform
         resultant = mean_resultant(kappa)
         drift = mu[:, 1:] - mu[:, :-1] - delta[:, 1:]
-        cross = (KAPPA_PHYSICAL * resultant[:, 1:] * resultant[:, :-1] * torch.cos(drift)
-                 - math.log(TWO_PI) - log_i0(torch.as_tensor(KAPPA_PHYSICAL,
-                                                             device=mu.device)))
+        cross = (self.kappa_physical * resultant[:, 1:] * resultant[:, :-1]
+                 * torch.cos(drift) - math.log(TWO_PI)
+                 - log_i0(torch.as_tensor(self.kappa_physical, device=mu.device)))
 
         neg_entropy = -(entropy * mask).sum(1)
         log_p = log_p_first * mask[:, 0] + (cross * mask[:, 1:]).sum(1)

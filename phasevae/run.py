@@ -70,6 +70,9 @@ COMMON = dict(
     sharpness_warmup=30,
     excerpt_seconds=45.0,         # window length; below ~45 s the ELBO cannot separate
                                   # tracking the truth from coasting (see MAX_CROP_SECONDS)
+    kappa_physical=2000.0,        # physical prior increment concentration; the DRIFT TAX.
+                                  # Increment law says real wobble is heavy-tailed -- lowering
+                                  # this cuts the KL price of expressing it.
     frontend="beat_this",         # frontends.<name> module; the frontend is part of the
     frontend_checkpoint="final0",  # model (see phasevae-checkpoint-artifact). final0 is
                                   # Beat This's; beat_transformer wants e.g. fold_0.
