@@ -4,7 +4,12 @@ The latent is a phase turning once per bar; the bar PERIOD is given (one constan
 window, from annotations) and the model finds the bar's PHASE from audio.
 
 The RECIPE (model + training) lives in a YAML config; the CLI carries only run
-mechanics (device, seed, paths). The config's ``variant:`` key names the hooks
+mechanics (device, seed, paths). Every MAINLINE key -- default, type and rationale in
+one record -- is declared in ``config_schema.json`` and loaded by ``config.py``, so an
+unknown or ill-typed key refuses before anything is built; variant-specific keys stay
+in the variant module's own DEFAULTS.
+
+The config's ``variant:`` key names the hooks
 module that owns the model -- ``base`` is tutorial §7 (encoder-deployed, no
 conditional prior) and is itself just the default variant. run.py drives whichever
 module is named through five hooks (build_model / optimizer / objective / on_epoch /
@@ -33,64 +38,16 @@ from __future__ import annotations
 import argparse
 import importlib
 import pathlib
-from types import SimpleNamespace
 
 import numpy as np
 import torch
-import yaml
 
-from .scoring.controls import (assert_encoder_is_target_blind,  # noqa: F401  (re-export)
-                               assert_readout_recovers_oracle, gradient_audit,
-                               preflight)
+from .config import load_config
+from .scoring.controls import assert_encoder_is_target_blind, gradient_audit
 from .scoring.evaluation import evaluate, print_table
 from .data.dataset import split_songs
 from .data.excerpts import (ExcerptDataset, collate_excerpts,
                             to_model_batch)
-
-# Every config key the MAINLINE understands, with its default. Variant-specific keys
-# live in the variant module's own DEFAULTS; anything else in a config is an error.
-COMMON = dict(
-    variant="base",
-    emission="cosine",            # cosine | triangle | transformer
-    emission_layers=2,
-    emission_positional=False,
-    drift_bound=0.0,              # structured q: mu = offset + cumsum(delta + eps*tanh(g))
-    bar_rate=False,               # ONE drift per bar-length segment (needs drift_bound)
-    epochs=12,
-    batch_size=32,
-    lr=3e-4,
-    clip=5.0,
-    samples=1,
-    pos_weight=1.0,               # anything but 1 is a surrogate, not an ELBO
-    beta_start=0.0,
-    beta_end=1.0,
-    beta_warmup=4,                # epochs to ramp beta; 0 disables annealing
-    emission_sharpness=0.0,       # scheduled floor on emission amplitude b; 0 = free
-    sharpness_warmup=30,
-    excerpt_seconds=45.0,         # window length; below ~45 s the ELBO cannot separate
-                                  # tracking the truth from coasting (see MAX_CROP_SECONDS)
-    kappa_physical=2000.0,        # physical prior increment concentration; the DRIFT TAX.
-                                  # Increment law says real wobble is heavy-tailed -- lowering
-                                  # this cuts the KL price of expressing it.
-    frontend="beat_this",         # frontends.<name> module; the frontend is part of the
-    frontend_checkpoint="final0",  # model (see phasevae-checkpoint-artifact). final0 is
-                                  # Beat This's; beat_transformer wants e.g. fold_0.
-)
-
-
-def load_config(path: str, overrides: list[str]):
-    """YAML + --set overrides -> (cfg namespace, hooks module). Unknown keys refuse."""
-    recipe = yaml.safe_load(pathlib.Path(path).read_text()) or {}
-    for item in overrides:
-        key, _, value = item.partition("=")
-        recipe[key.strip().replace("-", "_")] = yaml.safe_load(value)
-
-    hooks = importlib.import_module(
-        f"phasevae.variants.{recipe.get('variant', COMMON['variant'])}")
-    known = COMMON | getattr(hooks, "DEFAULTS", {})
-    unknown = set(recipe) - set(known)
-    assert not unknown, f"unknown config keys {sorted(unknown)} (typo? variant key?)"
-    return SimpleNamespace(**(known | recipe)), hooks
 
 
 def beta_at(epoch: int, cfg) -> float:
@@ -196,6 +153,7 @@ def main() -> None:
     args = parse_args()
     cfg, hooks = load_config(args.config, args.set)
     device = torch.device(f"cuda:{args.gpu}")
+
     print(f"config {args.config}  seed {args.seed}  ->  {vars(cfg)}", flush=True)
 
     train_songs, val_songs, test_songs = split_songs(args.limit_per_fold)
@@ -212,9 +170,9 @@ def main() -> None:
           f"gtzan-test {len(test_songs)}")
     print(f"train: {len(train_set)} songs, fresh {cfg.excerpt_seconds:.0f}s window "
           f"per epoch, rejects {len(train_set.rejects)}")
-    preflight(val_set, test_set)
 
     model = train(train_set, frontend, device, cfg, hooks, args.seed, args.workers)
+
     if args.save_dir:
         save_dir = pathlib.Path(args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)

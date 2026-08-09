@@ -13,7 +13,7 @@ from `master` or git history. v1 lives in `vbpm-campaign-2026-07-26`.
 
 | path | what |
 |---|---|
-| `phasevae/` | the model (`model.py`), training CLI (`run.py`), data/batching (`loading.py`), pre-flight controls (`controls.py`), scoring (`evaluation.py`), tests (`tests/`, 69 blind-written) |
+| `phasevae/` | the model (`model.py`), training CLI (`run.py`), the config schema (`config.py` + `config_schema.json`), hooks modules (`variants/`), data (`data/`), pre-flight controls and scoring (`scoring/`), tests (`tests/`) |
 | `docs/phasevae_decisions.md` | measured rationale behind every flag and recorded deviations |
 | `vbpm/data.py` | fold-honest frontend feature pass (the single authority) |
 | `data/songs.py` | song catalog: Beat This annotations + official 8-fold splits + local audio |
@@ -22,8 +22,17 @@ from `master` or git history. v1 lives in `vbpm-campaign-2026-07-26`.
 
 ## Run
 
-    PYTHONPATH=. python -m phasevae.run --gpu 1 --epochs 60 --seeds 0 1 2 \
-        --emission triangle --drift-bound 0.01 --crop-cache /disk4/jaehoon/phasevae_dedup.pkl \
-        --gtzan-checkpoint fold7 --save-dir checkpoints/<name>
+    PYTHONPATH=. python -m phasevae.run --config phasevae/configs/anchor_k.yaml --gpu 1
+
+The recipe is the config's business; the CLI carries only run mechanics (device, seed,
+paths). Override one key for one run with `--set`, repeatable:
+
+    PYTHONPATH=. python -m phasevae.run --config phasevae/configs/baseline.yaml \
+        --set epochs=2 --set emission=cosine --save-dir checkpoints/<name>
+
+Every mainline key, its default, its type and why it has that value:
+`phasevae/config_schema.json` (a variant's extra keys are in its own module's `DEFAULTS`).
+Anything else in a config -- or a value of the wrong type, or outside the declared range --
+refuses at parse time.
 
     PYTHONPATH=. python -m pytest phasevae/tests -q     # 69 tests, CPU, ~2 s

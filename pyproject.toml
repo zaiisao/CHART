@@ -13,6 +13,7 @@ dependencies = [
     "scipy",
     "soundfile",
     "mir_eval",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -24,3 +25,7 @@ dev = ["pytest", "ruff"]
 [tool.setuptools]
 packages = ["phasevae", "phasevae.variants", "phasevae.data",
             "phasevae.data.frontends", "phasevae.scoring", "phasevae.checks"]
+
+# The config schema is code, not data: run.py refuses a config without it.
+[tool.setuptools.package-data]
+phasevae = ["config_schema.json"]

@@ -5,14 +5,11 @@ behind them are in docs/phasevae_decisions.md.
 """
 from __future__ import annotations
 
-from collections import Counter
-
 import numpy as np
 import torch
 
 from ..data.dataset import true_phase
-from ..data.excerpts import collate_excerpts
-from .evaluation import f_measure, rule_g_times, scoring_records
+from .evaluation import f_measure, rule_g_times
 
 
 def assert_no_duplicate_crops(crops):
@@ -98,36 +95,3 @@ def gradient_audit(model, batch):
             if p.grad is None or not torch.any(p.grad != 0)]
     model.zero_grad(set_to_none=True)
     return dead
-
-
-def preflight(*datasets):
-    """Dataset-level controls over the deterministic eval datasets, one line each.
-
-    Duplicates (silent unless failing), the two phase-leak tripwires, and the oracle
-    read-out that certifies the scorer itself. No features and no model: the controls
-    read only the scoring records.
-    """
-    crops = []
-    for dataset in datasets:
-        loader = torch.utils.data.DataLoader(dataset, batch_size=64,
-                                             collate_fn=collate_excerpts)
-        for raw in loader:
-            crops += [c for c in scoring_records(raw) if c is not None]
-
-    assert_no_duplicate_crops(crops)
-
-    starts = np.array([c["t0"] for c in crops])
-    print(f"  windows: {dict(Counter(c['dataset'] for c in crops))}, "
-          f"bar periods {min(c['bar_period'] for c in crops):.2f}-"
-          f"{max(c['bar_period'] for c in crops):.2f} s, "
-          f"{float((starts == 0).mean()):.0%} starting at t=0 "
-          f"(short songs use the whole song)")
-
-    phases = [true_phase(c) for c in crops]
-    firsts = np.array([float(p[0]) for p, valid in phases if valid[0]])
-    hist, _ = np.histogram(firsts, bins=8, range=(0.0, 2 * np.pi))
-    print(f"  CONTROL start-phase spread over 8 bins (a peak = phase leak): "
-          f"{hist.tolist()}  n={len(firsts)}")
-
-    print(f"  CONTROL scorer on the TRUE phase: F "
-          f"{assert_readout_recovers_oracle(crops):.3f} (must exceed 0.95)")

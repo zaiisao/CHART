@@ -160,7 +160,7 @@ class PsiBarPhaseVAE(BarPhaseVAE):
 
 # ----------------------------------------------------------------- run.py hooks
 
-# Config keys this variant adds on top of run.py's COMMON, with their defaults.
+# Config keys this variant adds on top of the mainline schema, with their defaults.
 DEFAULTS = dict(
     rotations=1,          # K=1 (no mixture) is the parity configuration; K>1 mixture
                           # never learned the anchor -- see module docstring

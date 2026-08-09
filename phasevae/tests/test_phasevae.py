@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from phasevae import run as run_mod
+from phasevae.scoring import controls as controls_mod
 from phasevae.data import dataset as dataset_mod
 from phasevae.data.dataset import bar_period, build_crop, song_crops, true_phase, MIN_DOWNBEATS
 from phasevae.scoring.evaluation import f_measure, null_times, peak_times
@@ -746,7 +747,7 @@ def test_readout_oracle_control_passes_on_truth():
     annotated downbeats.
     """
     crops = [_oracle_crop(period=2.0, lo_t=lo) for lo in (3.0, 5.0, 8.0)]
-    value = run_mod.assert_readout_recovers_oracle(crops)
+    value = controls_mod.assert_readout_recovers_oracle(crops)
     assert value > 0.95
 
 
@@ -763,7 +764,7 @@ def test_readout_oracle_control_raises_on_broken_readout(monkeypatch):
     monkeypatch.setattr(evaluation_mod, "downbeat_frames", broken)
     crops = [_oracle_crop(period=2.0, lo_t=lo) for lo in (3.0, 5.0, 8.0)]
     with pytest.raises(AssertionError, match="READ-OUT BROKEN"):
-        run_mod.assert_readout_recovers_oracle(crops)
+        controls_mod.assert_readout_recovers_oracle(crops)
 
 
 def test_target_blindness_control_detects_leak():

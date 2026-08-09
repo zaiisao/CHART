@@ -35,7 +35,8 @@ from ..scoring.controls import assert_no_duplicate_crops
 from ..scoring.evaluation import evaluate_pooled
 from ..data.dataset import Batches, load_or_build, split_folds
 from ..model import BarPhaseVAE
-from ..run import COMMON, train as elbo_train
+from ..config import defaults
+from ..run import train as elbo_train
 
 
 def fit_emission(model, loader, steps, lr):
@@ -122,8 +123,9 @@ def main() -> None:
     print(f"   emission a {float(model.emission_a):+.3f}  b {float(model.emission_b):.3f}\n")
 
     # beta fixed at 1 from epoch 0 (no anneal), as the original hold-or-slide protocol
-    cfg = SimpleNamespace(**(COMMON | dict(epochs=args.elbo_epochs, lr=args.lr,
-                                           batch_size=args.batch_size, beta_warmup=0)))
+    cfg = SimpleNamespace(**(defaults() | dict(epochs=args.elbo_epochs, lr=args.lr,
+                                               batch_size=args.batch_size,
+                                               beta_warmup=0)))
     hooks = WarmHooks(model, val_crops, device, args.batch_size)
     elbo_train(train_crops, device, cfg, hooks, seed=0)
 
