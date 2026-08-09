@@ -176,11 +176,11 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 def parse_args():
     """Run mechanics ONLY -- the recipe is the config's business."""
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="phasevae/configs/baseline.yaml",
+    p.add_argument("--config", default="phasevae/configs/anchor_k.yaml",
                    help="YAML recipe; its variant: key names the hooks module")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a config key for this run (repeatable)")
-    p.add_argument("--gpu", type=int, default=1, choices=(1, 3))
+    p.add_argument("--gpu", type=int, default=1, choices=(0, 1, 2, 3))
     p.add_argument("--seed", type=int, default=0,
                    help="one run = one seed; sweep seeds with an outer script")
     p.add_argument("--limit-per-fold", type=int, default=None)
