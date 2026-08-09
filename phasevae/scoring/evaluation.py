@@ -120,7 +120,7 @@ def evaluate_pooled(model, crops, device, batch_size: int):
 
     with torch.no_grad():
         for raw, batch in Batches(crops, batch_size, device)():
-            mu = model.infer_phase(batch["h"], batch["delta"])
+            mu = model.infer_phase(batch["h"], batch["delta"], batch["mask"])
             for est, crop in zip(rule_g_times(mu, batch["mask"], raw), raw):
                 ref = np.asarray(crop["downbeat_times"])
                 if len(ref) < 2 or len(est) < 2:
@@ -180,9 +180,10 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
                 continue
             crops = [records[i] for i in keep]
             batch = to_model_batch(raw, frontend, device)
-            mu = model.infer_phase(batch["h"], batch["delta"])[keep]
+            mu = model.infer_phase(batch["h"], batch["delta"], batch["mask"])[keep]
             times = rule_g_times(mu, batch["mask"][keep], crops)
-            probs = model.emission_probs(batch["h"], batch["delta"])[keep].cpu().numpy()
+            probs = model.emission_probs(
+                batch["h"], batch["delta"], batch["mask"])[keep].cpu().numpy()
 
             for i, crop in enumerate(crops):
                 t = len(crop["y"])

@@ -144,6 +144,31 @@ class Encoder(nn.Module):
         """
         return self.heads(self.features(h), delta)
 
+    def pool_bar_rate(self, drift, delta):
+        """[B, T] drift -> [B, T]: ONE rate per bar-length segment.
+
+        Mean-pool the drift over blocks of ~2*pi/delta frames, so within-bar step sizes
+        are EXACTLY constant. This deletes the degrees of freedom the chimera's covert
+        code was written in (per-frame step wiggles) rather than taxing or ignoring
+        them, and is the classical bar pointer's between-boundaries-constant tempo, as
+        a q family. Segments count from frame 0, not from the trajectory's own wraps:
+        aligned to bar LENGTH, not bar position -- the cheap version, by design.
+
+        Split out of ``heads`` so a variant that builds its own trajectory keeps the
+        identical rate family instead of a copy that can drift out of sync.
+        """
+        batch, length = drift.shape
+        frames_per_bar = torch.clamp(
+            torch.round(TWO_PI / delta[:, 0].clamp(min=1e-6)), min=1).long()
+        seg = (torch.arange(length, device=drift.device)[None, :]
+               // frames_per_bar[:, None])
+        segments = int(seg.max()) + 1
+        sums = torch.zeros(batch, segments, device=drift.device
+                           ).scatter_add_(1, seg, drift)
+        counts = torch.zeros(batch, segments, device=drift.device
+                             ).scatter_add_(1, seg, torch.ones_like(drift))
+        return (sums / counts.clamp(min=1.0)).gather(1, seg)
+
     def heads(self, trunk, delta=None):
         """Trunk -> (mu, kappa) under the structured-q parameterisation (see forward)."""
         out = self.out(trunk)
@@ -158,24 +183,7 @@ class Encoder(nn.Module):
         drift = self.drift_bound * torch.tanh(out[..., 3])       # its own channel
 
         if self.bar_rate and delta is not None:
-            # ONE rate per bar-length segment: mean-pool tanh(g) over blocks of
-            # ~2*pi/delta frames, so within-bar step sizes are EXACTLY constant. This
-            # deletes the degrees of freedom the chimera's covert code was written in
-            # (per-frame step wiggles) rather than taxing or ignoring them, and is the
-            # classical bar pointer's between-boundaries-constant tempo, as a q family.
-            # Segments count from frame 0, not from the trajectory's own wraps: aligned
-            # to bar LENGTH, not bar position -- the cheap version, by design.
-            batch, length = drift.shape
-            frames_per_bar = torch.clamp(
-                torch.round(TWO_PI / delta[:, 0].clamp(min=1e-6)), min=1).long()
-            seg = (torch.arange(length, device=drift.device)[None, :]
-                   // frames_per_bar[:, None])
-            segments = int(seg.max()) + 1
-            sums = torch.zeros(batch, segments, device=drift.device
-                               ).scatter_add_(1, seg, drift)
-            counts = torch.zeros(batch, segments, device=drift.device
-                                 ).scatter_add_(1, seg, torch.ones_like(drift))
-            drift = (sums / counts.clamp(min=1.0)).gather(1, seg)
+            drift = self.pool_bar_rate(drift, delta)
 
         advance = (delta if delta is not None else 0.0) + drift
         # grouped so cumsum[0] - advance[0] cancels EXACTLY: mu[0] must equal the
@@ -367,7 +375,7 @@ class BarPhaseVAE(nn.Module):
         Returns:
             dict with elbo, recon, kl (per crop, [B]) and the encoder's mu and kappa.
         """
-        mu, kappa = self.encoder(h, delta)
+        mu, kappa = self.trajectory(h, delta, mask)
         kl = self.kl_to_physical_prior(mu, kappa, delta, mask)
 
         weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
@@ -384,6 +392,18 @@ class BarPhaseVAE(nn.Module):
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa}
 
+    def trajectory(self, h, delta, mask=None):
+        """[B, T, D] -> (mu, kappa): q's mean path, the ONE place it is constructed.
+
+        Training (``forward``) and deployment (``infer_phase``) both route through here,
+        so a variant that post-processes mu -- an anchor correction, a shift, a
+        re-parameterisation -- cannot apply it in one path and forget it in the other.
+        That divergence is not hypothetical: anchor_k pooled its deployed statistic
+        WITHOUT the length mask while training pooled with it, and the training log
+        could not see the difference.
+        """
+        return self.encoder(h, delta)
+
     @property
     def deployed_net(self):
         """The inference network read at test time; controls assert ITS target-blindness.
@@ -395,24 +415,29 @@ class BarPhaseVAE(nn.Module):
         return self.encoder
 
     @torch.no_grad()
-    def infer_phase(self, h, delta=None):
+    def infer_phase(self, h, delta=None, mask=None):
         """Deployment (8.1.2): zhat = mu_phi(x). Reads audio only; returns [B, T].
 
         ``delta`` is the GIVEN bar rate, not an annotation of phase -- the model is handed
         the bar period and has to find the bar's position, which is the whole task.
+        ``mask`` is audio-length validity (which frames are real vs window padding),
+        ignored by this family; a variant whose deployed statistic POOLS over frames
+        (anchor_k's slot vote) must exclude pad frames or untrained pad responses
+        outvote the decision margin on every short-song window (33% of every gtzan
+        item) -- found by the anchor_k pre-launch review.
         """
         assert not self.training, "deployment path must run in eval mode"
-        return self.encoder(h, delta)[0]
+        return self.trajectory(h, delta, mask)[0]
 
     @torch.no_grad()
-    def emission_probs(self, h, delta=None):
+    def emission_probs(self, h, delta=None, mask=None):
         """Alternative D (8.3.4): the emission evaluated at the deployed mean path.
 
         delta must be passed whenever the trajectory family uses it (drift_bound > 0):
         omitting it silently built the path without its base advance -- the audit found
         every bounded arm's emission-D column had been scored on that broken path.
         """
-        return torch.sigmoid(self.emission_logits(self.infer_phase(h, delta)))
+        return torch.sigmoid(self.emission_logits(self.infer_phase(h, delta, mask)))
 
 
 def downbeat_frames(mu, mask=None):
