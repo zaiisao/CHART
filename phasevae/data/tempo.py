@@ -63,9 +63,23 @@ def estimate_bar_period(activation: torch.Tensor, mask: torch.Tensor,
     valid = mask.sum(1, keepdim=True).clamp(min=1.0)
     p = (p - (p * mask).sum(1, keepdim=True) / valid) * mask     # zero-mean on real frames
 
-    lag_max = int(min(N_HARM * P_MAX_S * fps, activation.shape[1] - 50))
-    if lag_max <= L_MIN + 2:                                    # window too short to try
+    score, grid = harmonic_score(p, fps)
+    if score is None:                                           # window too short to try
         return torch.full((activation.shape[0],), 0.5 * (P_MIN_S + P_MAX_S), device=device)
+    return grid[pick_period(score)]
+
+
+def harmonic_score(p: torch.Tensor, fps: float):
+    """Zero-meaned [B, T] activation -> ([B, G] harmonic-sum score, [G] period grid, s).
+
+    Split out of ``estimate_bar_period`` so a candidate period's evidence can be read
+    directly (which peak won, by how much, and what the truth scored) rather than
+    inferred from the winner. Returns ``(None, None)`` when the window is too short.
+    """
+    device = p.device
+    lag_max = int(min(N_HARM * P_MAX_S * fps, p.shape[1] - 50))
+    if lag_max <= L_MIN + 2:
+        return None, None
     r = _autocorrelation(p, lag_max)
     r[:, :L_MIN] = 0.0
 
@@ -77,13 +91,16 @@ def estimate_bar_period(activation: torch.Tensor, mask: torch.Tensor,
     frac = (lags - lo).clamp(0.0, 1.0)
     vals = (r[:, lo] * (1.0 - frac) + r[:, lo + 1] * frac).clamp(min=0.0)         # [B,K,G]
     score = (vals * usable).sum(1) / usable.sum(0).clamp(min=1)                   # [B, G]
+    return score, grid / fps
 
+
+def pick_period(score: torch.Tensor) -> torch.Tensor:
+    """[B, G] score -> [B] index of the SMALLEST peak clearing ALPHA * max."""
     peak_floor = ALPHA * score.max(dim=1, keepdim=True).values
     interior = score[:, 1:-1]
     is_peak = ((interior > score[:, :-2]) & (interior > score[:, 2:])
                & (interior >= peak_floor))
-    first = torch.where(is_peak.any(1), is_peak.float().argmax(1) + 1, score.argmax(1))
-    return grid[first] / fps
+    return torch.where(is_peak.any(1), is_peak.float().argmax(1) + 1, score.argmax(1))
 
 
 def delta_from_audio(activation: torch.Tensor, mask: torch.Tensor,
