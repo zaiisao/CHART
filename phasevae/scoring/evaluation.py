@@ -83,8 +83,8 @@ def null_times(crop, kind: str, rng):
     """A baseline downbeat sequence with the right RATE but no learned phase.
 
     ``kind="random"`` starts the grid at a uniformly random phase; ``kind="zero"`` starts
-    it at the crop boundary. Both know the bar period -- which the model is also given --
-    so beating them is a statement about PHASE alone, not about tempo.
+    it at the crop boundary. Both get the same AUDIO-ESTIMATED bar period the model runs
+    on, so beating them is a statement about PHASE alone, not about tempo.
     """
     period = crop["bar_period"]
     span = len(crop["y"]) / crop["fps"] if "fps" in crop else None
@@ -180,6 +180,11 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
                 continue
             crops = [records[i] for i in keep]
             batch = to_model_batch(raw, frontend, device)
+            # the peak picker and the nulls need a bar period too; give them the SAME
+            # audio-derived estimate the model runs on, never the annotated one
+            est_period = batch["bar_period_est"].cpu().numpy()
+            for i, crop in enumerate(crops):
+                crop["bar_period"] = float(est_period[keep[i]])
             mu = model.infer_phase(batch["h"], batch["delta"], batch["mask"])[keep]
             times = rule_g_times(mu, batch["mask"][keep], crops)
             probs = model.emission_probs(

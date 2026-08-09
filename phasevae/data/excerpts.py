@@ -36,6 +36,7 @@ import numpy as np
 import torch
 
 from .dataset import MIN_DOWNBEATS, bar_period
+from .tempo import TWO_PI, delta_from_audio
 from .features import atomic_save_npy
 
 INPUT_CACHE_DIR = "/disk4/jaehoon/vbpm_input_cache"
@@ -203,9 +204,21 @@ def to_model_batch(batch: dict, frontend, device) -> dict:
     The frozen frontend runs here, inside the loop; ``.clone()`` lifts the features out
     of inference mode so autograd may save them for the VAE's backward. delta broadcasts
     to per-frame [B, T] -- one constant per window, see bar_period for why.
+
+    delta is ESTIMATED FROM THE AUDIO (data/tempo.py), never taken from the annotations.
+    It is the rate the model's ramp runs at, so a deployed system has to produce it from
+    the signal; ``batch["delta"]`` (annotation-derived) is deliberately NOT read here and
+    survives only as a reference column for diagnostics. This is the single funnel every
+    consumer of the model goes through -- training, evaluation, controls and checks --
+    so removing the oracle here removes it everywhere.
     """
     h = frontend.forward_features(batch["input"]).clone()
+    assert h.shape[-1] >= 2, "delta estimation needs the frontend's activation channels"
+    mask = batch["mask"].to(device, non_blocking=True)
+    delta = delta_from_audio(torch.sigmoid(h[..., -1]), mask, frontend.FPS)
     return {"h": h,
-            "delta": batch["delta"].to(device)[:, None].expand(-1, h.shape[1]),
-            "mask": batch["mask"].to(device, non_blocking=True),
-            "y": batch["y"].to(device, non_blocking=True)}
+            "delta": delta[:, None].expand(-1, h.shape[1]),
+            "mask": mask,
+            "y": batch["y"].to(device, non_blocking=True),
+            "bar_period_est": TWO_PI / (delta * frontend.FPS),
+            "delta_annotated": batch["delta"].to(device)}

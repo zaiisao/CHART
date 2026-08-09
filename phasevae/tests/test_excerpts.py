@@ -151,3 +151,61 @@ def test_construction_computes_and_reuses_the_input_cache(tmp_path):
     broken.audio_path = audio_dir / "nope.wav"
     ds = ExcerptDataset([broken], frontend, cache_root=str(tmp_path))
     assert len(ds) == 0 and ds.rejects == ["broken"]
+
+
+# ---------------------------------------------------------------------------
+# The no-oracle contract: delta reaches the model from AUDIO, never annotations.
+# ---------------------------------------------------------------------------
+
+class _ActivationFrontend:
+    """Emits [B, T, 4] whose LAST channel is a downbeat logit train at a known period."""
+
+    FPS = 50.0
+
+    def __init__(self, period_frames):
+        self.period_frames = period_frames
+
+    @property
+    def name(self):
+        return "acts"
+
+    def forward_features(self, batch):
+        b, t = batch.shape[0], batch.shape[1]
+        h = torch.full((b, t, 4), -6.0)
+        h[:, :: self.period_frames, -1] = 6.0
+        return h
+
+
+def test_delta_is_estimated_from_audio_not_taken_from_annotations():
+    """to_model_batch must IGNORE the annotated delta and read the activation instead.
+
+    The guard that keeps the last oracle out: corrupt the annotated delta wildly and the
+    model's delta must not move, because it is a function of h alone.
+    """
+    from phasevae.data.excerpts import to_model_batch
+
+    frontend = _ActivationFrontend(period_frames=100)          # a 2.0 s bar at 50 fps
+    raw = {"input": torch.zeros(2, 1500, 4),
+           "mask": torch.ones(2, 1500),
+           "y": torch.zeros(2, 1500),
+           "delta": torch.tensor([0.0628, 0.0628])}
+    honest = to_model_batch(raw, frontend, torch.device("cpu"))["delta"][:, 0].clone()
+
+    raw["delta"] = torch.tensor([99.0, -99.0])                 # nonsense annotations
+    corrupted = to_model_batch(raw, frontend, torch.device("cpu"))["delta"][:, 0]
+
+    assert torch.allclose(honest, corrupted), "delta moved with the ANNOTATION -- oracle leak"
+    expected = 2.0 * np.pi / 100.0                             # 2.0 s bar, 50 fps
+    assert abs(float(honest[0]) - expected) < 0.05 * expected
+
+
+def test_estimated_period_recovers_a_planted_bar():
+    from phasevae.data.tempo import estimate_bar_period
+
+    activation = torch.zeros(2, 2250)
+    activation[0, ::100] = 1.0                                 # 2.0 s
+    activation[1, ::75] = 1.0                                  # 1.5 s
+    activation += 0.02
+    period = estimate_bar_period(activation, torch.ones(2, 2250), 50.0)
+    assert abs(float(period[0]) - 2.0) < 0.05
+    assert abs(float(period[1]) - 1.5) < 0.05
