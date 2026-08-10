@@ -41,7 +41,8 @@ import math
 import torch
 from torch import nn
 
-from .vonmises import log_i0, mean_resultant, sample_vonmises
+from .vonmises import log_i0, mean_resultant, sample_vonmises, second_resultant
+
 
 TWO_PI = 2.0 * math.pi
 
@@ -79,118 +80,79 @@ def vonmises_entropy(kappa):
 class Encoder(nn.Module):
     """q_phi(phi_t | x) = vM(mu_t(x), kappa_t(x)), per frame, reading AUDIO ONLY.
 
-    Tutorial 7.3.2 and 9.9.2. It never sees the target, which is what makes it the object
-    deployed at inference rather than training scaffolding. The mean is emitted as a
-    (cos, sin) pair and read back with atan2, so it is continuous across the wrap -- a
-    scalar head would have to jump by 2 pi somewhere on the circle.
+    Tutorial 7.3.2: the encoder depends only on x, which is what makes it the object
+    DEPLOYED at inference rather than training scaffolding.
+
+    The mean is emitted as a 2-vector and read back with atan2, so it stays continuous
+    across the wrap: a scalar head would have to jump by 2 pi somewhere on the circle,
+    and wherever that seam sits the network must learn an impossible cliff there. Two
+    nearly identical windows whose true offsets are 0.01 and 6.27 rad would demand
+    outputs 6.26 apart; a smooth head splits the difference at pi, the worst possible
+    answer -- which is how rule g once scored F 0.000 on ground truth. Nothing forces
+    the 2-vector onto the unit circle: atan2 is scale-invariant, so the radius is a
+    gauge. It matters only for conditioning -- the gradient scales as 1/r -- which is
+    why bias[1] starts at 1.0 rather than 0.
     """
 
-    def __init__(self, input_dim: int, hidden: int = 128, layers: int = 2,
-                 drift_bound: float = 0.0, bar_rate: bool = False,
-                 kappa_physical: float = KAPPA_PHYSICAL):
+    def __init__(self, input_dim: int, d_model: int = 128, heads: int = 4, layers: int = 2,
+                 kappa_physical: float = KAPPA_PHYSICAL, max_len: int = 4096):
         super().__init__()
-        self.drift_bound = drift_bound
-        self.kappa_physical = float(kappa_physical)
-        self.bar_rate = bar_rate and drift_bound > 0
 
-        self.proj = nn.Linear(input_dim, hidden)
-        self.rnn = nn.GRU(hidden, hidden, num_layers=layers, batch_first=True,
-                          bidirectional=True)
-        # channels: 0,1 = (cos, sin) of the crop's phase offset, read at frame 0;
-        # 2 = concentration; 3 = per-frame drift, only when the bound is active
-        self.out = nn.Linear(2 * hidden, 4 if drift_bound > 0 else 3)
+        self.proj = nn.Linear(input_dim, d_model)
+        layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
+                                        dropout=0.0, activation="gelu",
+                                        batch_first=True, norm_first=True)
+        self.blocks = nn.TransformerEncoder(layer, layers)
+        self.out = nn.Linear(d_model, 3)
 
-        # small but NOT zero: a zero output layer makes d(loss)/d(body) exactly zero at
-        # step 0, which is how this project shipped a dead subnetwork three times.
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.zeros_(self.out.bias)
 
-        # Domain-informed birth state: with zero bias the offset head is atan2 of two
-        # tiny random numbers -- a UNIFORMLY RANDOM angle held with kappa~2000
-        # conviction. Biasing the cos component to 1 makes every network start at the
-        # physical prior's mode (phase 0, steady coast, zero drift), so two freshly
-        # initialised networks AGREE -- measured: the q-to-psi KL at epoch 0 drops from
-        # ~3.2M nats (confidence^2 x random disagreement) to its floor.
         with torch.no_grad():
             self.out.bias[1] = 1.0
 
-        self.register_buffer("kappa_bias", torch.tensor(inverse_softplus(self.kappa_physical)))
+        self.register_buffer("pe", EmissionTransformer._sinusoidal(max_len, d_model))
+        self.register_buffer("log_kappa_bias",
+                     torch.tensor(math.log(kappa_physical)), persistent=False)
 
-    def features(self, x):
-        """[B, T, D] -> [B, T, 2*hidden]: the BiGRU trunk shared by every head.
+    def features(self, h, mask=None):
+        """[B, T, D] -> [B, T, d_model]: the trunk shared by every head (tutorial 9.2).
 
-        Split from ``heads`` so a variant module can attach extra heads to the same
-        trunk without duplicating the body (see phasevae/psi.py).
+        Split from ``heads`` so a variant module can attach extra heads to the same body
+        without duplicating it (see variants/psi.py). ``mask`` is audio-length validity;
+        it must reach attention, because self-attention is not causal -- without it every
+        real frame attends to the zero-padded tail, and the offset head reads frame 0.
         """
-        return self.rnn(torch.tanh(self.proj(x)))[0]
+        pad = None if mask is None else (mask <= 0)
+        h = self.proj(h) + self.pe[:h.shape[1]]
+        return self.blocks(h, src_key_padding_mask=pad)
 
-    def forward(self, h, delta=None):
-        """[B, T, D] -> (mu [B, T], kappa [B, T]).
+    def heads(self, trunk):
+        """Trunk -> (mu [B, T], kappa [B, T]): the parameters of q, not a sample.
 
-        With ``drift_bound > 0`` the phase is not emitted per frame. It is built as
-
-            mu = offset(h) + cumsum(delta + eps * tanh(g_t(h)))
-
-        so the per-frame advance cannot leave ``delta +- eps``. This is the classical
-        bar pointer's hard lattice restriction, moved into the parameterisation.
-
-        Why it exists: emitting mu per frame lets the encoder produce a SPIKE TRAIN --
-        measured at 0.715 rad/frame advance against a true 0.065, dipping to phase 0 on
-        downbeats (concentration 0.969) and doing anything in between (error 1.44 rad
-        against 1.57 for chance). That satisfies a reconstruction which is nonzero on 3%
-        of frames and says nothing about the other 97%. The von Mises prior only makes it
-        expensive, and a 30x-weighted reconstruction outbids the penalty. Bounding the
-        drift makes it unrepresentable instead. Free-q measurement: F 0.075 -> 0.911.
+        Channels 0,1 are the (sin, cos) of the phase offset -- note atan2's argument
+        order, which the previous comment here had reversed; bias[1] = 1.0 therefore
+        starts every network at angle 0, the physical prior's mode. Channel 2 is the
+        concentration in LOG space (tutorial 9.4's convention for the spread head), so
+        kappa = kappa_physical * exp(raw): raw 0 gives the prior's concentration and the
+        whole useful range is within +-5. The additive form this replaced needed raw
+        -1990 to reach kappa 10, i.e. kappa could not move.
         """
-        return self.heads(self.features(h), delta)
-
-    def pool_bar_rate(self, drift, delta):
-        """[B, T] drift -> [B, T]: ONE rate per bar-length segment.
-
-        Mean-pool the drift over blocks of ~2*pi/delta frames, so within-bar step sizes
-        are EXACTLY constant. This deletes the degrees of freedom the chimera's covert
-        code was written in (per-frame step wiggles) rather than taxing or ignoring
-        them, and is the classical bar pointer's between-boundaries-constant tempo, as
-        a q family. Segments count from frame 0, not from the trajectory's own wraps:
-        aligned to bar LENGTH, not bar position -- the cheap version, by design.
-
-        Split out of ``heads`` so a variant that builds its own trajectory keeps the
-        identical rate family instead of a copy that can drift out of sync.
-        """
-        batch, length = drift.shape
-        frames_per_bar = torch.clamp(
-            torch.round(TWO_PI / delta[:, 0].clamp(min=1e-6)), min=1).long()
-        seg = (torch.arange(length, device=drift.device)[None, :]
-               // frames_per_bar[:, None])
-        segments = int(seg.max()) + 1
-        sums = torch.zeros(batch, segments, device=drift.device
-                           ).scatter_add_(1, seg, drift)
-        counts = torch.zeros(batch, segments, device=drift.device
-                             ).scatter_add_(1, seg, torch.ones_like(drift))
-        return (sums / counts.clamp(min=1.0)).gather(1, seg)
-
-    def heads(self, trunk, delta=None):
-        """Trunk -> (mu, kappa) under the structured-q parameterisation (see forward)."""
         out = self.out(trunk)
-        kappa = bounded_kappa(
-            nn.functional.softplus(out[..., 2] + self.kappa_bias) + 1e-3)
-
-        if self.drift_bound <= 0.0:
-            mu = torch.atan2(out[..., 0], out[..., 1])
-            return mu, kappa
-
-        offset = torch.atan2(out[:, :1, 0], out[:, :1, 1])       # ONE anchor per crop
-        drift = self.drift_bound * torch.tanh(out[..., 3])       # its own channel
-
-        if self.bar_rate and delta is not None:
-            drift = self.pool_bar_rate(drift, delta)
-
-        advance = (delta if delta is not None else 0.0) + drift
-        # grouped so cumsum[0] - advance[0] cancels EXACTLY: mu[0] must equal the
-        # offset bitwise (delta-independent), which offset + a - a does not guarantee
-        # in floating point once the canonical-start init made offsets tiny
-        mu = offset + (torch.cumsum(advance, dim=1) - advance[:, :1])
+        kappa = bounded_kappa(torch.exp(out[..., 2] + self.log_kappa_bias) + 1e-3)
+        mu = torch.atan2(out[..., 0], out[..., 1])
         return mu, kappa
+
+    def forward(self, h, mask=None):
+        """[B, T, D] -> (mu, kappa). Per-frame and free: see kl_to_physical_prior.
+
+        Nothing here ties consecutive mu together. That is deliberate under §7 -- the
+        tutorial prescribes no phase dynamics -- but it means the KL is the ONLY force
+        making the trajectory coherent, and a free init has second differences of order
+        1 rad. MEASURED: the KL opens at ~151k against a reconstruction of ~286, and the
+        steepest descent is to flatten mu.
+        """
+        return self.heads(self.features(h, mask))
 
 
 class EmissionTransformer(nn.Module):
@@ -258,14 +220,12 @@ class EmissionTransformer(nn.Module):
 class BarPhaseVAE(nn.Module):
     """Encoder + physical prior + latent-only emission. Learnable: theta and phi only."""
 
-    def __init__(self, input_dim: int, hidden: int = 128, emission: str = "cosine",
+    def __init__(self, input_dim: int, d_model: int = 128, emission: str = "cosine",
                  emission_layers: int = 2, emission_dim: int = 64,
-                 emission_positional: bool = False, drift_bound: float = 0.0,
-                 bar_rate: bool = False, kappa_physical: float = KAPPA_PHYSICAL):
+                 emission_positional: bool = False, kappa_physical: float = KAPPA_PHYSICAL):
         super().__init__()
         self.kappa_physical = float(kappa_physical)
-        self.encoder = Encoder(input_dim, hidden, drift_bound=drift_bound,
-                               bar_rate=bar_rate, kappa_physical=kappa_physical)
+        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical)
 
         self.emission_kind = emission
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
@@ -331,7 +291,7 @@ class BarPhaseVAE(nn.Module):
         weight = torch.ones_like(live) if mask is None else mask
         return float(((live - frozen).abs() * weight).sum() / weight.sum())
 
-    def kl_to_physical_prior(self, mu, kappa, delta, mask):
+    def kl_to_physical_prior(self, mu, kappa, mask):
         """KL( q_phi(phi_{1:T} | x) || p(phi_{1:T}) ), closed form -- never sampled.
 
         q is factorised over frames and p is a Markov chain, so the cross term is an
@@ -341,24 +301,26 @@ class BarPhaseVAE(nn.Module):
         concentrations enter as a product of mean resultant lengths. Everything below is
         that identity plus the von Mises entropy.
         """
-        entropy = vonmises_entropy(kappa)                       # -E_q[log q]
-        log_p_first = -math.log(TWO_PI)                         # phi_1 ~ Uniform
-        resultant = mean_resultant(kappa)
-        drift = mu[:, 1:] - mu[:, :-1] - delta[:, 1:]
-        cross = (self.kappa_physical * resultant[:, 1:] * resultant[:, :-1]
-                 * torch.cos(drift) - math.log(TWO_PI)
-                 - log_i0(torch.as_tensor(self.kappa_physical, device=mu.device)))
+        kp = torch.as_tensor(self.kappa_physical, device=mu.device)
+        a1, a2 = mean_resultant(kappa), second_resultant(kappa)
 
-        neg_entropy = -(entropy * mask).sum(1)
-        log_p = log_p_first * mask[:, 0] + (cross * mask[:, 1:]).sum(1)
+        inc = mu[:, 1:] - mu[:, :-1]
+        accel = inc[:, 1:] - inc[:, :-1]                        # [B, T-2]
+
+        # E_q[log p(phi_t | phi_{t-1}, phi_{t-2})] for t >= 3
+        cross = (kp * a1[:, 2:] * a2[:, 1:-1] * a1[:, :-2] * torch.cos(accel)
+                 - math.log(TWO_PI) - log_i0(kp))
+
+        neg_entropy = -(vonmises_entropy(kappa) * mask).sum(1)
+        log_p = (-math.log(TWO_PI) * (mask[:, 0] + mask[:, 1])
+                 + (cross * mask[:, 2:]).sum(1))
         return neg_entropy - log_p
 
-    def forward(self, h, delta, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """One ELBO evaluation on a padded batch (tutorial 7.7).
 
         Args:
             h: [B, T, D] audio features -- the ONLY input the encoder sees.
-            delta: [B, T] the per-frame bar-phase advance, one constant per crop.
             mask: [B, T] 1 on real frames.
             y: [B, T] per-frame downbeat target. Enters the RECONSTRUCTION only; the
                 encoder never receives it.
@@ -375,8 +337,8 @@ class BarPhaseVAE(nn.Module):
         Returns:
             dict with elbo, recon, kl (per crop, [B]) and the encoder's mu and kappa.
         """
-        mu, kappa = self.trajectory(h, delta, mask)
-        kl = self.kl_to_physical_prior(mu, kappa, delta, mask)
+        mu, kappa = self.encoder(h, mask)
+        kl = self.kl_to_physical_prior(mu, kappa, mask)
 
         weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
                                                     dtype=torch.float32),
@@ -386,23 +348,12 @@ class BarPhaseVAE(nn.Module):
         for _ in range(samples):
             phi = mu + sample_vonmises(kappa)
             per_frame = nn.functional.binary_cross_entropy_with_logits(
-                self.emission_logits(phi), y.float(), reduction="none")
+                self.emission_logits(phi, mask), y.float(), reduction="none")
             recon = recon - (per_frame * weight).sum(1)
+
         recon = recon / samples
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa}
-
-    def trajectory(self, h, delta, mask=None):
-        """[B, T, D] -> (mu, kappa): q's mean path, the ONE place it is constructed.
-
-        Training (``forward``) and deployment (``infer_phase``) both route through here,
-        so a variant that post-processes mu -- an anchor correction, a shift, a
-        re-parameterisation -- cannot apply it in one path and forget it in the other.
-        That divergence is not hypothetical: anchor_k pooled its deployed statistic
-        WITHOUT the length mask while training pooled with it, and the training log
-        could not see the difference.
-        """
-        return self.encoder(h, delta)
 
     @property
     def deployed_net(self):
@@ -415,7 +366,7 @@ class BarPhaseVAE(nn.Module):
         return self.encoder
 
     @torch.no_grad()
-    def infer_phase(self, h, delta=None, mask=None):
+    def infer_phase(self, h, mask=None):
         """Deployment (8.1.2): zhat = mu_phi(x). Reads audio only; returns [B, T].
 
         ``delta`` is the GIVEN bar rate, not an annotation of phase -- the model is handed
@@ -427,17 +378,17 @@ class BarPhaseVAE(nn.Module):
         item) -- found by the anchor_k pre-launch review.
         """
         assert not self.training, "deployment path must run in eval mode"
-        return self.trajectory(h, delta, mask)[0]
+        return self.encoder(h, mask)[0]
 
     @torch.no_grad()
-    def emission_probs(self, h, delta=None, mask=None):
+    def emission_probs(self, h, mask=None):
         """Alternative D (8.3.4): the emission evaluated at the deployed mean path.
 
         delta must be passed whenever the trajectory family uses it (drift_bound > 0):
         omitting it silently built the path without its base advance -- the audit found
         every bounded arm's emission-D column had been scored on that broken path.
         """
-        return torch.sigmoid(self.emission_logits(self.infer_phase(h, delta, mask)))
+        return torch.sigmoid(self.emission_logits(self.infer_phase(h, mask), mask))
 
 
 def downbeat_frames(mu, mask=None):

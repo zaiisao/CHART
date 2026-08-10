@@ -18,9 +18,8 @@ import mir_eval
 import numpy as np
 import torch
 
-from ..data.dataset import Batches
-from ..data.excerpts import collate_excerpts, to_model_batch
-from ..model import downbeat_frames
+from ..data.excerpts import collate_excerpts
+from ..model import TWO_PI, downbeat_frames
 
 TOLERANCE_S = 0.070
 
@@ -79,12 +78,82 @@ def f_measure(predicted, annotated, tolerance: float = TOLERANCE_S):
     return f, precision, recall
 
 
+def trajectory_period(mu, mask, fps):
+    """[B, T] phase -> [B] bar period in seconds, read off the model's OWN trajectory.
+
+    The mean per-frame advance IS the model's inferred rate, so 2*pi/(rate*fps) is its
+    inferred bar length. Nothing annotation-derived and no external estimator: since the
+    rate became the model's own inference (there is no ``delta`` any more), this is the
+    only bar period in the pipeline, and it is what the nulls and the peak picker need.
+
+    Increments are wrapped to (-pi, pi] because ``mu`` is emitted per frame through
+    atan2: at a bar boundary the raw difference jumps by ~2*pi and would otherwise
+    cancel the advance it should be counting.
+    """
+    inc = mu[:, 1:] - mu[:, :-1]
+    inc = torch.atan2(torch.sin(inc), torch.cos(inc))
+    weight = mask[:, 1:] * mask[:, :-1]
+    rate = (inc * weight).sum(1) / weight.sum(1).clamp(min=1.0)
+    # a non-advancing (or backward) trajectory has no period; fall back to the window
+    # length so the grid degenerates to a single time rather than dividing by zero
+    span = mask.sum(1).clamp(min=1.0) / fps
+    period = torch.where(rate > 1e-6, TWO_PI / (rate.clamp(min=1e-6) * fps), span)
+    return period.cpu().numpy()
+
+
+def trajectory_health(mu, kappa, mask, crops):
+    """(advance, kappa, phase_err, coverage): what F cannot see about the trajectory.
+
+    F(+-70 ms) only asks whether wrap TIMES land near downbeats, so it cannot distinguish
+    a learned bar pointer from an arbitrary path that happens to cross zero in the right
+    places. These four numbers can, and each has a recorded failure to compare against:
+
+      advance   mean wrapped per-frame increment, rad/frame. Real bars of 2-5 s at 50 fps
+                give 0.025-0.063. The spike train measured 0.715 (10x too fast, phase 0
+                on downbeats and arbitrary between); a KL-dominated collapse gives ~0.
+      kappa     mean posterior concentration. Starts at kappa_physical (2000); the
+                faithful/ collapse drove it to 0.022 (A(kappa) 0.011, i.e. uniform),
+                which buys cheap KL by being uncertain everywhere.
+      phase_err mean circular distance |mu - true_phase| over annotated frames, rad.
+                Chance is pi/2 = 1.571; the chimera run sat at 1.44 -- i.e. no better
+                than chance -- while its ADVANCE looked correct at 0.069 vs 0.065.
+      coverage  fraction of the circle mu actually visits (16 bins). A trajectory pinned
+                near one phase reports ~0.06 even when F looks alive.
+
+    ``crops`` are scoring_records; items whose annotated span does not cover the window
+    contribute only their valid frames.
+    """
+    from ..data.dataset import true_phase
+
+    inc = mu[:, 1:] - mu[:, :-1]
+    inc = torch.atan2(torch.sin(inc), torch.cos(inc))
+    w = mask[:, 1:] * mask[:, :-1]
+    advance = float((inc * w).sum() / w.sum().clamp(min=1.0))
+    kappa_mean = float((kappa * mask).sum() / mask.sum().clamp(min=1.0))
+
+    errs, visited = [], np.zeros(16, dtype=bool)
+    for i, crop in enumerate(crops):
+        t = len(crop["y"])
+        phi_true, ok = true_phase(crop)
+        if not ok.any():
+            continue
+        m = mu[i, :t].cpu().numpy()[ok]
+        diff = np.angle(np.exp(1j * (m - phi_true[ok])))
+        errs.append(np.abs(diff))
+        visited |= np.bincount(((m % TWO_PI) / TWO_PI * 16).astype(int) % 16,
+                               minlength=16).astype(bool)
+
+    phase_err = float(np.mean(np.concatenate(errs))) if errs else float("nan")
+    return advance, kappa_mean, phase_err, float(visited.mean())
+
+
 def null_times(crop, kind: str, rng):
     """A baseline downbeat sequence with the right RATE but no learned phase.
 
     ``kind="random"`` starts the grid at a uniformly random phase; ``kind="zero"`` starts
-    it at the crop boundary. Both get the same AUDIO-ESTIMATED bar period the model runs
-    on, so beating them is a statement about PHASE alone, not about tempo.
+    it at the crop boundary. Both get the model's OWN inferred bar period (see
+    trajectory_period), so beating them is a statement about PHASE alone, not about
+    tempo -- the null is handed the same rate the model found.
     """
     period = crop["bar_period"]
     span = len(crop["y"]) / crop["fps"] if "fps" in crop else None
@@ -107,37 +176,16 @@ def rule_g_times(mu, mask, raw):
             for i, c in enumerate(raw)]
 
 
-def evaluate_pooled(model, crops, device, batch_size: int):
-    """Pooled (F, CMLt, AMLt, est/ref) over ``crops`` on the deployed path.
-
-    The cheap per-epoch diagnostic read-out (check_warm_start): same conversion and
-    the same F authority as ``evaluate``, without the per-dataset/null machinery.
-    AMLt is a DIAGNOSTIC, never a target: F low with AMLt high is a metrical mistake,
-    both low is noise, and est/ref ~1.0 says the rate is right whatever the phase does.
-    """
-    model.eval()
-    rows = []
-
-    with torch.no_grad():
-        for raw, batch in Batches(crops, batch_size, device)():
-            mu = model.infer_phase(batch["h"], batch["delta"], batch["mask"])
-            for est, crop in zip(rule_g_times(mu, batch["mask"], raw), raw):
-                ref = np.asarray(crop["downbeat_times"])
-                if len(ref) < 2 or len(est) < 2:
-                    rows.append((0.0, 0.0, 0.0, len(est) / max(len(ref), 1)))
-                    continue
-                _cc, _ac, cmlt, amlt = mir_eval.beat.continuity(ref, est)
-                rows.append((f_measure(est, ref)[0], cmlt, amlt, len(est) / len(ref)))
-
-    return tuple(np.array(rows).mean(0))
-
-
 def scoring_records(raw) -> list:
     """Collated excerpt batch -> per-item scoring records, trimmed to valid frames.
 
-    THE excerpt-to-scorer bridge: the record vocabulary (y/fps/t0/bar_period/...) is
+    THE excerpt-to-scorer bridge: the record vocabulary (y/fps/t0/downbeat_times/...) is
     what every metric helper and control consumes. A fully-masked backstop item
     (nothing scorable) yields None so row alignment with the batch tensors survives.
+
+    ``bar_period`` is NOT here: it no longer exists in the dataset, and the only rate in
+    the pipeline is the model's own. ``evaluate`` fills the key in from
+    trajectory_period once mu is available, for the nulls and the peak picker.
     """
     records = []
     for i in range(len(raw["y"])):
@@ -147,11 +195,9 @@ def scoring_records(raw) -> list:
             continue
         records.append({"y": raw["y"][i, :valid].numpy(),
                         "fps": float(raw["fps"][i]), "t0": float(raw["t0"][i]),
-                        "bar_period": float(raw["bar_period"][i]),
-                        "delta": float(raw["delta"][i]),
                         "downbeat_times": np.asarray(raw["downbeat_times"][i]),
                         "anchors": np.asarray(raw["anchors"][i]),
-                        "dataset": raw["dataset"][i], "stem": raw["stem"][i]})
+                        "dataset": raw["dataset"][i], "song_id": raw["song_id"][i]})
     return records
 
 
@@ -179,16 +225,19 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
             if not keep:
                 continue
             crops = [records[i] for i in keep]
-            batch = to_model_batch(raw, frontend, device)
-            # the peak picker and the nulls need a bar period too; give them the SAME
-            # audio-derived estimate the model runs on, never the annotated one
-            est_period = batch["bar_period_est"].cpu().numpy()
+            # the same frontend call training makes; features never touch disk
+            h = frontend.forward_features(raw["input"]).clone()
+            mask = raw["mask"].to(device, non_blocking=True)
+
+            mu = model.infer_phase(h, mask)[keep]
+            times = rule_g_times(mu, mask[keep], crops)
+            probs = model.emission_probs(h, mask)[keep].cpu().numpy()
+
+            # the peak picker and the nulls need a bar period; take the model's OWN
+            # inferred rate, the only period left in the pipeline now that delta is gone
+            period = trajectory_period(mu, mask[keep], float(raw["fps"][0]))
             for i, crop in enumerate(crops):
-                crop["bar_period"] = float(est_period[keep[i]])
-            mu = model.infer_phase(batch["h"], batch["delta"], batch["mask"])[keep]
-            times = rule_g_times(mu, batch["mask"][keep], crops)
-            probs = model.emission_probs(
-                batch["h"], batch["delta"], batch["mask"])[keep].cpu().numpy()
+                crop["bar_period"] = float(period[i])
 
             for i, crop in enumerate(crops):
                 t = len(crop["y"])

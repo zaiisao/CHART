@@ -125,3 +125,20 @@ def sample_vonmises(kappa: torch.Tensor, max_rounds: int = 64) -> torch.Tensor:
     uniform = (2.0 * u1 - 1.0) * math.pi
     angle = torch.where(tiny | (~accepted), uniform, angle)
     return angle.to(kappa.dtype)
+
+
+def second_resultant(kappa: torch.Tensor) -> torch.Tensor:
+    """A_2(kappa) = I_2/I_0 = E[cos 2(phi - mu)] under vM(mu, kappa).
+
+    Exact via the Bessel recurrence I_0 - I_2 = (2/kappa) I_1, so A_2 = 1 - (2/kappa) A_1.
+    Needed because the constant-rate prior's mean 2*phi_{t-1} - phi_{t-2} puts coefficient
+    2 on the middle frame, and E[e^{i n phi}] = A_n(kappa) e^{i n mu}. Substituting A_1^2
+    is wrong by 61% at kappa = 2.
+
+    Below kappa ~ 0.1 the closed form is 1 - (something ~ 1) and cancels catastrophically;
+    the series limit A_2 -> kappa^2/8 is used there (matches scipy to 2e-7 at 0.1).
+    """
+    a1 = mean_resultant(kappa)
+    return torch.where(kappa < 0.1,
+                       kappa * kappa / 8.0,
+                       1.0 - (2.0 / kappa.clamp(min=1e-12)) * a1)

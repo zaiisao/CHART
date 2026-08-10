@@ -5,7 +5,6 @@ path that does not need a GPU model; the real frontends' forward paths are cover
 their own __main__ smoke checks.
 """
 import numpy as np
-import pytest
 import torch
 
 from phasevae.data.excerpts import (ExcerptDataset, collate_excerpts,
@@ -27,8 +26,8 @@ class _StubFrontend:
 class _Song:
     dataset = "toy"
 
-    def __init__(self, stem, downbeats, fold=0):
-        self.stem, self.fold = stem, fold
+    def __init__(self, song_id, downbeats, fold=0):
+        self.song_id, self.fold = song_id, fold
         self._downbeats = np.asarray(downbeats, dtype=np.float64)
 
     def beats(self):
@@ -94,8 +93,6 @@ def test_targets_match_annotations(tmp_path):
     ds = ExcerptDataset([song], _StubFrontend(), cache_root=str(tmp_path),
                         excerpt_seconds=45.0, deterministic=True)
     item = ds[0]
-    assert float(item["bar_period"]) == pytest.approx(period)
-    assert float(item["delta"]) == pytest.approx(2 * np.pi / (period * 50.0))
     start = int(round(float(item["t0"]) * ds.fps))
     for t in item["downbeat_times"]:
         centre = int(round(t * ds.fps)) - start
@@ -125,8 +122,7 @@ def test_collate_stacks_and_lists(tmp_path):
     frames = ds.excerpt_frames
     assert batch["input"].shape == (3, frames, 4)
     assert batch["y"].shape == (3, frames) and batch["mask"].shape == (3, frames)
-    assert batch["delta"].shape == (3,) and torch.is_tensor(batch["delta"])
-    assert isinstance(batch["downbeat_times"], list) and len(batch["stem"]) == 3
+    assert isinstance(batch["downbeat_times"], list) and len(batch["song_id"]) == 3
 
 
 def test_construction_computes_and_reuses_the_input_cache(tmp_path):
@@ -156,48 +152,6 @@ def test_construction_computes_and_reuses_the_input_cache(tmp_path):
 # ---------------------------------------------------------------------------
 # The no-oracle contract: delta reaches the model from AUDIO, never annotations.
 # ---------------------------------------------------------------------------
-
-class _ActivationFrontend:
-    """Emits [B, T, 4] whose LAST channel is a downbeat logit train at a known period."""
-
-    FPS = 50.0
-
-    def __init__(self, period_frames):
-        self.period_frames = period_frames
-
-    @property
-    def name(self):
-        return "acts"
-
-    def forward_features(self, batch):
-        b, t = batch.shape[0], batch.shape[1]
-        h = torch.full((b, t, 4), -6.0)
-        h[:, :: self.period_frames, -1] = 6.0
-        return h
-
-
-def test_delta_is_estimated_from_audio_not_taken_from_annotations():
-    """to_model_batch must IGNORE the annotated delta and read the activation instead.
-
-    The guard that keeps the last oracle out: corrupt the annotated delta wildly and the
-    model's delta must not move, because it is a function of h alone.
-    """
-    from phasevae.data.excerpts import to_model_batch
-
-    frontend = _ActivationFrontend(period_frames=100)          # a 2.0 s bar at 50 fps
-    raw = {"input": torch.zeros(2, 1500, 4),
-           "mask": torch.ones(2, 1500),
-           "y": torch.zeros(2, 1500),
-           "delta": torch.tensor([0.0628, 0.0628])}
-    honest = to_model_batch(raw, frontend, torch.device("cpu"))["delta"][:, 0].clone()
-
-    raw["delta"] = torch.tensor([99.0, -99.0])                 # nonsense annotations
-    corrupted = to_model_batch(raw, frontend, torch.device("cpu"))["delta"][:, 0]
-
-    assert torch.allclose(honest, corrupted), "delta moved with the ANNOTATION -- oracle leak"
-    expected = 2.0 * np.pi / 100.0                             # 2.0 s bar, 50 fps
-    assert abs(float(honest[0]) - expected) < 0.05 * expected
-
 
 def test_estimated_period_recovers_a_planted_bar():
     from phasevae.data.tempo import estimate_bar_period

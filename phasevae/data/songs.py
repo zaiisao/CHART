@@ -28,22 +28,30 @@ AUDIO_BY_STEM = _REPO_ROOT / "dataset_store" / "audio_by_stem"
 
 
 class Song:
-    """One annotated song: (stem, dataset, fold, audio_path, beats_path)."""
+    """One annotated song: (song_id, dataset, fold, audio_path, beats_path)."""
 
-    def __init__(self, stem, dataset, fold, audio_path, beats_path):
-        self.stem, self.dataset, self.fold = stem, dataset, fold
+    def __init__(self, song_id, dataset, fold, audio_path, beats_path):
+        self.song_id, self.dataset, self.fold = song_id, dataset, fold
         self.audio_path, self.beats_path = audio_path, beats_path
 
     def beats(self):
         """(beat_times, downbeat_times) in seconds, from the official .beats annotation."""
         annotation = np.loadtxt(self.beats_path, ndmin=2)
         beat_times = annotation[:, 0]
-        downbeat_times = beat_times[annotation[:, 1] == 1] if annotation.shape[1] > 1 else \
-            np.array([])
+        downbeat_times = np.array([])
+
+        assert annotation.shape[1] in (1, 2), \
+            f"unexpected annotation shape {annotation.shape} in {self.beats_path}"
+
+        if annotation.shape[1] == 2:
+            # JA: datasets like smc and simac do not have downbeat annotations
+            beat_in_bar = annotation[:, 1]
+            downbeat_times = beat_times[beat_in_bar == 1]
+
         return beat_times, downbeat_times
 
     def __repr__(self):
-        return f"Song({self.stem}, fold={self.fold})"
+        return f"Song({self.song_id}, fold={self.fold})"
 
 
 def coverage_report() -> str:

@@ -17,7 +17,7 @@ What they disagree on, and the choice made here:
     chunking) lives in the Frontend class — this module only ever assumes "axis 0 of
     the cached array is time, at frontend.FPS".
 
-The cache is one flat file per song (<cache>/<frontend>/<dataset>/<stem>.npy).
+The cache is one flat file per song (<cache>/<frontend>/<dataset>/<song_id>.npy).
 Beat This's directory-per-song store existed to hold precomputed pitch/tempo
 augmentation variants beside the plain spectrogram; that augmentation was tried on
 the SMC mission and did not help, so the folder level is gone with it.
@@ -35,16 +35,15 @@ import pathlib
 import numpy as np
 import torch
 
-from .dataset import MIN_DOWNBEATS, bar_period
-from .tempo import TWO_PI, delta_from_audio
+from .dataset import MIN_DOWNBEATS
 from .features import atomic_save_npy
 
 INPUT_CACHE_DIR = "/disk4/jaehoon/vbpm_input_cache"
 
 
 def input_cache_path(frontend_name: str, song, cache_root: str = INPUT_CACHE_DIR):
-    """<cache>/<frontend>/<dataset>/<stem>.npy — one flat file per song."""
-    return pathlib.Path(cache_root) / frontend_name / song.dataset / f"{song.stem}.npy"
+    """<cache>/<frontend>/<dataset>/<song_id>.npy — one flat file per song."""
+    return pathlib.Path(cache_root) / frontend_name / song.dataset / f"{song.song_id}.npy"
 
 
 def _compute_input(frontend, song):
@@ -74,8 +73,6 @@ class ExcerptDataset(torch.utils.data.Dataset):
     read joins ``rejects`` rather than killing the run.
     """
 
-    RETRIES = 8            # window draws per __getitem__ before conceding the middle
-
     def __init__(self, songs, frontend, excerpt_seconds: float = 45.0,
                  deterministic: bool = False, cache_root: str = INPUT_CACHE_DIR):
         self.frontend_name = frontend.name
@@ -90,15 +87,15 @@ class ExcerptDataset(torch.utils.data.Dataset):
             _beat_times, downbeat_times = song.beats()
             downbeat_times = np.asarray(downbeat_times, dtype=np.float64)
             if len(downbeat_times) < MIN_DOWNBEATS:
-                self.rejects.append(song.stem)
+                self.rejects.append(song.song_id)
                 continue
             path = input_cache_path(self.frontend_name, song, cache_root)
             if not path.exists():
                 try:
                     array = _compute_input(frontend, song)
                 except Exception as error:  # noqa: BLE001 — one bad file costs one song
-                    print(f"  input FAILED for {song.stem}: {error!r}", flush=True)
-                    self.rejects.append(song.stem)
+                    print(f"  input FAILED for {song.song_id}: {error!r}", flush=True)
+                    self.rejects.append(song.song_id)
                     continue
                 path.parent.mkdir(parents=True, exist_ok=True)
                 atomic_save_npy(path, array)
@@ -117,30 +114,15 @@ class ExcerptDataset(torch.utils.data.Dataset):
         frames = min(self.excerpt_frames, total)
         longer = total - frames
 
-        # Fresh window per call; a draw whose bar period is undefined (too few downbeats
-        # inside) is redrawn, and the middle window is the deterministic/backstop choice.
-        start, targets = longer // 2, None
-        if not self.deterministic:
-            for _ in range(self.RETRIES):
-                candidate = int(np.random.randint(0, longer + 1))
-                targets = self._targets(downbeat_times, candidate, frames)
-                if targets is not None:
-                    start = candidate
-                    break
-        if targets is None:
-            targets = self._targets(downbeat_times, start, frames)
-        if targets is None:
-            # Even the middle fails — emit a fully-masked item rather than crash a batch;
-            # the mask zeroes its loss contribution.
-            targets = {"delta": 0.0, "bar_period": 0.0,
-                       "y": np.zeros(frames, dtype=np.float32),
-                       "downbeat_times": np.empty(0), "anchors": np.empty(0)}
-            valid = np.zeros(frames, dtype=np.float32)
-        else:
-            valid = np.ones(frames, dtype=np.float32)
+        # Fresh random window per call (Beat This's policy); val/test take the middle
+        # so every scored window is identical across runs.
+        start = longer // 2 if self.deterministic else int(np.random.randint(0, longer + 1))
+        targets = self._targets(downbeat_times, start, frames)
 
         window = np.array(array[start:start + frames], dtype=np.float32)
-        mask = valid
+        labeled = len(targets["downbeat_times"]) > 0
+        mask = np.full(frames, float(labeled), dtype=np.float32)
+
         pad = self.excerpt_frames - frames
         if pad > 0:                                            # song shorter than the window
             window = np.pad(window, [(0, pad)] + [(0, 0)] * (window.ndim - 1))
@@ -148,12 +130,10 @@ class ExcerptDataset(torch.utils.data.Dataset):
             mask = np.pad(mask, (0, pad))
 
         return {"input": window, "y": targets["y"], "mask": mask,
-                "delta": np.float32(targets["delta"]),
-                "bar_period": np.float32(targets["bar_period"]),
                 "t0": np.float32(start / self.fps), "fps": np.float32(self.fps),
                 "downbeat_times": targets["downbeat_times"],
                 "anchors": targets["anchors"],
-                "dataset": song.dataset, "stem": song.stem, "fold": song.fold}
+                "dataset": song.dataset, "song_id": song.song_id}
 
     def _targets(self, downbeat_times, start: int, frames: int,
                  target_tol_frames: int = 1):
@@ -164,9 +144,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
         each side where available) so true_phase interpolation is defined at the edges.
         """
         lo_t, hi_t = start / self.fps, (start + frames) / self.fps
-        period = bar_period(downbeat_times, lo_t, hi_t)
-        if period is None or period <= 0:
-            return None
+
         inside = downbeat_times[(downbeat_times >= lo_t) & (downbeat_times <= hi_t)]
 
         first = np.searchsorted(downbeat_times, lo_t, side="left")
@@ -177,8 +155,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
         for t in inside:
             centre = int(round(t * self.fps)) - start
             y[max(0, centre - target_tol_frames):centre + target_tol_frames + 1] = 1.0
-        return {"delta": float(2.0 * np.pi / (period * self.fps)), "bar_period": period,
-                "y": y, "downbeat_times": np.asarray(inside, dtype=np.float64),
+        return {"y": y, "downbeat_times": np.asarray(inside, dtype=np.float64),
                 "anchors": np.asarray(anchors, dtype=np.float64)}
 
 
@@ -191,34 +168,8 @@ def collate_excerpts(batch: list) -> dict:
     out = {}
     for key in ("input", "y", "mask"):
         out[key] = torch.from_numpy(np.stack([item[key] for item in batch]))
-    for key in ("delta", "bar_period", "t0", "fps"):
+    for key in ("t0", "fps"):
         out[key] = torch.tensor([item[key] for item in batch])
-    for key in ("downbeat_times", "anchors", "dataset", "stem", "fold"):
+    for key in ("downbeat_times", "anchors", "dataset", "song_id"):
         out[key] = [item[key] for item in batch]
     return out
-
-
-def to_model_batch(batch: dict, frontend, device) -> dict:
-    """Collated excerpt batch -> the model's (h, delta, mask, y) contract.
-
-    The frozen frontend runs here, inside the loop; ``.clone()`` lifts the features out
-    of inference mode so autograd may save them for the VAE's backward. delta broadcasts
-    to per-frame [B, T] -- one constant per window, see bar_period for why.
-
-    delta is ESTIMATED FROM THE AUDIO (data/tempo.py), never taken from the annotations.
-    It is the rate the model's ramp runs at, so a deployed system has to produce it from
-    the signal; ``batch["delta"]`` (annotation-derived) is deliberately NOT read here and
-    survives only as a reference column for diagnostics. This is the single funnel every
-    consumer of the model goes through -- training, evaluation, controls and checks --
-    so removing the oracle here removes it everywhere.
-    """
-    h = frontend.forward_features(batch["input"]).clone()
-    assert h.shape[-1] >= 2, "delta estimation needs the frontend's activation channels"
-    mask = batch["mask"].to(device, non_blocking=True)
-    delta = delta_from_audio(torch.sigmoid(h[..., -1]), mask, frontend.FPS)
-    return {"h": h,
-            "delta": delta[:, None].expand(-1, h.shape[1]),
-            "mask": mask,
-            "y": batch["y"].to(device, non_blocking=True),
-            "bar_period_est": TWO_PI / (delta * frontend.FPS),
-            "delta_annotated": batch["delta"].to(device)}

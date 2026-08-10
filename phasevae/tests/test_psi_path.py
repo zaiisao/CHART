@@ -28,9 +28,9 @@ def _seed():
     np.random.seed(0)
 
 
-def _psi_model(psi_rotations=4, hidden=8):
+def _psi_model(psi_rotations=4, d_model=8):
     _seed()
-    return PsiBarPhaseVAE(input_dim=4, hidden=hidden, emission="cosine",
+    return PsiBarPhaseVAE(input_dim=4, d_model=d_model, emission="cosine",
                           rotations=psi_rotations)
 
 
@@ -104,7 +104,7 @@ def test_encoder_reads_target_requires_y():
     a y-informed posterior evaluated without its target is meaningless.
     """
     _seed()
-    enc = PosteriorEncoder(input_dim=4, hidden=8)
+    enc = PosteriorEncoder(input_dim=4, d_model=8)
     with pytest.raises(AssertionError):
         enc(torch.randn(1, 10, 4))
 
@@ -117,7 +117,7 @@ def test_encoder_reads_target_output_depends_on_y_and_h_unmutated():
     upstream'.
     """
     _seed()
-    enc = PosteriorEncoder(input_dim=4, hidden=8)
+    enc = PosteriorEncoder(input_dim=4, d_model=8)
     h = torch.randn(2, 12, 4)
     h_copy = h.clone()
     mu0, k0 = enc(h, y=torch.zeros(2, 12))
@@ -132,7 +132,7 @@ def test_base_encoder_structurally_target_blind():
     CONSTRUCTION -- only the psi variant's PosteriorEncoder subclass adds y.
     """
     _seed()
-    enc = Encoder(input_dim=4, hidden=8)
+    enc = Encoder(input_dim=4, d_model=8)
     named = enc.forward.__code__.co_varnames[:enc.forward.__code__.co_argcount]
     assert "y" not in named
     assert not getattr(enc, "reads_target", False)
@@ -149,14 +149,14 @@ def test_encoder_rotations_returns_third_output_of_shape_bk():
     """
     _seed()
     for K in (2, 5):
-        enc = RotationPrior(input_dim=4, hidden=8, rotations=K)
+        enc = RotationPrior(input_dim=4, d_model=8, rotations=K)
         out = enc(torch.randn(3, 11, 4))
         assert len(out) == 3
         mu, kappa, rot = out
         assert mu.shape == (3, 11) and kappa.shape == (3, 11)
         assert rot.shape == (3, K)
     # K = 1 builds NO rot head (one-logit softmax is constant): two-tuple contract
-    enc = RotationPrior(input_dim=4, hidden=8, rotations=1)
+    enc = RotationPrior(input_dim=4, d_model=8, rotations=1)
     assert len(enc(torch.randn(3, 11, 4))) == 2
 
 
@@ -166,7 +166,7 @@ def test_encoder_rotations_zero_keeps_two_tuple():
     call site unpacks two values.
     """
     _seed()
-    enc = RotationPrior(input_dim=4, hidden=8, rotations=0)
+    enc = RotationPrior(input_dim=4, d_model=8, rotations=0)
     out = enc(torch.randn(2, 7, 4))
     assert isinstance(out, tuple) and len(out) == 2
 
@@ -182,7 +182,7 @@ def test_psi_forward_returns_prior_anchor_and_elbo_identity():
     """
     model = _psi_model()
     h, delta, mask, y = _batch()
-    out = model(h, delta, mask, y, samples=1)
+    out = model(h, mask, y, samples=1)
     assert "prior_anchor" in out
     assert out["prior_anchor"].shape == out["kl"].shape == (2,)
     assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
@@ -207,7 +207,7 @@ def test_psi_kl_zero_when_prior_equals_posterior():
 
     # the q-to-psi KL now lives under "distill" (out["kl"] is q-to-physical: the
     # stop-gradient distillation redesign after joint training collapsed)
-    kls = torch.stack([model(h, delta, mask, y, samples=1)["distill"].detach()
+    kls = torch.stack([model(h, mask, y, samples=1)["distill"].detach()
                        for _ in range(20)])                       # [20, B]
 
     sd = kls.std().item()
@@ -345,7 +345,7 @@ def test_target_blindness_control_catches_target_reading_prior_net():
     number is produced.
     """
     model = _psi_model()
-    model.prior_net = PosteriorEncoder(input_dim=4, hidden=8)
+    model.prior_net = PosteriorEncoder(input_dim=4, d_model=8)
     h, delta, mask, y = _batch()
     with pytest.raises(AssertionError):
         controls_mod.assert_encoder_is_target_blind(
@@ -368,13 +368,12 @@ def test_physics_anchor_invariant_to_global_rotation_of_prior_mean():
     B, T = 3, 12
     mu_p = torch.rand(B, T, dtype=torch.float64) * TWO_PI
     kappa_p = torch.rand(B, T, dtype=torch.float64) * 3000 + 1.0
-    delta = torch.full((B, T), 0.06, dtype=torch.float64)
     mask = torch.ones(B, T, dtype=torch.float64)
     mask[-1, T - 4:] = 0.0
 
-    base = model.kl_to_physical_prior(mu_p, kappa_p, delta, mask)
+    base = model.kl_to_physical_prior(mu_p, kappa_p, mask)
     for c in (1.3, -4.0, 20.0 * math.pi):
-        rotated = model.kl_to_physical_prior(mu_p + c, kappa_p, delta, mask)
+        rotated = model.kl_to_physical_prior(mu_p + c, kappa_p, mask)
         assert torch.allclose(base, rotated, atol=1e-5), f"c={c}"
 
 
@@ -394,7 +393,7 @@ def test_psi_state_dict_roundtrip_bit_identical_inference():
     before = model.infer_phase(h, delta)
 
     torch.manual_seed(123)   # a genuinely different init in the fresh model
-    fresh = PsiBarPhaseVAE(input_dim=4, hidden=8, emission="cosine", rotations=4)
+    fresh = PsiBarPhaseVAE(input_dim=4, d_model=8, emission="cosine", rotations=4)
     fresh.load_state_dict(model.state_dict())
     fresh.eval()
     after = fresh.infer_phase(h, delta)

@@ -16,9 +16,8 @@ import pytest
 import torch
 
 from phasevae import run as run_mod
+from phasevae.config import load_config
 from phasevae.scoring import controls as controls_mod
-from phasevae.data import dataset as dataset_mod
-from phasevae.data.dataset import bar_period, build_crop, song_crops, true_phase, MIN_DOWNBEATS
 from phasevae.scoring.evaluation import f_measure, null_times, peak_times
 from phasevae.model import (BarPhaseVAE, Encoder, KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI,
                             bounded_kappa, downbeat_frames, inverse_softplus,
@@ -36,27 +35,9 @@ def _seed():
     np.random.seed(0)
 
 
-def _pin_or_skip(fn, *a, **k):
-    """collate() pins memory; skip cleanly on hosts where pinning is unavailable."""
-    try:
-        return fn(*a, **k)
-    except RuntimeError as e:  # pragma: no cover - CPU-only torch builds
-        pytest.skip(f"pinned memory unavailable: {e}")
-
-
-def _oracle_crop(period=2.0, n_seconds=70.0, lo_t=3.0, crop_seconds=45.0, dim=4):
-    """A synthetic song: metronomic downbeats every `period` s, random features."""
-    rng = np.random.default_rng(0)
-    features = rng.standard_normal((int(n_seconds * FPS), dim)).astype(np.float32)
-    downbeats = np.arange(0.0, n_seconds, period)
-    crop = build_crop(features, downbeats, lo_t, FPS, crop_seconds)
-    assert crop is not None
-    return crop
-
-
 class _Song:
     dataset = "toy"
-    stem = "toy_song"
+    song_id = "toy_song"
     fold = 0
 
     def __init__(self, downbeats):
@@ -167,150 +148,6 @@ def test_null_times_random_offset_within_period():
     np.testing.assert_allclose(np.diff(times), 2.0)
 
 
-# ============================================================================ crops
-
-
-def test_bar_period_median_of_diffs():
-    """Downbeats at 0,2,4,6.5,8.5 inside the window: diffs [2,2,2.5,2], median 2.0.
-    The docstring promises one constant = the median interval over the window.
-    """
-    db = np.array([0.0, 2.0, 4.0, 6.5, 8.5])
-    assert bar_period(db, 0.0, 10.0) == pytest.approx(2.0)
-
-
-def test_bar_period_none_when_too_few_downbeats():
-    """Fewer than MIN_DOWNBEATS inside [lo, hi] -> None: the docstring says the period
-    is undefined without enough phase evidence.
-    """
-    db = np.array([0.0, 2.0, 4.0, 6.0, 8.0])
-    assert MIN_DOWNBEATS == 4
-    assert bar_period(db, 0.0, 5.0) is None       # only 3 inside
-    assert bar_period(db, 0.0, 6.0) is not None   # exactly 4 inside
-
-
-def test_build_crop_delta_formula():
-    """Delta must equal 2*pi/(bar_period*fps) -- the per-frame advance that completes
-    one full turn per bar, exactly as the key's docstring states.
-    """
-    crop = _oracle_crop(period=2.0)
-    assert crop["delta"] == pytest.approx(2.0 * np.pi / (2.0 * FPS))
-    assert crop["bar_period"] == pytest.approx(2.0)
-
-
-def test_build_crop_target_widened():
-    """Y is 1 on each downbeat frame AND +-target_tol_frames around it (default 1),
-    0 elsewhere: the docstring widens the spike because the emission is smooth.
-    """
-    crop = _oracle_crop(period=2.0, lo_t=3.0)
-    y = crop["y"]
-
-    for t in crop["downbeat_times"]:
-        centre = int(round(t * FPS)) - int(round(3.0 * FPS))
-        if centre >= len(y):        # the boundary downbeat at exactly hi_t
-            continue
-        assert y[centre] == 1.0
-        assert y[max(0, centre - 1)] == 1.0 and y[min(len(y) - 1, centre + 1)] == 1.0
-
-    # a frame far from any downbeat is 0
-    assert y[centre - 25] == 0.0
-
-    # widening is tight: 2 frames away from a mid-crop downbeat is 0
-    mid = int(round(crop["downbeat_times"][2] * FPS)) - int(round(3.0 * FPS))
-    assert y[mid + 2] == 0.0 and y[mid - 2] == 0.0
-
-
-def test_build_crop_anchors_bracket_window():
-    """Anchors must include one downbeat at or before lo_t and one at or after hi_t
-    (when they exist), so interpolation has a left and right anchor at every frame.
-    """
-    crop = _oracle_crop(period=2.0, lo_t=3.0, crop_seconds=45.0)
-    anchors = crop["anchors"]
-    assert anchors[0] <= 3.0
-    assert anchors[-1] >= 3.0 + 45.0
-    inside = crop["downbeat_times"]
-    assert anchors[0] < inside[0] and anchors[-1] > inside[-1]
-
-
-def test_true_phase_zero_at_downbeats():
-    """The phase must be 0 (mod 2*pi) at each annotated downbeat frame: the docstring
-    pins phase 0 exactly on every annotated downbeat.
-    """
-    crop = _oracle_crop(period=2.0, lo_t=3.0)
-    phase, valid = true_phase(crop)
-    for t in crop["downbeat_times"]:
-        idx = int(round((t - crop["t0"]) * FPS))
-        if idx >= len(phase):       # the boundary downbeat at exactly hi_t
-            continue
-        assert valid[idx]
-        circ = min(phase[idx], TWO_PI - phase[idx])
-        assert circ < 1e-4, f"phase {phase[idx]} at downbeat {t}"
-
-
-def test_true_phase_monotone_between_anchors():
-    """Linear interpolation of increasing turn counts is strictly increasing, so the
-    UNWRAPPED phase must be monotone over the valid span.
-    """
-    crop = _oracle_crop(period=2.0, lo_t=3.0)
-    phase, valid = true_phase(crop)
-    unwrapped = np.unwrap(phase[valid].astype(np.float64))
-    assert np.all(np.diff(unwrapped) > 0)
-
-
-def test_true_phase_invalid_outside_annotated_span():
-    """Frames before the first anchor or after the last must be flagged invalid, not
-    extrapolated -- the docstring forbids extrapolation.
-    """
-    rng = np.random.default_rng(0)
-    features = rng.standard_normal((int(60 * FPS), 4)).astype(np.float32)
-    # downbeats only in [10, 40): frames of the crop before 10 s have no left anchor
-    downbeats = np.arange(10.0, 40.0, 2.0)
-    crop = build_crop(features, downbeats, 5.0, FPS, 40.0)
-    assert crop is not None
-
-    phase, valid = true_phase(crop)
-    assert not valid[0]                       # 5.0 s < first downbeat 10.0 s
-    assert not valid[-1]                      # 45.0 s > last downbeat 38.0 s
-    assert valid[int(round((20.0 - 5.0) * FPS))]
-
-
-def test_song_crops_no_duplicate_t0():
-    """song_crops promises 'never emit two crops with the same start': all t0 values
-    (rounded to ms as the code does) must be distinct.
-    """
-    rng_np = np.random.default_rng(0)
-    features = rng_np.standard_normal((int(80 * FPS), 4)).astype(np.float32)
-    song = _Song(np.arange(0.0, 80.0, 2.0))
-    got, rejects = song_crops(features, song, np.random.default_rng(7), max_crops=3)
-    assert len(got) >= 2
-    t0s = [round(c["t0"], 3) for c in got]
-    assert len(set(t0s)) == len(t0s)
-
-
-def test_song_crops_sampling_cap():
-    """max_crops is a SAMPLING cap: a long fully-annotated song must yield at most (and
-    here exactly) max_crops crops.
-    """
-    rng_np = np.random.default_rng(0)
-    features = rng_np.standard_normal((int(80 * FPS), 4)).astype(np.float32)
-    song = _Song(np.arange(0.0, 80.0, 2.0))
-    got, _ = song_crops(features, song, np.random.default_rng(3), max_crops=2)
-    assert len(got) == 2
-    for c in got:
-        assert c["dataset"] == "toy" and c["stem"] == "toy_song"
-
-
-def test_song_crops_rejects_unannotated():
-    """A song with fewer than MIN_DOWNBEATS annotated downbeats yields no crops and a
-    counted rejection -- rejections are surfaced, never silent.
-    """
-    rng_np = np.random.default_rng(0)
-    features = rng_np.standard_normal((int(80 * FPS), 4)).astype(np.float32)
-    song = _Song([1.0, 3.0])
-    got, rejects = song_crops(features, song, np.random.default_rng(0))
-    assert got == []
-    assert sum(rejects.values()) >= 1
-
-
 # ============================================================================ model
 
 
@@ -364,40 +201,12 @@ def test_vonmises_entropy_uniform_limit_and_scipy():
                                      abs=1e-5)
 
 
-def test_encoder_drift_bound_confines_advance():
-    """With drift_bound=eps>0 the docstring builds mu = offset + cumsum(delta + drift)
-    with |drift| <= eps, so every per-frame advance mu[t]-mu[t-1] must lie in
-    [delta-eps, delta+eps].
-    """
-    _seed()
-    enc = Encoder(input_dim=4, hidden=8, drift_bound=0.05)
-    h = torch.randn(2, 30, 4)
-    delta = torch.full((2, 30), 0.0628)
-    mu, kappa = enc(h, delta)
-    adv = mu[:, 1:] - mu[:, :-1]
-    assert torch.all((adv - 0.0628).abs() <= 0.05 + 1e-6)
-    assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
-
-
-def test_encoder_drift_bound_first_frame_is_offset():
-    """mu[t=0] is the crop's phase offset read from h at frame 0 ('ONE anchor per
-    crop'): it must not depend on delta, since cumsum contributes nothing at t=0.
-    """
-    _seed()
-    enc = Encoder(input_dim=4, hidden=8, drift_bound=0.05)
-    h = torch.randn(1, 20, 4)
-    mu_a, _ = enc(h, torch.full((1, 20), 0.05))
-    mu_b, _ = enc(h, torch.full((1, 20), 0.10))
-    assert torch.equal(mu_a[:, 0], mu_b[:, 0])
-    assert (-math.pi <= mu_a[0, 0].item() <= math.pi)   # atan2 range
-
-
 def test_encoder_free_mode_per_frame_unconstrained():
     """With drift_bound=0 the mean is emitted per frame through atan2: every mu is in
     (-pi, pi] and delta plays no role at all (the free parameterisation ignores it).
     """
     _seed()
-    enc = Encoder(input_dim=4, hidden=8, drift_bound=0.0)
+    enc = Encoder(input_dim=4, d_model=8)
     h = torch.randn(2, 25, 4)
     mu_none, _ = enc(h, None)
     mu_delta, _ = enc(h, torch.full((2, 25), 0.5))
@@ -411,7 +220,7 @@ def test_encoder_target_blind():
     so target-blindness is a property of the signature, not a flag to keep off.
     """
     _seed()
-    enc = Encoder(input_dim=4, hidden=8)
+    enc = Encoder(input_dim=4, d_model=8)
     named = enc.forward.__code__.co_varnames[:enc.forward.__code__.co_argcount]
     assert "y" not in named
     assert not getattr(enc, "reads_target", False)
@@ -422,7 +231,7 @@ def test_emission_logits_cosine_shape():
     all properties of the cosine the docstring names.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     phi = torch.linspace(-math.pi, math.pi, 101)[None]
 
     logits = model.emission_logits(phi)[0]
@@ -446,7 +255,7 @@ def test_emission_logits_triangle_shape():
     at pi, LINEAR in |phi| in between, even, and continuous across the wrap at +-pi.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="triangle")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="triangle")
     a, b = model.emission_a.item(), model.emission_b.item()
 
     def at(p):
@@ -471,7 +280,7 @@ def test_emission_b_floor_semantics():
     floor').
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     assert model.emission_b_floor == 0.0
     sp = torch.nn.functional.softplus(model.emission_b_raw).item()
     assert model.emission_b.item() == pytest.approx(sp)
@@ -488,11 +297,11 @@ def test_emission_b_floor_survives_state_dict_roundtrip():
     silently reset to 0.0 on reload; it is a registered buffer now.)
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     model.emission_b_floor.fill_(5.0)
     b_before = model.emission_b.item()
     state = model.state_dict()
-    fresh = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    fresh = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     fresh.load_state_dict(state)
     assert fresh.emission_b.item() == pytest.approx(b_before), \
         "scheduled emission floor lost across save/load"
@@ -503,58 +312,120 @@ def test_kl_to_physical_prior_nonnegative():
     tolerance across many random (mu, kappa, delta) draws.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8)
+    model = BarPhaseVAE(input_dim=4, d_model=8)
     for _ in range(20):
         B, T = 3, 12
         mu = (torch.rand(B, T) * 2 - 1) * math.pi
         kappa = torch.rand(B, T) * 3000 + 1.0
-        delta = torch.rand(B, 1).expand(B, T) * 0.1
         mask = torch.ones(B, T)
-        kl = model.kl_to_physical_prior(mu, kappa, delta, mask)
+        kl = model.kl_to_physical_prior(mu, kappa, mask)
         assert torch.all(kl > -1e-3), f"negative KL {kl.min().item()}"
 
 
-def test_kl_to_physical_prior_analytic_two_frame():
-    """T=2 hand computation. KL = -H(k1)-H(k2) - [log p(phi1) + E log p(phi2|phi1)]
-    with log p(phi1) = -log 2pi and E log p(phi2|phi1) =
-    kappa_p*A(k1)*A(k2)*cos(mu2-mu1-delta) - log 2pi - log I0(kappa_p),
-    assembled here from independent scipy pieces.
+def test_kl_to_physical_prior_analytic_three_frame():
+    """T=3 hand computation against the docstring's constant-rate prior.
+
+    phi_1, phi_2 are unconditioned (the second difference needs two predecessors), so
+    each contributes log p = -log 2pi. Only t=3 has a chain term, whose prior mean is
+    2*phi_2 - phi_1, giving
+
+        E log p(phi_3 | phi_2, phi_1)
+          = kappa_p * A_1(k3) * A_2(k2) * A_1(k1) * cos(mu3 - 2 mu2 + mu1)
+            - log 2pi - log I0(kappa_p)
+
+    The MIDDLE frame carries coefficient 2, hence A_2 = I_2/I_0 and not A_1^2 -- the
+    factor this test exists to pin. Every piece below comes from scipy independently.
     """
     scipy_stats = pytest.importorskip("scipy.stats")
     scipy_special = pytest.importorskip("scipy.special")
-    model = BarPhaseVAE(input_dim=4, hidden=8)
-    mu = torch.tensor([[0.3, 0.5]], dtype=torch.float64)
-    kappa = torch.tensor([[800.0, 1200.0]], dtype=torch.float64)
-    delta = torch.tensor([[0.06, 0.06]], dtype=torch.float64)
-    mask = torch.ones(1, 2, dtype=torch.float64)
-    got = model.kl_to_physical_prior(mu, kappa, delta, mask).item()
+    model = BarPhaseVAE(input_dim=4, d_model=8)
+    mu = torch.tensor([[0.30, 0.36, 0.43]], dtype=torch.float64)
+    kappa = torch.tensor([[800.0, 1200.0, 950.0]], dtype=torch.float64)
+    mask = torch.ones(1, 3, dtype=torch.float64)
+    got = model.kl_to_physical_prior(mu, kappa, mask).item()
 
-    def A(k):
-        return scipy_special.i1e(k) / scipy_special.i0e(k)
+    def A1(k):
+        return scipy_special.ive(1, k) / scipy_special.ive(0, k)
 
-    h1 = float(scipy_stats.vonmises(kappa=800.0).entropy())
-    h2 = float(scipy_stats.vonmises(kappa=1200.0).entropy())
-    log_i0_p = float(np.log(scipy_special.i0e(KAPPA_PHYSICAL)) + KAPPA_PHYSICAL)
-    cross = (KAPPA_PHYSICAL * A(800.0) * A(1200.0) * math.cos(0.5 - 0.3 - 0.06)
+    def A2(k):
+        return scipy_special.ive(2, k) / scipy_special.ive(0, k)
+
+    entropies = [float(scipy_stats.vonmises(kappa=float(k)).entropy())
+                 for k in (800.0, 1200.0, 950.0)]
+    log_i0_p = float(np.log(scipy_special.ive(0, KAPPA_PHYSICAL)) + KAPPA_PHYSICAL)
+    accel = 0.43 - 2 * 0.36 + 0.30
+    cross = (KAPPA_PHYSICAL * A1(950.0) * A2(1200.0) * A1(800.0) * math.cos(accel)
              - math.log(TWO_PI) - log_i0_p)
-    expected = -(h1 + h2) - (-math.log(TWO_PI) + cross)
+    expected = -sum(entropies) - (-2 * math.log(TWO_PI) + cross)
 
     # tolerance limited by scipy's own vonmises.entropy precision at large kappa
     assert got == pytest.approx(expected, abs=1e-3)
 
 
-def test_kl_to_physical_prior_masked_frames_contribute_zero():
-    """A frame with mask 0 must contribute nothing: the KL of a [1,4] sequence whose
-    last two frames are masked equals the KL of the first two frames alone.
+def test_kl_to_physical_prior_second_order_needs_a2_not_a1_squared():
+    """A_2(kappa) != A_1(kappa)^2, so the closed form must not use the square.
+
+    At a moderate kappa the two differ by tens of percent (A_2 = 0.302 vs A_1^2 = 0.487
+    at kappa = 2), which is large enough that substituting the square shifts the KL well
+    outside float tolerance. Guards the one algebraic step that is easy to get wrong.
     """
-    model = BarPhaseVAE(input_dim=4, hidden=8)
-    mu4 = torch.tensor([[0.3, 0.5, 9.0, -9.0]], dtype=torch.float64)
-    kappa4 = torch.tensor([[800.0, 1200.0, 7.0, 7.0]], dtype=torch.float64)
-    delta4 = torch.full((1, 4), 0.06, dtype=torch.float64)
-    mask4 = torch.tensor([[1.0, 1.0, 0.0, 0.0]], dtype=torch.float64)
-    kl_masked = model.kl_to_physical_prior(mu4, kappa4, delta4, mask4).item()
-    kl_short = model.kl_to_physical_prior(mu4[:, :2], kappa4[:, :2], delta4[:, :2],
-                                          torch.ones(1, 2).double()).item()
+    scipy_special = pytest.importorskip("scipy.special")
+    model = BarPhaseVAE(input_dim=4, d_model=8)
+    mu = torch.tensor([[0.1, 0.2, 0.35]], dtype=torch.float64)
+    kappa = torch.full((1, 3), 2.0, dtype=torch.float64)
+    mask = torch.ones(1, 3, dtype=torch.float64)
+    got = model.kl_to_physical_prior(mu, kappa, mask).item()
+
+    a1 = float(scipy_special.ive(1, 2.0) / scipy_special.ive(0, 2.0))
+    a2 = float(scipy_special.ive(2, 2.0) / scipy_special.ive(0, 2.0))
+    accel = 0.35 - 2 * 0.2 + 0.1
+    log_i0_p = float(np.log(scipy_special.ive(0, KAPPA_PHYSICAL)) + KAPPA_PHYSICAL)
+
+    def kl_with(middle):
+        cross = (KAPPA_PHYSICAL * a1 * middle * a1 * math.cos(accel)
+                 - math.log(TWO_PI) - log_i0_p)
+        return -3 * float(vonmises_entropy(torch.tensor(2.0, dtype=torch.float64))) \
+            - (-2 * math.log(TWO_PI) + cross)
+
+    # rel rather than abs: the KL is ~1.7e3 here because log I0(kappa_p) is ~kappa_p
+    assert got == pytest.approx(kl_with(a2), rel=1e-7)
+    assert abs(kl_with(a1 * a1) - kl_with(a2)) > 100.0   # the wrong factor is not subtle
+
+
+def test_kl_to_physical_prior_invariant_to_shift_and_rate():
+    """The prior penalises rate CHANGE only, so the KL must be unchanged by (a) adding a
+    constant to the whole trajectory and (b) adding a constant RATE ramp. Both leave the
+    second difference identical -- the docstring's phase-blindness and tempo-scale-
+    freedom, which together are why only the emission can locate or size a bar.
+    """
+    _seed()
+    model = BarPhaseVAE(input_dim=4, d_model=8)
+    T = 9
+    mu = torch.cumsum(torch.rand(1, T, dtype=torch.float64) * 0.02 + 0.05, dim=1)
+    kappa = torch.rand(1, T, dtype=torch.float64) * 500 + 50
+    mask = torch.ones(1, T, dtype=torch.float64)
+    base = model.kl_to_physical_prior(mu, kappa, mask).item()
+
+    shifted = model.kl_to_physical_prior(mu + 1.234, kappa, mask).item()
+    ramp = torch.arange(T, dtype=torch.float64)[None] * 0.031
+    rerated = model.kl_to_physical_prior(mu + ramp, kappa, mask).item()
+
+    assert shifted == pytest.approx(base, rel=1e-9)
+    assert rerated == pytest.approx(base, rel=1e-9)
+
+
+def test_kl_to_physical_prior_masked_frames_contribute_zero():
+    """A frame with mask 0 must contribute nothing: the KL of a [1,5] sequence whose
+    last two frames are masked equals the KL of the first three frames alone. Three
+    real frames because the chain term needs two predecessors.
+    """
+    model = BarPhaseVAE(input_dim=4, d_model=8)
+    mu5 = torch.tensor([[0.30, 0.36, 0.43, 9.0, -9.0]], dtype=torch.float64)
+    kappa5 = torch.tensor([[800.0, 1200.0, 950.0, 7.0, 7.0]], dtype=torch.float64)
+    mask5 = torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0]], dtype=torch.float64)
+    kl_masked = model.kl_to_physical_prior(mu5, kappa5, mask5).item()
+    kl_short = model.kl_to_physical_prior(
+        mu5[:, :3], kappa5[:, :3], torch.ones(1, 3, dtype=torch.float64)).item()
     assert kl_masked == pytest.approx(kl_short, rel=1e-9)
 
 
@@ -567,18 +438,17 @@ def test_forward_elbo_identity_and_unweighted_recon(monkeypatch):
     _seed()
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
 
     B, T = 2, 12
     h = torch.randn(B, T, 4)
-    delta = torch.full((B, T), 0.06)
     mask = torch.ones(B, T)
     mask[1, 8:] = 0.0
     y = torch.zeros(B, T)
     y[0, 3] = 1.0
     y[1, 5] = 1.0
 
-    out = model(h, delta, mask, y, samples=1, pos_weight=1.0)
+    out = model(h, mask, y, samples=1, pos_weight=1.0)
     assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
 
     with torch.no_grad():
@@ -596,17 +466,16 @@ def test_forward_pos_weight_scales_positive_frames(monkeypatch):
     _seed()
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
 
     B, T = 1, 10
     h = torch.randn(B, T, 4)
-    delta = torch.full((B, T), 0.06)
     mask = torch.ones(B, T)
     y = torch.zeros(B, T)
     y[0, 4] = 1.0
 
-    out1 = model(h, delta, mask, y, pos_weight=1.0)
-    out3 = model(h, delta, mask, y, pos_weight=3.0)
+    out1 = model(h, mask, y, pos_weight=1.0)
+    out3 = model(h, mask, y, pos_weight=3.0)
 
     with torch.no_grad():
         logits = model.emission_logits(out1["mu"])
@@ -621,7 +490,7 @@ def test_phase_ablation_gap_zero_when_phase_ignored():
     frozen.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     model.emission_logits = lambda phi, mask=None: torch.full_like(phi, -3.0)
     phi = torch.rand(2, 20) * TWO_PI
     assert model.phase_ablation_gap(phi) == 0.0
@@ -632,7 +501,7 @@ def test_phase_ablation_gap_positive_for_cosine():
     positive on a non-constant phase.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8, emission="cosine")
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     phi = torch.linspace(0, TWO_PI, 40)[None]
     assert model.phase_ablation_gap(phi) > 0.01
 
@@ -654,7 +523,7 @@ def test_downbeat_frames_marks_zero_crossings():
 def test_infer_phase_requires_eval_mode():
     """The deployment path asserts eval mode; calling it in train mode must raise."""
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8)
+    model = BarPhaseVAE(input_dim=4, d_model=8)
     model.train()
     with pytest.raises(AssertionError):
         model.infer_phase(torch.randn(1, 5, 4))
@@ -684,100 +553,28 @@ def test_beta_at_schedule_edges():
     assert run_mod.beta_at(0, _args(0.3, 0.9, 0)) == 0.9
 
 
-def _tiny_crops():
-    rng = np.random.default_rng(0)
-    out = []
-    for t_len, delta in ((10, 0.05), (14, 0.07), (6, 0.03), (12, 0.06)):
-        out.append({"h": rng.standard_normal((t_len, 3)).astype(np.float32),
-                    "y": (rng.random(t_len) < 0.2).astype(np.float32),
-                    "delta": delta})
-    return out
+def _blindness_batch(input_dim: int, batch_size: int = 2, frames: int = 10):
+    """A synthetic batch for the target-blindness control: no real audio needed.
 
-
-def test_collate_padding_mask_dtype_delta():
-    """Collate pads to the longest crop: h is fp16 with zeros beyond each length, mask
-    sums to the true lengths, y matches, and delta is the crop's constant broadcast
-    over its valid frames (0 in the padding).
+    The control reads only signatures and determinism, so random h is equivalent to a
+    frontend batch -- which is why this is a unit test and not a per-run assertion.
     """
-    batch = _tiny_crops()
-    out = _pin_or_skip(dataset_mod.collate, batch)
-
-    length = max(len(c["y"]) for c in batch)
-    assert out["h"].shape == (4, length, 3) and out["h"].dtype == torch.float16
-
-    for i, crop in enumerate(batch):
-        t = len(crop["y"])
-        assert out["mask"][i].sum().item() == t
-        assert torch.all(out["h"][i, t:] == 0)
-        assert torch.all(out["delta"][i, :t] == crop["delta"])
-        assert torch.all(out["delta"][i, t:] == 0)
-        np.testing.assert_allclose(out["y"][i, :t].numpy(), crop["y"], atol=1e-6)
-        np.testing.assert_allclose(out["h"][i, :t].float().numpy(), crop["h"],
-                                   atol=1e-2)
-
-
-def test_batches_length_sorted_buckets():
-    """Batches sorts crops by length once: within the concatenated bucket order the
-    crop lengths must be non-decreasing, and every crop appears exactly once.
-    """
-    crops = _tiny_crops()
-    loader = _pin_or_skip(dataset_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
-    flat = [c for chunk in loader.chunks for c in chunk]
-    lengths = [len(c["y"]) for c in flat]
-    assert lengths == sorted(lengths)
-    assert {id(c) for c in flat} == {id(c) for c in crops}
-
-
-def test_batches_shuffle_permutes_bucket_order_only():
-    """Shuffling must reorder which bucket comes first but never change any bucket's
-    membership -- 'bucket order, not membership' per the docstring.
-    """
-    crops = _tiny_crops() * 3   # 12 crops -> 6 buckets of 2
-    loader = _pin_or_skip(dataset_mod.Batches, crops, batch_size=2, device=torch.device("cpu"))
-    base = [tuple(id(c) for c in chunk) for chunk, _ in loader()]
-    rng = np.random.default_rng(0)
-    shuffled = [tuple(id(c) for c in chunk) for chunk, _ in loader(shuffle=True, rng=rng)]
-    assert sorted(base) == sorted(shuffled)       # same buckets, membership intact
-    assert len(base) == len(shuffled) == 6
-
-
-def test_readout_oracle_control_passes_on_truth():
-    """assert_readout_recovers_oracle run on clean synthetic crops must succeed with a
-    score near 1.0: the true phase read through the shipped rule g recovers the
-    annotated downbeats.
-    """
-    crops = [_oracle_crop(period=2.0, lo_t=lo) for lo in (3.0, 5.0, 8.0)]
-    value = controls_mod.assert_readout_recovers_oracle(crops)
-    assert value > 0.95
-
-
-def test_readout_oracle_control_raises_on_broken_readout(monkeypatch):
-    """Replace the read-out with the documented historical bug (differencing mu
-    directly, whose discontinuity sits at phi = pi, half a bar off): the control must
-    raise, because a read-out that cannot score the truth cannot score a model.
-    """
-    def broken(mu, mask=None):
-        return torch.diff(mu, dim=-1) < -math.pi
-    # the wraps-to-times conversion has ONE home (evaluation.rule_g_times); breaking
-    # the read-out there breaks every scorer at once, and the control must notice
-    from phasevae.scoring import evaluation as evaluation_mod
-    monkeypatch.setattr(evaluation_mod, "downbeat_frames", broken)
-    crops = [_oracle_crop(period=2.0, lo_t=lo) for lo in (3.0, 5.0, 8.0)]
-    with pytest.raises(AssertionError, match="READ-OUT BROKEN"):
-        controls_mod.assert_readout_recovers_oracle(crops)
+    return {"h": torch.randn(batch_size, frames, input_dim),
+            "delta": torch.full((batch_size, frames), 0.06),
+            "mask": torch.ones(batch_size, frames),
+            "y": torch.zeros(batch_size, frames)}
 
 
 def test_target_blindness_control_detects_leak():
-    """assert_encoder_is_target_blind must PASS for the real model (whose encoder never
-    receives y) and FAIL for a model whose deployed phase moves with the target.
+    """The control must PASS the real model (whose deployed net never receives y) and
+    FAIL a model whose deployed phase moves with anything but h -- otherwise a passing
+    control proves nothing.
     """
     _seed()
-    model = BarPhaseVAE(input_dim=4, hidden=8)
-    batch = {"h": torch.randn(2, 10, 4), "delta": torch.full((2, 10), 0.06),
-             "mask": torch.ones(2, 10), "y": torch.zeros(2, 10)}
-    run_mod.assert_encoder_is_target_blind(model, batch)   # must not raise
+    batch = _blindness_batch(input_dim=4)
+    controls_mod.assert_encoder_is_target_blind(BarPhaseVAE(input_dim=4, d_model=8), batch)
 
-    leaky = BarPhaseVAE(input_dim=4, hidden=8)
+    leaky = BarPhaseVAE(input_dim=4, d_model=8)
     calls = {"n": 0}
     real = leaky.infer_phase
 
@@ -787,7 +584,27 @@ def test_target_blindness_control_detects_leak():
     leaky.infer_phase = cheating
 
     with pytest.raises(AssertionError):
-        run_mod.assert_encoder_is_target_blind(leaky, batch)
+        controls_mod.assert_encoder_is_target_blind(leaky, batch)
+
+
+def test_deployed_net_reads_no_target_in_any_shipped_config():
+    """EVERY config's deployed net must read h and delta only.
+
+    This is what the removed per-run control covered: the signature contract holds for
+    the model each recipe actually builds, not just for a bare BarPhaseVAE. A variant
+    that starts reading y at deploy time is unusable at test time, and the failure is
+    silent -- scores would simply be too good.
+    """
+    configs = sorted((pathlib.Path(__file__).resolve().parent.parent / "configs")
+                     .glob("*.yaml"))
+    assert configs, "no configs found: this test would pass vacuously"
+
+    for path in configs:
+        _seed()
+        cfg, hooks = load_config(str(path))
+        model = hooks.build_model(cfg, input_dim=4)
+        controls_mod.assert_encoder_is_target_blind(
+            model, _blindness_batch(input_dim=4))
 
 
 # ============================================================== vbpm cache write
@@ -833,3 +650,59 @@ def test_cache_write_overwrites_existing(tmp_path):
     path = _cache_write(tmp_path, "s", np.ones((2, 2), dtype=np.float32))
     assert sorted(p.name for p in tmp_path.iterdir()) == ["s.npy"]
     np.testing.assert_array_equal(np.load(path), np.ones((2, 2), dtype=np.float32))
+
+
+# ================================================== trajectory health diagnostics
+
+
+def test_trajectory_health_separates_the_recorded_failure_modes():
+    """The four numbers must distinguish trajectories that F cannot.
+
+    Each row is a failure this project actually measured, with its published signature:
+      oracle              advance 2*pi/(P*fps), phase_err 0, full circle
+      oracle + half bar   SAME advance and circle, phase_err pi -- a pure offset error,
+                          which is what F punishes and the KL is provably blind to
+      spike train         advance 0.715 (the 2026-06 measurement), phase_err ~= chance
+      frozen phase        advance 0, phase_err = chance, circle = one bin
+    A diagnostic that cannot tell these apart cannot read a training run.
+    """
+    from phasevae.scoring.evaluation import scoring_records, trajectory_health
+
+    n, fps, period = 600, 50.0, 2.0
+    db = np.arange(1.0, 12.0, period)
+    y = np.zeros(n, dtype=np.float32)
+    for t in db:
+        y[int(t * fps) - 1:int(t * fps) + 2] = 1.0
+    raw = {"y": torch.tensor(y)[None].repeat(2, 1), "mask": torch.ones(2, n),
+           "t0": torch.zeros(2), "fps": torch.full((2,), fps),
+           "downbeat_times": [db] * 2,
+           "anchors": [np.concatenate([[db[0] - period], db, [db[-1] + period]])] * 2,
+           "dataset": ["toy"] * 2, "song_id": ["a", "b"]}
+    crops = scoring_records(raw)
+    t = torch.arange(n, dtype=torch.float32)
+    rate = TWO_PI / (period * fps)
+    kappa = torch.full((2, n), 2000.0)
+
+    def wrap(x):
+        return torch.atan2(torch.sin(x), torch.cos(x))
+
+    def health(mu):
+        return trajectory_health(mu[None].repeat(2, 1), kappa, torch.ones(2, n), crops)
+
+    adv, kap, err, cov = health(wrap(rate * (t - db[0] * fps)))
+    assert adv == pytest.approx(rate, rel=1e-3)
+    assert err < 1e-3 and cov == 1.0 and kap == pytest.approx(2000.0)
+
+    adv_o, _, err_o, cov_o = health(wrap(rate * (t - db[0] * fps) + math.pi))
+    assert adv_o == pytest.approx(rate, rel=1e-3)      # rate right, offset wrong
+    assert err_o == pytest.approx(math.pi, abs=1e-3)   # worse than chance, not random
+    assert cov_o == 1.0
+
+    adv_s, _, err_s, _ = health(wrap(0.715 * t))
+    assert adv_s == pytest.approx(0.715, rel=1e-3)
+    assert err_s > 1.5                                  # indistinguishable from chance
+
+    adv_f, _, err_f, cov_f = health(torch.zeros(n))
+    assert adv_f == pytest.approx(0.0, abs=1e-6)
+    assert err_f == pytest.approx(math.pi / 2, rel=0.02)
+    assert cov_f == pytest.approx(1 / 16)

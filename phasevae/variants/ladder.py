@@ -38,8 +38,8 @@ class LadderVAE(BarPhaseVAE):
 
     def __init__(self, input_dim, k_slots=0, head_input="trunk_frame0",
                  head_arch="linear", rotation_aug=False, k_hidden=256,
-                 hidden=128, **kw):
-        super().__init__(input_dim, hidden=hidden, **kw)
+                 d_model=128, **kw):
+        super().__init__(input_dim, d_model=d_model, **kw)
         assert self.emission_net is None, "ladder uses the closed-form emission"
         self.k_slots = int(k_slots)
         self.head_input = head_input
@@ -47,7 +47,7 @@ class LadderVAE(BarPhaseVAE):
         self.slots = max(self.k_slots, 64)      # bins for folding, even when k is off
 
         n_out = self.k_slots if self.k_slots > 0 else 2   # slot logits, or (cos, sin)
-        n_in = {"trunk_mean": 2 * hidden, "folded_acts": 2 * self.slots}.get(head_input)
+        n_in = {"trunk_mean": d_model, "folded_acts": 2 * self.slots}.get(head_input)
         if head_input == "trunk_frame0":
             self.head = None                    # the base encoder's own offset head
         elif head_arch == "linear":
@@ -68,7 +68,8 @@ class LadderVAE(BarPhaseVAE):
     # ---- head input representations -------------------------------------------------
     def bin_activations(self, h, mu, mask=None):
         """[B,T,D],[B,T] -> [B,C,2]: frontend activations masked-mean pooled into C phase
-        bins under mu. Identical arithmetic to anchor_k.bin_activations (mu detached)."""
+        bins under mu. Identical arithmetic to anchor_k.bin_activations (mu detached).
+        """
         B, T = mu.shape
         C = self.slots
         acts = torch.sigmoid(h[..., -2:])
@@ -87,10 +88,10 @@ class LadderVAE(BarPhaseVAE):
         return self.bin_activations(h, mu, mask).flatten(1)
 
     # ---- trajectory -----------------------------------------------------------------
-    def base_path(self, h, delta):
+    def base_path(self, h, mask=None):
         """(trunk, mu, kappa) from the encoder. mu still carries its own offset head."""
-        trunk = self.encoder.features(h)
-        mu, kappa = self.encoder.heads(trunk, delta)
+        trunk = self.encoder.features(h, mask)
+        mu, kappa = self.encoder.heads(trunk)
         return trunk, mu, kappa
 
     def scalar_offset(self, h, trunk, mu, mask):
@@ -99,8 +100,8 @@ class LadderVAE(BarPhaseVAE):
         cs = self.head(feats)
         return torch.atan2(cs[:, 0], cs[:, 1])
 
-    def trajectory(self, h, delta, mask=None):
-        trunk, mu, kappa = self.base_path(h, delta)
+    def trajectory(self, h, mask=None):
+        trunk, mu, kappa = self.base_path(h, mask)
         if self.k_slots > 0:
             k = self.head(self.head_features(h, trunk, mu, mask)).argmax(-1)
             return mu + self.slot_shifts[k].unsqueeze(-1), kappa
@@ -109,12 +110,12 @@ class LadderVAE(BarPhaseVAE):
         return mu + self.scalar_offset(h, trunk, mu, mask).unsqueeze(-1), kappa
 
     # ---- objective ------------------------------------------------------------------
-    def forward(self, h, delta, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         if self.k_slots == 0:
-            return super().forward(h, delta, mask, y, samples, pos_weight)
+            return super().forward(h, mask, y, samples, pos_weight)
 
-        trunk, mu, kappa = self.base_path(h, delta)
-        kl = self.kl_to_physical_prior(mu, kappa, delta, mask)
+        trunk, mu, kappa = self.base_path(h, mask)
+        kl = self.kl_to_physical_prior(mu, kappa, mask)
         C = self.k_slots
 
         feats = self.head_features(h, trunk, mu, mask)
@@ -161,7 +162,6 @@ def build_model(cfg, input_dim: int) -> LadderVAE:
                      k_hidden=cfg.k_hidden, emission=cfg.emission,
                      emission_layers=cfg.emission_layers,
                      emission_positional=cfg.emission_positional,
-                     drift_bound=cfg.drift_bound, bar_rate=cfg.bar_rate,
                      kappa_physical=cfg.kappa_physical)
 
 
@@ -183,7 +183,7 @@ def epoch_note(model, probe) -> str:
     was_training = model.training
     model.eval()
     with torch.no_grad():
-        out = model(probe["h"], probe["delta"], probe["mask"], probe["y"])
+        out = model(probe["h"], probe["mask"], probe["y"])
         q = out["log_q"].exp()
         hk = -(q * out["log_q"]).sum(-1).mean() / math.log(model.k_slots)
         agree = (q.argmax(-1) == out["recon_k"].argmax(-1)).float().mean()

@@ -43,11 +43,14 @@ import numpy as np
 import torch
 
 from .config import load_config
-from .scoring.controls import assert_encoder_is_target_blind, gradient_audit
-from .scoring.evaluation import evaluate, print_table
+from .scoring.evaluation import (evaluate, print_table, scoring_records,
+                                 trajectory_health)
 from .data.dataset import split_songs
-from .data.excerpts import (ExcerptDataset, collate_excerpts,
-                            to_model_batch)
+from .data.excerpts import (ExcerptDataset, collate_excerpts)
+
+
+# JA: For naive training, we always choose fold 7 to serve as the validation fold.
+VAL_FOLD = 7
 
 
 def beta_at(epoch: int, cfg) -> float:
@@ -81,34 +84,26 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         collate_fn=collate_excerpts, pin_memory=True, worker_init_fn=_seed_worker,
         persistent_workers=workers > 0,
         generator=torch.Generator().manual_seed(seed))
-    probe = to_model_batch(next(iter(loader)), frontend, device)
-
-    dead = gradient_audit(model, probe)
-    print(f"  CONTROL gradient audit: {len(dead)} dead parameters"
-          + (f" -> {dead[:4]}" if dead else ""))
-    assert not dead, "dead parameters at initialisation"
-    assert_encoder_is_target_blind(model, probe)
-    print("  CONTROL deployed inference is target-blind by signature and behaviour")
-    gap = model.phase_ablation_gap(model.infer_phase(probe["h"], probe["delta"]),
-                                   probe["mask"])
-    print(f"  CONTROL emission depends on phase: mean |logit shift| {gap:.4f} "
-          f"when phi is frozen")
 
     opt, clip_params = hooks.optimizer(model, cfg)
+
     for epoch in range(cfg.epochs):
         model.train()
         beta = beta_at(epoch, cfg)
         hooks.on_epoch(model, cfg, epoch)
 
         totals, steps = np.zeros(3), 0
+        health = np.zeros(4)
         for raw in loader:
-            batch = to_model_batch(raw, frontend, device)
-            out = model(batch["h"], batch["delta"], batch["mask"], batch["y"],
-                        samples=cfg.samples, pos_weight=cfg.pos_weight)
+            h = frontend.forward_features(raw["input"]).clone()
+            mask = raw["mask"].to(device, non_blocking=True)
+            y = raw["y"].to(device, non_blocking=True)
+
+            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
             # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.
-            frames = batch["mask"].sum(1).clamp(min=1.0)
+            frames = mask.sum(1).clamp(min=1.0)
             loss = -(hooks.objective(out, beta, cfg) / frames).mean()
 
             opt.zero_grad()
@@ -116,15 +111,29 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip)
             opt.step()
 
-            totals += [float(out["elbo"].mean()), float(out["recon"].mean()),
+            totals += [float(out["elbo"].mean()),
+                       float(out["recon"].mean()),
                        float(out["kl"].mean())]
+            # What the ELBO cannot tell you: whether mu is a bar pointer or an arbitrary
+            # path that crosses zero in the right places. Read off the batch already
+            # computed -- no extra forward. See trajectory_health for the thresholds.
+            with torch.no_grad():
+                records = [c for c in scoring_records(raw) if c is not None]
+                if records:
+                    keep = [i for i, c in enumerate(scoring_records(raw))
+                            if c is not None]
+                    health += trajectory_health(out["mu"][keep].detach(),
+                                                out["kappa"][keep].detach(),
+                                                mask[keep], records)
             steps += 1
 
         b_note = ("" if model.emission_net is not None
                   else f"  b {float(model.emission_b):5.2f}")
-        b_note += hooks.epoch_note(model, probe)
+        adv, kap, perr, cov = health / steps
         print(f"  epoch {epoch:2d}  beta {beta:5.3f}  elbo {totals[0] / steps:9.2f}  "
-              f"recon {totals[1] / steps:8.2f}  kl {totals[2] / steps:9.2f}{b_note}",
+              f"recon {totals[1] / steps:8.2f}  kl {totals[2] / steps:9.2f}{b_note}\n"
+              f"            advance {adv:7.4f} (true 0.025-0.063)  kappa {kap:9.1f}  "
+              f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}",
               flush=True)
 
     return model
@@ -156,11 +165,15 @@ def main() -> None:
 
     print(f"config {args.config}  seed {args.seed}  ->  {vars(cfg)}", flush=True)
 
-    train_songs, val_songs, test_songs = split_songs(args.limit_per_fold)
-    frontend_class = importlib.import_module(
-        f"phasevae.data.frontends.{cfg.frontend}").FRONTEND
-    frontend = frontend_class(checkpoint=cfg.frontend_checkpoint,
-                              device=f"cuda:{args.gpu}", output="features+activations")
+    train_songs, val_songs, test_songs = split_songs(VAL_FOLD, args.limit_per_fold)
+
+    frontend_name = f"phasevae.data.frontends.{cfg.frontend}"
+    frontend_class = importlib.import_module(frontend_name).FRONTEND
+    frontend = frontend_class(
+        checkpoint=cfg.frontend_checkpoint,
+        device=f"cuda:{args.gpu}",
+        output="features"
+    )
 
     train_set = ExcerptDataset(train_songs, frontend, cfg.excerpt_seconds)
     val_set = ExcerptDataset(val_songs, frontend, cfg.excerpt_seconds, deterministic=True)
@@ -181,6 +194,7 @@ def main() -> None:
     results = {name: evaluate(model, split, frontend, device, cfg.batch_size,
                               seed=args.seed)
                for split, name in ((val_set, "val"), (test_set, "gtzan")) if len(split)}
+
     print_table(results)
     print(f"\nfps={frontend.FPS}  excerpt={cfg.excerpt_seconds}s (fresh window per epoch)  "
           f"frontend={frontend.name}/{cfg.frontend_checkpoint}  "

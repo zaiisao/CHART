@@ -22,7 +22,7 @@ import torch
 import phasevae.model as model_mod
 from phasevae import run as run_mod
 from phasevae.model import (BarPhaseVAE, EmissionTransformer, Encoder,
-                            KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI)
+                            MAX_KAPPA, TWO_PI)
 from phasevae.vonmises import sample_vonmises
 
 
@@ -43,7 +43,7 @@ def test_encoder_free_branch_per_frame_locality_and_shapes():
     whole difference from the drift-bounded branch.
     """
     _seed()
-    enc = Encoder(input_dim=4, hidden=8, drift_bound=0.0)
+    enc = Encoder(input_dim=4)
     h = torch.randn(1, 20, 4)
     mu, kappa = enc(h)
     assert mu.shape == (1, 20) and kappa.shape == (1, 20)
@@ -54,23 +54,6 @@ def test_encoder_free_branch_per_frame_locality_and_shapes():
     mu2, _ = enc(h2)
     assert not torch.allclose(mu[0, 7], mu2[0, 7], atol=1e-6), \
         "per-frame mean did not respond to its own frame's input"
-
-
-def test_encoder_free_branch_ignores_delta_entirely():
-    """Input: same h with delta=None, a constant, and a wild per-frame delta.
-    Asserted: identical (mu, kappa) in all three cases and mu in (-pi, pi] (atan2
-    range). Why: the free branch's contract is that delta only parameterises the
-    drift-bounded cumsum construction; the atan2 head reads h alone.
-    """
-    _seed()
-    enc = Encoder(input_dim=4, hidden=8, drift_bound=0.0)
-    h = torch.randn(2, 15, 4)
-    mu_none, k_none = enc(h, None)
-    mu_c, k_c = enc(h, torch.full((2, 15), 0.06))
-    mu_w, k_w = enc(h, torch.randn(2, 15) * 3.0)
-    assert torch.equal(mu_none, mu_c) and torch.equal(mu_none, mu_w)
-    assert torch.equal(k_none, k_c) and torch.equal(k_none, k_w)
-    assert torch.all(mu_none > -math.pi) and torch.all(mu_none <= math.pi)
 
 
 # ================================================== 2. EmissionTransformer
@@ -142,7 +125,7 @@ def test_emission_transformer_masked_frames_do_not_influence_unmasked():
 
 def _tf_model():
     _seed()
-    return BarPhaseVAE(input_dim=4, hidden=8, emission="transformer",
+    return BarPhaseVAE(input_dim=4, d_model=8, emission="transformer",
                        emission_layers=1, emission_dim=16)
 
 
@@ -166,8 +149,8 @@ def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out1 = model(h, delta, mask, y, samples=1)
-    out2 = model(h, delta, mask, y, samples=1)
+    out1 = model(h, mask, y, samples=1)
+    out2 = model(h, mask, y, samples=1)
     for out in (out1, out2):
         assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
     assert not torch.equal(out1["recon"], out2["recon"]), \
@@ -183,8 +166,8 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out1 = model(h, delta, mask, y)
-    out2 = model(h, delta, mask, y)
+    out1 = model(h, mask, y)
+    out2 = model(h, mask, y)
     assert torch.equal(out1["recon"], out2["recon"])
 
 
@@ -206,7 +189,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out = model(h, delta, mask, y, samples=3, pos_weight=1.0)
+    out = model(h, mask, y, samples=3, pos_weight=1.0)
     assert calls["n"] == 3
 
     with torch.no_grad():
@@ -230,7 +213,7 @@ def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch(B=1, T=8)
-    out = model(h, delta, mask, y, samples=1, pos_weight=1.0)
+    out = model(h, mask, y, samples=1, pos_weight=1.0)
 
     with torch.no_grad():
         logits = model.emission_logits(out["mu"])   # forward passes no mask here
@@ -297,53 +280,63 @@ def test_sampler_circular_mean_matches_mu_at_kappa_five():
 # ====================================================== 5. KL of the free posterior
 
 
-def test_kl_free_posterior_matches_monte_carlo_two_frames():
-    """Input: a 2-frame free posterior (per-frame mu, moderate kappas). Asserted:
-    kl_to_physical_prior agrees with a seeded 200k-sample Monte Carlo estimate of
-    E_q[log q - log p] within 5% relative. Why: this is KL's definition; a sign or
-    dropped-term error in the closed form shifts the value far beyond 5%.
+def test_kl_free_posterior_matches_monte_carlo_three_frames():
+    """Input: a 3-frame free posterior (per-frame mu, moderate kappas). Asserted:
+    kl_to_physical_prior agrees with a seeded 400k-sample Monte Carlo estimate of
+    E_q[log q - log p] within 2% relative. Why: this is KL's definition, and it is the
+    independent check on the A_1(k3) A_2(k2) A_1(k1) product -- the MC estimator never
+    forms those factors, it just samples the three phases and evaluates the prior
+    density at 2*phi_2 - phi_1. A dropped A_2, a wrong coefficient, or a sign error all
+    move the value far beyond 2%.
+
+    Three frames is the minimum that exercises the chain at all: with the constant-rate
+    prior, phi_1 and phi_2 are unconditioned (uniform) and only t=3 has a transition.
+    kappa_p is lowered here so the MC estimate converges -- at kappa_p = 2000 the prior
+    density varies over ~1e3 nats across the sampled phases and the mean is dominated by
+    a handful of draws.
     """
     scipy_special = pytest.importorskip("scipy.special")
-    model = BarPhaseVAE(input_dim=4, hidden=8)
-    mu = torch.tensor([[0.3, 0.5]], dtype=torch.float64)
-    kappa = torch.tensor([[50.0, 80.0]], dtype=torch.float64)
-    delta = torch.full((1, 2), 0.06, dtype=torch.float64)
-    got = model.kl_to_physical_prior(mu, kappa, delta,
-                                     torch.ones(1, 2, dtype=torch.float64)).item()
+    model = BarPhaseVAE(input_dim=4, d_model=8, kappa_physical=40.0)
+    mu = torch.tensor([[0.30, 0.36, 0.43]], dtype=torch.float64)
+    kappa = torch.tensor([[50.0, 80.0, 65.0]], dtype=torch.float64)
+    got = model.kl_to_physical_prior(mu, kappa,
+                                     torch.ones(1, 3, dtype=torch.float64)).item()
 
     rng = np.random.default_rng(0)
-    n = 200_000
-    phi1 = rng.vonmises(0.3, 50.0, n)
-    phi2 = rng.vonmises(0.5, 80.0, n)
+    n = 400_000
+    phi = [rng.vonmises(m, k, n) for m, k in ((0.30, 50.0), (0.36, 80.0), (0.43, 65.0))]
 
     def log_i0(k):
         return np.log(scipy_special.i0e(k)) + k
 
-    log_q = (50.0 * np.cos(phi1 - 0.3) - math.log(TWO_PI) - log_i0(50.0)
-             + 80.0 * np.cos(phi2 - 0.5) - math.log(TWO_PI) - log_i0(80.0))
-    log_p = (-math.log(TWO_PI)
-             + KAPPA_PHYSICAL * np.cos(phi2 - phi1 - 0.06)
-             - math.log(TWO_PI) - log_i0(KAPPA_PHYSICAL))
+    log_q = sum(k * np.cos(p - m) - math.log(TWO_PI) - log_i0(k)
+                for p, m, k in zip(phi, (0.30, 0.36, 0.43), (50.0, 80.0, 65.0)))
+    # phi_1, phi_2 uniform; phi_3 ~ vM(2*phi_2 - phi_1, kappa_p)
+    log_p = (-2 * math.log(TWO_PI)
+             + 40.0 * np.cos(phi[2] - 2 * phi[1] + phi[0])
+             - math.log(TWO_PI) - log_i0(40.0))
     mc = float(np.mean(log_q - log_p))
-    assert got == pytest.approx(mc, rel=0.05)
+    assert got == pytest.approx(mc, rel=0.02)
 
 
-def test_kl_free_posterior_one_frame_is_entropy_to_uniform():
-    """Input: a 1-frame crop. Asserted: KL == -H(q) + log(2*pi) EXACTLY (analytic).
-    Why: with T=1 only the uniform phi_1 term of the Markov prior survives, so
-    KL(q || Uniform) = -H(q) - log p(phi_1) = -H(q) + log 2pi.
+def test_kl_free_posterior_two_frames_is_entropy_to_uniform():
+    """Input: a 2-frame crop. Asserted: KL == -H(q1) - H(q2) + 2*log(2*pi) EXACTLY.
+    Why: the constant-rate prior needs TWO predecessors, so with T=2 no transition term
+    exists and both frames are uniform -- KL(q || Uniform^2) = -H(q) + 2 log 2pi. This
+    also pins that the number of unconditioned frames is 2 and not 1: with the old
+    first-difference prior a T=2 crop DID have a chain term, and getting this boundary
+    wrong applies the prior to the wrong frames without changing any shape.
     """
     scipy_stats = pytest.importorskip("scipy.stats")
-    model = BarPhaseVAE(input_dim=4, hidden=8)
-    kappa_val = 7.0
+    model = BarPhaseVAE(input_dim=4, d_model=8)
+    kappas = (7.0, 11.0)
     got = model.kl_to_physical_prior(
-        torch.tensor([[0.4]], dtype=torch.float64),
-        torch.tensor([[kappa_val]], dtype=torch.float64),
-        torch.tensor([[0.05]], dtype=torch.float64),
-        torch.ones(1, 1, dtype=torch.float64)).item()
+        torch.tensor([[0.4, 0.9]], dtype=torch.float64),
+        torch.tensor([list(kappas)], dtype=torch.float64),
+        torch.ones(1, 2, dtype=torch.float64)).item()
 
-    expected = -float(scipy_stats.vonmises(kappa=kappa_val).entropy()) \
-        + math.log(TWO_PI)
+    expected = -sum(float(scipy_stats.vonmises(kappa=k).entropy()) for k in kappas) \
+        + 2 * math.log(TWO_PI)
     assert got == pytest.approx(expected, abs=1e-9)
 
 
@@ -361,7 +354,7 @@ def test_train_loss_formula_matches_documented_objective():
     as the brief allows.
     """
     src = inspect.getsource(run_mod.train)
-    assert 'frames = batch["mask"].sum(1)' in src
+    assert "frames = mask.sum(1)" in src
     # the objective formula lives in the hooks module now; run.train only wires it
     assert 'loss = -(hooks.objective(out, beta, cfg) / frames).mean()' in src
     from phasevae.variants import base
@@ -369,7 +362,7 @@ def test_train_loss_formula_matches_documented_objective():
 
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out = model(h, delta, mask, y, samples=1)
+    out = model(h, mask, y, samples=1)
     beta = run_mod.beta_at(1, types.SimpleNamespace(beta_start=0.2, beta_end=0.8,
                                                     beta_warmup=3))
     assert beta == pytest.approx(0.2 + (1 / 3) * 0.6)

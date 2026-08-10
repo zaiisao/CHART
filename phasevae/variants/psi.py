@@ -37,11 +37,11 @@ class PosteriorEncoder(Encoder):
     def __init__(self, input_dim: int, **kw):
         super().__init__(input_dim + 1, **kw)
 
-    def forward(self, h, delta=None, y=None):
+    def forward(self, h, mask=None, y=None):
         """[B, T, D] audio + [B, T] target -> (mu, kappa); same heads, richer input."""
         assert y is not None, "posterior encoder requires the target input y"
         x = torch.cat([h, y.unsqueeze(-1).to(h.dtype)], dim=-1)
-        return self.heads(self.features(x), delta)
+        return self.heads(self.features(x, mask))
 
 
 class RotationPrior(Encoder):
@@ -56,13 +56,13 @@ class RotationPrior(Encoder):
     def __init__(self, input_dim: int, rotations: int = 1, **kw):
         super().__init__(input_dim, **kw)
         self.rotations = rotations
-        self.rot_head = (nn.Linear(2 * self.proj.out_features, rotations)
+        self.rot_head = (nn.Linear(self.proj.out_features, rotations)
                          if rotations > 1 else None)
 
-    def forward(self, h, delta=None):
+    def forward(self, h, mask=None):
         """[B, T, D] -> (mu, kappa) or, for K > 1, (mu, kappa, rot_logits [B, K])."""
-        trunk = self.features(h)
-        mu, kappa = self.heads(trunk, delta)
+        trunk = self.features(h, mask)
+        mu, kappa = self.heads(trunk)
         if self.rot_head is None:
             return mu, kappa
         return mu, kappa, self.rot_head(trunk).mean(dim=1)
@@ -71,14 +71,10 @@ class RotationPrior(Encoder):
 class PsiBarPhaseVAE(BarPhaseVAE):
     """BarPhaseVAE with the third parameter set psi: deploys the conditional prior."""
 
-    def __init__(self, input_dim: int, rotations: int = 1, hidden: int = 128, **kw):
-        super().__init__(input_dim, hidden=hidden, **kw)
-        drift_bound = self.encoder.drift_bound
-        bar_rate = self.encoder.bar_rate
-        self.encoder = PosteriorEncoder(input_dim, hidden=hidden,
-                                        drift_bound=drift_bound, bar_rate=bar_rate)
-        self.prior_net = RotationPrior(input_dim, rotations, hidden=hidden,
-                                       drift_bound=drift_bound, bar_rate=bar_rate)
+    def __init__(self, input_dim: int, rotations: int = 1, d_model: int = 128, **kw):
+        super().__init__(input_dim, d_model=d_model, **kw)
+        self.encoder = PosteriorEncoder(input_dim, d_model=d_model)
+        self.prior_net = RotationPrior(input_dim, rotations, d_model=d_model)
         self.psi_rotations = rotations
 
     @property
@@ -110,18 +106,18 @@ class PsiBarPhaseVAE(BarPhaseVAE):
             torch.log_softmax(rot_logits, dim=1) + per_component, dim=1)
         return log_q - log_p
 
-    def forward(self, h, delta, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """ELBO plus the psi terms; q trains against the PHYSICAL prior only.
 
         Joint KL(q||psi) collapsed q onto the ignorant psi in every attempt; psi
         chases a stop-gradient teacher instead (Sohn's two-step EB, as one run).
         """
-        mu, kappa = self.encoder(h, delta, y)
-        prior_out = self.prior_net(h, delta)
+        mu, kappa = self.encoder(h, mask, y)
+        prior_out = self.prior_net(h, mask)
         mu_p, kappa_p = prior_out[0], prior_out[1]
         rot_logits = prior_out[2] if len(prior_out) == 3 else None
 
-        kl = self.kl_to_physical_prior(mu, kappa, delta, mask)
+        kl = self.kl_to_physical_prior(mu, kappa, mask)
 
         weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
                                                     dtype=torch.float32),
@@ -136,7 +132,7 @@ class PsiBarPhaseVAE(BarPhaseVAE):
                     rot_logits, mask)
                 # Eq. 27 physics anchoring: keep p_psi NEAR the physical random walk,
                 # not an unconstrained learned prior (the old codebase's psi ran away).
-                anchor = self.kl_to_physical_prior(mu_p, kappa_p, delta, mask)
+                anchor = self.kl_to_physical_prior(mu_p, kappa_p, mask)
             per_frame = nn.functional.binary_cross_entropy_with_logits(
                 self.emission_logits(phi), y.float(), reduction="none")
             recon = recon - (per_frame * weight).sum(1)
@@ -146,10 +142,10 @@ class PsiBarPhaseVAE(BarPhaseVAE):
                 "kappa": kappa, "distill": distill, "prior_anchor": anchor}
 
     @torch.no_grad()
-    def infer_phase(self, h, delta=None):
+    def infer_phase(self, h, mask=None):
         """Sohn-orthodox deployment: the conditional prior, never the posterior."""
         assert not self.training, "deployment path must run in eval mode"
-        prior_out = self.prior_net(h, delta)
+        prior_out = self.prior_net(h, mask)
         if len(prior_out) == 2:
             return prior_out[0]
 
@@ -172,8 +168,7 @@ def build_model(cfg, input_dim: int) -> PsiBarPhaseVAE:
     """The §9 model; ``rotations``/``lambda_prior`` come from the config."""
     return PsiBarPhaseVAE(input_dim, rotations=cfg.rotations, emission=cfg.emission,
                           emission_layers=cfg.emission_layers,
-                          emission_positional=cfg.emission_positional,
-                          drift_bound=cfg.drift_bound, bar_rate=cfg.bar_rate)
+                          emission_positional=cfg.emission_positional)
 
 
 def optimizer(model, cfg):
@@ -207,5 +202,5 @@ def epoch_note(model, probe) -> str:
     if model.prior_net.rot_head is None:
         return ""
     with torch.no_grad():
-        _m, _k, rot = model.prior_net(probe["h"], probe["delta"])
+        _m, _k, rot = model.prior_net(probe["h"], probe["mask"])
     return f"  rot-spread {float(rot.std()):6.4f}"

@@ -61,9 +61,9 @@ DEFAULTS = {"anchor_slots": 64}
 class AnchorKVAE(BarPhaseVAE):
     """BarPhaseVAE plus a categorical anchor-slot head on phase-binned activations."""
 
-    def __init__(self, input_dim: int, anchor_slots: int = 64, hidden: int = 128,
+    def __init__(self, input_dim: int, anchor_slots: int = 64, d_model: int = 128,
                  k_hidden: int = 256, **kw):
-        super().__init__(input_dim, hidden=hidden, **kw)
+        super().__init__(input_dim, d_model=d_model, **kw)
         assert self.emission_net is None, \
             "anchor_k vectorises the closed-form emission over [B, C, T]; " \
             "the transformer emission is not supported here"
@@ -110,11 +110,11 @@ class AnchorKVAE(BarPhaseVAE):
         """
         return self.k_head(self.bin_activations(h, mu, mask).flatten(1))
 
-    def forward(self, h, delta, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """ELBO with k marginalised exactly; same contract as the base forward."""
-        trunk = self.encoder.features(h)
-        mu, kappa = self.encoder.heads(trunk, delta)
-        kl = self.kl_to_physical_prior(mu, kappa, delta, mask)
+        trunk = self.encoder.features(h, mask)
+        mu, kappa = self.encoder.heads(trunk)
+        kl = self.kl_to_physical_prior(mu, kappa, mask)
 
         C = self.anchor_slots
         a_bin = self.bin_activations(h, mu, mask)
@@ -154,11 +154,11 @@ class AnchorKVAE(BarPhaseVAE):
                 "recon_k": recon_k.detach(), "log_q": log_q.detach()}
 
     @torch.no_grad()
-    def infer_phase(self, h, delta=None, mask=None):
+    def infer_phase(self, h, mask=None):
         """Deployment: mu shifted by the argmax slot. Reads audio (+ length mask) only."""
         assert not self.training, "deployment path must run in eval mode"
-        trunk = self.encoder.features(h)
-        mu, _kappa = self.encoder.heads(trunk, delta)
+        trunk = self.encoder.features(h, mask)
+        mu, _kappa = self.encoder.heads(trunk)
         k = self.slot_logits(h, mu, mask).argmax(-1)
         return mu + self.slot_shifts[k].unsqueeze(-1)
 
@@ -172,7 +172,6 @@ def build_model(cfg, input_dim: int) -> AnchorKVAE:
     return AnchorKVAE(input_dim, anchor_slots=cfg.anchor_slots,
                       emission=cfg.emission, emission_layers=cfg.emission_layers,
                       emission_positional=cfg.emission_positional,
-                      drift_bound=cfg.drift_bound, bar_rate=cfg.bar_rate,
                       kappa_physical=cfg.kappa_physical)
 
 
@@ -202,7 +201,7 @@ def epoch_note(model, probe) -> str:
     was_training = model.training
     model.eval()
     with torch.no_grad():
-        out = model(probe["h"], probe["delta"], probe["mask"], probe["y"])
+        out = model(probe["h"], probe["mask"], probe["y"])
         log_q = out["log_q"]
         q = log_q.exp()
         entropy = -(q * log_q).sum(-1).mean() / math.log(model.anchor_slots)
