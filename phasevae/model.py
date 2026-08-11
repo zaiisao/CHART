@@ -50,7 +50,7 @@ TWO_PI = 2.0 * math.pi
 # 1/sqrt(kappa) is the per-frame sd, so 2000 gives 0.022 rad at 50 fps against a bar
 # advance of roughly 0.06 rad. A much softer prior (kappa ~ 20, sd 0.22 rad) is a random
 # walk whose phase is uniform within two seconds and regularises nothing.
-KAPPA_PHYSICAL = 2000.0
+KAPPA_PHYSICAL = 383.0
 MAX_KAPPA = 1.0e5     # smooth ceiling on the encoder's concentration; an unbounded
                       # softplus inside a KL term can and did run away. Bounded via
                       # MAX * tanh(x / MAX), which is the identity for x << MAX and never
@@ -95,7 +95,8 @@ class Encoder(nn.Module):
     """
 
     def __init__(self, input_dim: int, d_model: int = 128, heads: int = 4, layers: int = 2,
-                 kappa_physical: float = KAPPA_PHYSICAL, max_len: int = 4096):
+                 kappa_physical: float = KAPPA_PHYSICAL, pool_span: int = 150,
+                 max_len: int = 4096):
         super().__init__()
 
         self.proj = nn.Linear(input_dim, d_model)
@@ -103,7 +104,8 @@ class Encoder(nn.Module):
                                         dropout=0.0, activation="gelu",
                                         batch_first=True, norm_first=True)
         self.blocks = nn.TransformerEncoder(layer, layers)
-        self.out = nn.Linear(d_model, 3)
+        self.out = nn.Linear(d_model, 4)
+        self.pool_span = int(pool_span)
 
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.zeros_(self.out.bias)
@@ -114,6 +116,8 @@ class Encoder(nn.Module):
         self.register_buffer("pe", EmissionTransformer._sinusoidal(max_len, d_model))
         self.register_buffer("log_kappa_bias",
                      torch.tensor(math.log(kappa_physical)), persistent=False)
+        self.register_buffer("log_rate_bias",
+                     torch.tensor(math.log(TWO_PI / (3.0 * 50.0))), persistent=False)
 
     def features(self, h, mask=None):
         """[B, T, D] -> [B, T, d_model]: the trunk shared by every head (tutorial 9.2).
@@ -140,8 +144,23 @@ class Encoder(nn.Module):
         """
         out = self.out(trunk)
         kappa = bounded_kappa(torch.exp(out[..., 2] + self.log_kappa_bias) + 1e-3)
-        mu = torch.atan2(out[..., 0], out[..., 1])
+
+        log_rate = self._pool(out[..., 3] + self.log_rate_bias, self.pool_span)
+        rate = torch.exp(log_rate.clamp(math.log(0.01), math.log(0.2)))
+        offset = torch.atan2(out[:, 0, 0], out[:, 0, 1]).unsqueeze(1)
+        mu = offset + (torch.cumsum(rate, dim=1) - rate[:, :1])
+
         return mu, kappa
+
+    @staticmethod
+    def _pool(x, span):
+        """Mean over fixed blocks of `span` frames, broadcast back. Deletes the degrees of
+        freedom rather than taxing them: within-span increment variance becomes exactly 0."""
+        b, t = x.shape
+        pad = (-t) % span
+        xp = torch.nn.functional.pad(x, (0, pad))
+        means = xp.reshape(b, -1, span).mean(-1, keepdim=True)
+        return means.expand(-1, -1, span).reshape(b, -1)[:, :t]
 
     def forward(self, h, mask=None):
         """[B, T, D] -> (mu, kappa). Per-frame and free: see kl_to_physical_prior.

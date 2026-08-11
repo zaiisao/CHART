@@ -195,7 +195,10 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     with torch.no_grad():
         terms = []
         for off in offsets:
-            logits = model.emission_logits(out["mu"] + off)
+            # forward passes the mask to the emission, so this must too:
+            # the transformer emission attends across frames, and without the
+            # mask it attends over padding and the logits genuinely differ.
+            logits = model.emission_logits(out["mu"] + off, mask)
             per_frame = torch.nn.functional.binary_cross_entropy_with_logits(
                 logits, y, reduction="none")
             terms.append(-(per_frame * mask).sum(1))
@@ -216,7 +219,7 @@ def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
     out = model(h, mask, y, samples=1, pos_weight=1.0)
 
     with torch.no_grad():
-        logits = model.emission_logits(out["mu"])   # forward passes no mask here
+        logits = model.emission_logits(out["mu"], mask)   # forward passes it too
         ll = (y * torch.nn.functional.logsigmoid(logits)
               + (1 - y) * torch.nn.functional.logsigmoid(-logits))
         expected = (ll * mask).sum(1)

@@ -201,17 +201,67 @@ def test_vonmises_entropy_uniform_limit_and_scipy():
                                      abs=1e-5)
 
 
-def test_encoder_free_mode_per_frame_unconstrained():
-    """With drift_bound=0 the mean is emitted per frame through atan2: every mu is in
-    (-pi, pi] and delta plays no role at all (the free parameterisation ignores it).
+def test_encoder_trajectory_rotates_monotonically_by_construction():
+    """mu = offset + cumsum(exp(pooled log-rate)): rotation is STRUCTURAL, not learned.
+
+    Replaces a test that asserted the opposite -- that mu was emitted freely per frame.
+    That parameterisation was measured to collapse: from a random init the second
+    differences are of order 1 rad, the KL opens at ~151k against a reconstruction of
+    ~286, and the steepest descent is to flatten mu. The trace showed the endpoint
+    precisely -- increments sign-balanced at frac>0 = 0.50 with mean +0.00001, i.e. two
+    parts in a thousand of the phase motion contributing net rotation.
+
+    The three properties below are what the new parameterisation guarantees so that the
+    objective never has to be persuaded of them.
     """
     _seed()
-    enc = Encoder(input_dim=4, d_model=8)
-    h = torch.randn(2, 25, 4)
-    mu_none, _ = enc(h, None)
-    mu_delta, _ = enc(h, torch.full((2, 25), 0.5))
-    assert torch.equal(mu_none, mu_delta)
-    assert torch.all(mu_none > -math.pi - 1e-6) and torch.all(mu_none <= math.pi + 1e-6)
+    enc = Encoder(input_dim=4, d_model=8, pool_span=50)
+    h = torch.randn(2, 300, 4)
+    mu, kappa = enc(h, torch.ones(2, 300))
+
+    inc = mu[:, 1:] - mu[:, :-1]
+
+    # 1. strictly increasing: the rate is exp(...) so every step is positive. A frozen or
+    #    sign-balanced trajectory -- the measured collapse -- is unrepresentable.
+    assert torch.all(inc > 0), "phase is not monotonically advancing"
+
+    # 2. constant within a pooling span: within-bar increment variance is 100% of what the
+    #    collapsed model produced and 0% of what the annotations contain, so the degrees of
+    #    freedom are DELETED here rather than taxed by the prior.
+    for start in (0, 50, 100):
+        block = inc[:, start:start + 49]
+        assert torch.allclose(block, block[:, :1].expand_as(block), atol=1e-6), \
+            "increment is not constant inside a pooling span"
+
+    # 3. the rate lands in the physical band at initialisation (a 0.6-12 s bar), which is
+    #    what puts a fresh model inside the +-3% basin where the reconstruction gradient
+    #    on the rate is coherent at all.
+    assert 0.01 <= float(inc.mean()) <= 0.2
+
+
+def test_encoder_offset_head_is_reachable_from_the_loss():
+    """mu[0] must equal the offset, and channels 0,1 must receive gradient.
+
+    Dropping the `offset +` term leaves mu[0] = 0 for every window and silently starves
+    the offset head -- measured at exactly 0.000e+00 gradient on both channels. That is
+    fatal rather than wasteful: F on this model is the anchor-within-tolerance rate, so
+    the offset IS the score. It is also the dead-subnetwork failure the Encoder's own
+    init comment says shipped three times.
+    """
+    _seed()
+    enc = Encoder(input_dim=4, d_model=8, pool_span=50)
+    h = torch.randn(2, 200, 4)
+    mu, kappa = enc(h, torch.ones(2, 200))
+
+    out = enc.out(enc.features(h, torch.ones(2, 200)))
+    offset = torch.atan2(out[:, 0, 0], out[:, 0, 1])
+    assert torch.allclose(mu[:, 0], offset, atol=0), "mu[0] is not the offset, bitwise"
+
+    enc.zero_grad()
+    (mu.sum() + kappa.sum()).backward()
+    grads = [float(enc.out.weight.grad[c].abs().sum()) for c in range(4)]
+    for c, g in enumerate(grads):
+        assert g > 0.0, f"output channel {c} receives no gradient (dead head)"
 
 
 def test_encoder_target_blind():
@@ -389,7 +439,12 @@ def test_kl_to_physical_prior_second_order_needs_a2_not_a1_squared():
 
     # rel rather than abs: the KL is ~1.7e3 here because log I0(kappa_p) is ~kappa_p
     assert got == pytest.approx(kl_with(a2), rel=1e-7)
-    assert abs(kl_with(a1 * a1) - kl_with(a2)) > 100.0   # the wrong factor is not subtle
+
+    # The wrong factor is not subtle -- but its size scales with kappa_physical, so state
+    # the threshold in units of kappa_p rather than as a constant that goes stale the next
+    # time the prior is recalibrated (2000 -> 383 broke a hardcoded 100 here).
+    wrong = abs(kl_with(a1 * a1) - kl_with(a2))
+    assert wrong > 0.05 * KAPPA_PHYSICAL, f"A_1^2 vs A_2 differ by only {wrong:.1f} nats"
 
 
 def test_kl_to_physical_prior_invariant_to_shift_and_rate():
