@@ -117,5 +117,11 @@
     "type": "string",
     "default": "final0",
     "description": "checkpoint the frontend loads; ONE serves train/val/test alike. final0 is Beat This's (gtzan held out of every checkpoint); beat_transformer wants e.g. fold_0."
+  },
+  "frontend_lr_scale": {
+    "type": "number",
+    "default": 0.0,
+    "minimum": 0.0,
+    "description": "multiplier on lr for the frontend's own parameters. 0 = frozen (the frontend runs under no_grad and only the VAE trains); > 0 thaws it and adds it as a second optimizer group at lr * this. RECONSTRUCTED 2026-08-11 after an accidental git checkout discarded the uncommitted original -- the semantics come from run.py's usage, the wording is not the author's."
   }
 }

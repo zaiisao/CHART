@@ -93,7 +93,6 @@ class BeatThisFrontend(Frontend):
         spect = self._audio2frames.signal2spect(signal, sample_rate)
         return np.ascontiguousarray(spect.cpu().numpy(), dtype=np.float32)
 
-    @torch.no_grad()
     def forward_features(self, batch) -> torch.Tensor:
         """[B, T, 128] mel windows -> [B, T, num_channels] in the instance's output mode.
 
@@ -131,10 +130,9 @@ class BeatThisFrontend(Frontend):
         handle = model.transformer_blocks.register_forward_hook(
             lambda module, inputs, output: captured.append(output))
         try:
-            with torch.inference_mode():
-                with torch.autocast(enabled=self._audio2frames.float16,
-                                    device_type=self._audio2frames.device.type):
-                    model(batch)
+            with torch.autocast(enabled=self._audio2frames.float16,
+                                device_type=self._audio2frames.device.type):
+                model(batch)
         finally:
             handle.remove()
         return captured[0].float()

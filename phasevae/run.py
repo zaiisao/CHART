@@ -73,8 +73,14 @@ def _seed_worker(_worker_id: int) -> None:
 def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
     """One seed: run the controls, then fit the objective the hooks define.
 
-    Windows come fresh from the DataLoader every epoch; the frontend is frozen, so its
-    forward runs under no_grad and only the VAE trains.
+    Windows come fresh from the DataLoader every epoch. The frontend trains only when
+    ``frontend_lr_scale > 0``; at the default 0 it is frozen and only the VAE moves.
+
+    Each epoch closes with ``hooks.epoch_note`` on a FROZEN probe batch -- the variant's
+    own diagnostic, which the base recipe leaves empty. It exists because the ELBO and the
+    four trajectory numbers cannot see a variant's internal state: anchor_time's posterior
+    over candidate anchors sat at Hq 0.998 for six epochs while advance and elbo moved,
+    and without Hq that run was indistinguishable from one where the anchor was working.
     """
     torch.manual_seed(seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
@@ -87,6 +93,21 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 
     opt, clip_params = hooks.optimizer(model, cfg)
 
+    if cfg.frontend_lr_scale > 0:
+        fe = list(frontend._audio2frames.model.parameters())
+        opt.add_param_group({"params": fe, "lr": cfg.lr * cfg.frontend_lr_scale})
+
+    # ONE fixed batch for the variant diagnostic, drawn before training and never redrawn.
+    # It must be the IDENTICAL input every epoch: against a moving probe, a moving number
+    # tells you nothing about whether the MODEL moved. The windows are frozen here; the
+    # features are recomputed each epoch because a thawed frontend changes them.
+    # Contract: a variant's epoch_note receives {"h", "mask", "y"} -- audio features, the
+    # validity mask, and the target. y is present because a variant may report a quantity
+    # that reads it (anchor_time's `agree` compares argmax q against argmax of the
+    # reconstruction); nothing here is on the deployed path.
+    probe_raw = collate_excerpts([dataset[i] for i in
+                                  range(min(cfg.batch_size, len(dataset)))])
+
     for epoch in range(cfg.epochs):
         model.train()
         beta = beta_at(epoch, cfg)
@@ -95,7 +116,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         totals, steps = np.zeros(3), 0
         health = np.zeros(4)
         for raw in loader:
-            h = frontend.forward_features(raw["input"]).clone()
+            with torch.set_grad_enabled(cfg.frontend_lr_scale > 0):
+                h = frontend.forward_features(raw["input"])
+
             mask = raw["mask"].to(device, non_blocking=True)
             y = raw["y"].to(device, non_blocking=True)
 
@@ -108,7 +131,11 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 
             opt.zero_grad()
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip)
+            if cfg.frontend_lr_scale > 0:
+                torch.nn.utils.clip_grad_norm_(fe, cfg.clip)
+
             opt.step()
 
             totals += [float(out["elbo"].mean()),
@@ -130,10 +157,19 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         b_note = ("" if model.emission_net is not None
                   else f"  b {float(model.emission_b):5.2f}")
         adv, kap, perr, cov = health / steps
+        # The variant's own diagnostic, on the frozen probe. no_grad covers the frontend
+        # forward too, which is NOT redundant once frontend_lr_scale > 0 -- without it the
+        # probe would build a graph over 20M thawed parameters purely to print a number.
+        with torch.no_grad():
+            note = hooks.epoch_note(model, {
+                "h": frontend.forward_features(probe_raw["input"]),
+                "mask": probe_raw["mask"].to(device),
+                "y": probe_raw["y"].to(device)})
         print(f"  epoch {epoch:2d}  beta {beta:5.3f}  elbo {totals[0] / steps:9.2f}  "
               f"recon {totals[1] / steps:8.2f}  kl {totals[2] / steps:9.2f}{b_note}\n"
               f"            advance {adv:7.4f} (true 0.025-0.063)  kappa {kap:9.1f}  "
-              f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}",
+              f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}"
+              f"{note}",
               flush=True)
 
     return model
@@ -189,7 +225,9 @@ def main() -> None:
     if args.save_dir:
         save_dir = pathlib.Path(args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), save_dir / f"seed{args.seed}.pt")
+        torch.save({"model": model.state_dict(),
+                    "frontend": frontend._audio2frames.model.state_dict()},
+                   save_dir / f"seed{args.seed}.pt")
 
     results = {name: evaluate(model, split, frontend, device, cfg.batch_size,
                               seed=args.seed)
