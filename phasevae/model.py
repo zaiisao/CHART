@@ -41,7 +41,8 @@ import math
 import torch
 from torch import nn
 
-from .vonmises import log_i0, mean_resultant, sample_vonmises, second_resultant
+from .vonmises import (kl_vonmises, log_i0, mean_resultant, sample_vonmises,
+                       second_resultant)
 
 
 TWO_PI = 2.0 * math.pi
@@ -51,6 +52,12 @@ TWO_PI = 2.0 * math.pi
 # advance of roughly 0.06 rad. A much softer prior (kappa ~ 20, sd 0.22 rad) is a random
 # walk whose phase is uniform within two seconds and regularises nothing.
 KAPPA_PHYSICAL = 383.0
+MAX_ANCHOR_KAPPA = 200.0   # q(offset)'s concentration is MAX * (normalised resultant),
+                           # so perfect agreement across bars gives sd 1/sqrt(200) = 0.071
+                           # rad -- at a 2.5 s bar that is 28 ms, comfortably inside the
+                           # +-70 ms tolerance, and finite, so KL( q || Uniform ) stays
+                           # bounded. An unbounded map would let a confident window buy
+                           # arbitrary KL, which is the mechanism that railed kappa.
 MAX_KAPPA = 1.0e5     # smooth ceiling on the encoder's concentration; an unbounded
                       # softplus inside a KL term can and did run away. Bounded via
                       # MAX * tanh(x / MAX), which is the identity for x << MAX and never
@@ -96,8 +103,9 @@ class Encoder(nn.Module):
 
     def __init__(self, input_dim: int, d_model: int = 128, heads: int = 4, layers: int = 2,
                  kappa_physical: float = KAPPA_PHYSICAL, pool_span: int = 150,
-                 max_len: int = 4096):
+                 max_len: int = 4096, evidence: str = "head"):
         super().__init__()
+        self.evidence = evidence
 
         self.proj = nn.Linear(input_dim, d_model)
         layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
@@ -131,26 +139,68 @@ class Encoder(nn.Module):
         h = self.proj(h) + self.pe[:h.shape[1]]
         return self.blocks(h, src_key_padding_mask=pad)
 
-    def heads(self, trunk):
-        """Trunk -> (mu [B, T], kappa [B, T]): the parameters of q, not a sample.
+    def heads(self, trunk, mask=None, h=None):
+        """Trunk -> (mu [B, T], kappa [B, T], anchor): the parameters of q, not a sample.
 
-        Channels 0,1 are the (sin, cos) of the phase offset -- note atan2's argument
-        order, which the previous comment here had reversed; bias[1] = 1.0 therefore
-        starts every network at angle 0, the physical prior's mode. Channel 2 is the
+        Channel 0 is the EVIDENCE logit -- this network's own per-frame downbeat-ness,
+        not the frontend's activation channels. Channel 1 is unused. Channel 2 is the
         concentration in LOG space (tutorial 9.4's convention for the spread head), so
         kappa = kappa_physical * exp(raw): raw 0 gives the prior's concentration and the
         whole useful range is within +-5. The additive form this replaced needed raw
-        -1990 to reach kappa 10, i.e. kappa could not move.
+        -1990 to reach kappa 10, i.e. kappa could not move. Channel 3 is the log rate.
+
+        THE ANCHOR IS A CIRCULAR MEAN OVER EVERY FRAME, not a frame-0 snapshot.
+        Where a window sits inside its bar is a property of the whole window, so reading
+        it from one position was always arbitrary -- and measured inferior: swapping a
+        frame-0 trunk snapshot for phase-folded evidence was worth +0.232 F on FROZEN
+        weights (anchor_k.yaml), the largest single effect on record here. The frame-0
+        form left phase_err at chance 1.571 for all 60 epochs of a full-corpus run whose
+        rate converged cleanly (est/ref 1.19, AMLt 0.356 against F 0.078: right tempo,
+        wrong phase).
+
+        Frame t's evidence is not a free-standing vote. A downbeat at t implies
+        offset = -mu0_t (mod 2 pi), so each frame argues for a DIFFERENT offset and the
+        votes are only commensurate once rotated into a common frame. Hence
+
+            R     = sum_t a_t exp(i mu0_t)        (mu0 = the ANCHOR-FREE ramp)
+            shift = -arg(R)
+            mu    = mu0 + shift
+
+        The ramp must start at 0: if it carried an offset of its own, that and the shift
+        could both rotate the trajectory and only the sum would be identified -- the
+        recorded gauge failure where an offset head "abdicated to 459 ms".
+
+        |R| / sum_t a_t is the NORMALISED resultant, in [0, 1]: agreement across bars,
+        and the natural concentration for q(offset). Raw |R| is scale-dependent.
         """
         out = self.out(trunk)
         kappa = bounded_kappa(torch.exp(out[..., 2] + self.log_kappa_bias) + 1e-3)
 
         log_rate = self._pool(out[..., 3] + self.log_rate_bias, self.pool_span)
         rate = torch.exp(log_rate.clamp(math.log(0.01), math.log(0.2)))
-        offset = torch.atan2(out[:, 0, 0], out[:, 0, 1]).unsqueeze(1)
-        mu = offset + (torch.cumsum(rate, dim=1) - rate[:, :1])
+        mu0 = torch.cumsum(rate, dim=1) - rate[:, :1]          # anchor-free: mu0[0] = 0
 
-        return mu, kappa
+        w = torch.ones_like(mu0) if mask is None else mask
+        if self.evidence == "frontend":
+            # DIAGNOSTIC ARM. Reuses the frontend's own beat/downbeat channels as the
+            # evidence instead of learning one, which is what anchor_k does and where its
+            # +0.232 F came from. Held apart from the default because the standing
+            # position is that those activations are the PEAK-PICK BASELINE, not an
+            # input this model gets to consume -- reusing them makes the anchor partly
+            # Beat This's answer rather than ours. Here to isolate detector quality:
+            # measured at init the frontend channel is 7x peakier at annotated downbeats
+            # (excess 0.297 vs 0.041) yet yields the SAME resultant (0.0104 vs 0.0103),
+            # because the fold is broken by rate error, not by the detector.
+            assert h is not None, "evidence='frontend' needs the raw features"
+            a = torch.sigmoid(h[..., -2:]).max(-1).values * w
+        else:
+            a = torch.sigmoid(out[..., 0]) * w
+        R = torch.complex(a * torch.cos(mu0), a * torch.sin(mu0)).sum(1)
+        shift = -torch.angle(R)
+        resultant = R.abs() / a.sum(1).clamp(min=1e-6)
+
+        mu = mu0 + shift.unsqueeze(1)
+        return mu, kappa, {"shift": shift, "resultant": resultant, "evidence": a}
 
     @staticmethod
     def _pool(x, span):
@@ -171,7 +221,7 @@ class Encoder(nn.Module):
         1 rad. MEASURED: the KL opens at ~151k against a reconstruction of ~286, and the
         steepest descent is to flatten mu.
         """
-        return self.heads(self.features(h, mask))
+        return self.heads(self.features(h, mask), mask, h)
 
 
 class EmissionTransformer(nn.Module):
@@ -241,10 +291,12 @@ class BarPhaseVAE(nn.Module):
 
     def __init__(self, input_dim: int, d_model: int = 128, emission: str = "cosine",
                  emission_layers: int = 2, emission_dim: int = 64,
-                 emission_positional: bool = False, kappa_physical: float = KAPPA_PHYSICAL):
+                 emission_positional: bool = False, kappa_physical: float = KAPPA_PHYSICAL,
+                 evidence: str = "head"):
         super().__init__()
         self.kappa_physical = float(kappa_physical)
-        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical)
+        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical,
+                               evidence=evidence)
 
         self.emission_kind = emission
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
@@ -336,7 +388,8 @@ class BarPhaseVAE(nn.Module):
         return neg_entropy - log_p
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0,
-                targets=None, valid=None, sigma_frames: float = 3.5):
+                targets=None, valid=None, sigma_frames: float = 3.5,
+                anchor_penalty: str = "wrap", anchor_kappa: float = 65.0):
         """One ELBO evaluation on a padded batch (tutorial 7.7).
 
         The OBSERVATION is the annotated downbeat TIMES, not the per-frame indicator:
@@ -367,20 +420,40 @@ class BarPhaseVAE(nn.Module):
         assert targets is not None and valid is not None, \
             "the alignment objective needs collate_excerpts' targets/valid"
 
-        mu, kappa = self.encoder(h, mask)
+        mu, kappa, anchor = self.encoder(h, mask)
         kl = self.kl_to_physical_prior(mu, kappa, mask)
+
+        # The anchor is a LATENT now, not a deterministic head output: q(offset|h) is the
+        # von Mises the circular mean already produces -- mean direction from arg(R),
+        # concentration from the normalised resultant, i.e. how much the bars AGREE. Its
+        # prior is Uniform on the circle (kappa 2 = 0), because which point of the bar a
+        # window opens on carries no information before hearing it. MAX_ANCHOR_KAPPA keeps
+        # a confident window off the delta-function limit where the KL diverges.
+        kappa_off = MAX_ANCHOR_KAPPA * anchor["resultant"]
+        kl_offset = kl_vonmises(anchor["shift"], kappa_off,
+                                torch.zeros_like(anchor["shift"]),
+                                torch.zeros_like(kappa_off))
 
         recon = 0.0
         for _ in range(samples):
-            phi = mu + sample_vonmises(kappa)
+            # Two independent draws: the per-frame phase noise, and ONE anchor sample per
+            # window that rotates the whole trajectory. The anchor's variance is therefore
+            # window-level, which is why it needs its own sample rather than riding on the
+            # per-frame one.
+            phi = (mu + sample_vonmises(kappa)
+                   + sample_vonmises(kappa_off).unsqueeze(1))
             # velocity=mu: q is per-frame factorised, so the SAMPLE has no usable
             # derivative and it appears here as a divisor. See align_log_prob.
             recon = recon + align_log_prob(phi, targets, valid, sigma_frames,
-                                           velocity=mu)
+                                           velocity=mu,
+                                           anchor_penalty=anchor_penalty,
+                                           anchor_kappa=anchor_kappa)
 
         recon = recon / samples
+        kl = kl + kl_offset
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa}
+        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa,
+                "resultant": anchor["resultant"], "kl_offset": kl_offset}
 
     @property
     def deployed_net(self):
@@ -418,7 +491,8 @@ class BarPhaseVAE(nn.Module):
         return torch.sigmoid(self.emission_logits(self.infer_phase(h, mask), mask))
 
 
-def align_log_prob(mu, targets, valid, sigma_frames: float = 3.5, velocity=None):
+def align_log_prob(mu, targets, valid, sigma_frames: float = 3.5, velocity=None,
+                   anchor_penalty: str = "wrap", anchor_kappa: float = 65.0):
     """log p(D | phi): the annotated downbeat TIMES as the observation. [B, T], [B, K] -> [B]
 
     The per-frame Bernoulli asks "is this frame a downbeat" 2250 times, of which ~97% are
@@ -496,12 +570,33 @@ def align_log_prob(mu, targets, valid, sigma_frames: float = 3.5, velocity=None)
     # Split it: the INTEGER part of c is a free gauge (which absolute bar the window
     # starts on is arbitrary), the SUB-BAR part is not (it is where the bar line sits).
     # Centring alone deletes both and the anchor loses its only signal -- measured, the
-    # rate converged faster and in-tol fell to 0%. So subtract c to free the shape, then
-    # add back its wrapped remainder, which is 0 exactly when c is a whole number of
-    # turns and grows to +-pi otherwise.
-    phase_err = (raw - c) + torch.atan2(torch.sin(c), torch.cos(c))
-    dt = phase_err / rate_at                        # phase residual -> TIME residual
+    # rate converged faster and in-tol fell to 0%. So (raw - c) carries the SHAPE (the
+    # rate learns from it) and c carries the ANCHOR, scored separately below.
+    shape_err = raw - c
 
+    if anchor_penalty == "cos":
+        # SMOOTH on the circle: score c with a von Mises log-density, kappa(cos c - 1).
+        # The alternative ("wrap") folds atan2(sin c, cos c) into the Gaussian, which is
+        # a SAWTOOTH -- bounded, with a cusp at pi. Bounded is the problem: when the
+        # anchor is badly wrong a DIFFUSE sample can wrap to the cheap side, so the
+        # objective is paid to be uncertain exactly where it is wrong. Measured:
+        # d(recon)/d(resultant) = -14028, i.e. the reconstruction actively crushes the
+        # anchor's coherence, 877x harder than the KL pushes the same way.
+        # cos is smooth, concave at 0, and monotone in |c| out to pi, so being wrong
+        # costs more rather than wrapping cheap. Its one stationary point at c = pi is a
+        # REPELLER (zero gradient, unstable) rather than a cusp with a sign flip.
+        # anchor_kappa 65: a 70 ms error at a 2.5 s bar is 0.175 rad, and
+        # 65*(1 - cos 0.175) = 1.0 nat -- one nat at the tolerance edge, matching what
+        # sigma_frames buys the shape term.
+        dt = shape_err / rate_at
+        shape_ll = (-0.5 * (dt / sigma_frames) ** 2
+                    - math.log(sigma_frames) - 0.5 * math.log(TWO_PI))
+        anchor_ll = anchor_kappa * (torch.cos(c) - 1.0) - math.log(TWO_PI) \
+            - log_i0(torch.as_tensor(anchor_kappa, device=c.device, dtype=c.dtype))
+        return (shape_ll * valid).sum(1) + anchor_ll.squeeze(1)
+
+    phase_err = shape_err + torch.atan2(torch.sin(c), torch.cos(c))
+    dt = phase_err / rate_at                        # phase residual -> TIME residual
     log_density = (-0.5 * (dt / sigma_frames) ** 2
                    - math.log(sigma_frames) - 0.5 * math.log(TWO_PI))
     return (log_density * valid).sum(1)

@@ -105,7 +105,9 @@ def main() -> None:
     for epoch in range(args.epochs):
         model.train()
         out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
-                    targets=tk, valid=tv)
+                    targets=tk, valid=tv,
+                    anchor_penalty=cfg.anchor_penalty,
+                    anchor_kappa=cfg.anchor_kappa)
         loss = -(hooks.objective(out, cfg.beta_end, cfg) / frames).mean()
 
         opt.zero_grad()
@@ -126,6 +128,11 @@ def main() -> None:
         errs = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
                          for w in wraps]) if len(wraps) else np.array([1e9])
         rate = float((out["mu"][0, 1:] - out["mu"][0, :-1]).mean())
+        # res = the normalised resultant of the phase-folded evidence, in [0, 1]: how
+        # much the bars agree about where the downbeat is. On ONE song there is no
+        # generalisation to fail, so if this does not grow the anchor mechanism itself
+        # is broken rather than merely untrained.
+        res = f"  res {float(out['resultant'].mean()):5.3f}" if "resultant" in out else ""
         if args.plot:
             # Phase proximity, NOT emission_probs. The tent is affine in (a, b), so
             # normalising to [0, 1] deletes them -- which is what we want: under the
@@ -141,7 +148,8 @@ def main() -> None:
         print(f"  ep {epoch:4d}  recon {float(out['recon'].mean()):9.2f}  "
               f"kl {float(out['kl'].mean()):9.2f}  b {float(model.emission_b):5.2f}  "
               f"rate {rate:.4f} (ratio {rate / true_rate:5.2f})  "
-              f"med|err| {np.median(errs):6.0f}ms  in-tol {np.mean(errs < 70.0):4.0%}",
+              f"med|err| {np.median(errs):6.0f}ms  in-tol {np.mean(errs < 70.0):4.0%}"
+              f"{res}",
               flush=True)
 
 

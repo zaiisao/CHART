@@ -19,7 +19,8 @@ def build_model(cfg, input_dim: int) -> BarPhaseVAE:
     return BarPhaseVAE(input_dim, emission=cfg.emission,
                        emission_layers=cfg.emission_layers,
                        emission_positional=cfg.emission_positional,
-                       kappa_physical=cfg.kappa_physical)
+                       kappa_physical=cfg.kappa_physical,
+                       evidence=cfg.evidence)
 
 
 def optimizer(model, cfg):

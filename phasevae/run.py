@@ -116,6 +116,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         totals, steps = np.zeros(3), 0
         health = np.zeros(4)
         gnorm = 0.0
+        anchor = np.zeros(2)
         for raw in loader:
             with torch.set_grad_enabled(cfg.frontend_lr_scale > 0):
                 h = frontend.forward_features(raw["input"])
@@ -125,7 +126,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 
             out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
                         targets=raw["targets"].to(device),
-                        valid=raw["valid"].to(device))
+                        valid=raw["valid"].to(device),
+                        anchor_penalty=cfg.anchor_penalty,
+                        anchor_kappa=cfg.anchor_kappa)
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
             # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.
@@ -148,6 +151,16 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             totals += [float(out["elbo"].mean()),
                        float(out["recon"].mean()),
                        float(out["kl"].mean())]
+            # The anchor's own health, which the ELBO and the four trajectory numbers
+            # cannot show. `res` is the NORMALISED resultant of the phase-folded evidence
+            # in [0, 1]: how much the bars agree about where the downbeat sits. It splits
+            # the two ways an anchor fails, which need opposite fixes -- res ~ 0 means the
+            # evidence head produces nothing coherent and the circular mean is averaging
+            # noise; res high with phase_err still at chance means the evidence is
+            # coherent and pointing at the WRONG phase (the half-bar flip).
+            if "resultant" in out:
+                anchor += [float(out["resultant"].mean()),
+                           float(out["kl_offset"].mean())]
             # What the ELBO cannot tell you: whether mu is a bar pointer or an arbitrary
             # path that crosses zero in the right places. Read off the batch already
             # computed -- no extra forward. See trajectory_health for the thresholds.
@@ -172,11 +185,13 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
                 "h": frontend.forward_features(probe_raw["input"]),
                 "mask": probe_raw["mask"].to(device),
                 "y": probe_raw["y"].to(device)})
+        res, kloff = anchor / steps
+        a_note = "" if anchor[0] == 0.0 else f"  res {res:5.3f}  kl_off {kloff:6.2f}"
         print(f"  epoch {epoch:2d}  beta {beta:5.3f}  elbo {totals[0] / steps:9.2f}  "
               f"recon {totals[1] / steps:8.2f}  kl {totals[2] / steps:9.2f}{b_note}\n"
               f"            advance {adv:7.4f} (true 0.025-0.063)  kappa {kap:9.1f}  "
               f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}  "
-              f"|g| {gnorm / steps:8.2f}"
+              f"|g| {gnorm / steps:8.2f}{a_note}"
               f"{note}",
               flush=True)
 

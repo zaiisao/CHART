@@ -7,7 +7,11 @@
   "emission": {
     "type": "string",
     "default": "cosine",
-    "enum": ["cosine", "triangle", "transformer"],
+    "enum": [
+      "cosine",
+      "triangle",
+      "transformer"
+    ],
     "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the champion deviation; transformer is the learned emission (seed lottery, see phasevae-family-verdict)."
   },
   "emission_layers": {
@@ -46,7 +50,7 @@
   },
   "lr": {
     "type": "number",
-    "default": 3e-4,
+    "default": 0.0003,
     "minimum": 0.0,
     "description": "Adam learning rate for the single base parameter group."
   },
@@ -123,5 +127,29 @@
     "default": 0.0,
     "minimum": 0.0,
     "description": "multiplier on lr for the frontend's own parameters. 0 = frozen (the frontend runs under no_grad and only the VAE trains); > 0 thaws it and adds it as a second optimizer group at lr * this. RECONSTRUCTED 2026-08-11 after an accidental git checkout discarded the uncommitted original -- the semantics come from run.py's usage, the wording is not the author's."
+  },
+  "evidence": {
+    "type": "string",
+    "default": "head",
+    "enum": [
+      "head",
+      "frontend"
+    ],
+    "description": "source of a_t, the per-frame downbeat-ness the anchor folds under mu. 'head' is this network's own linear on the trunk. 'frontend' reuses Beat This's beat/downbeat channels -- a DIAGNOSTIC arm: it is what anchor_k does and where its +0.232 F came from, but the standing position is that those activations are the peak-pick BASELINE, so an anchor built on them is partly Beat This's answer rather than this model's. Measured at init: the frontend channel is 7x peakier at annotated downbeats (excess 0.297 vs 0.041) yet gives the SAME resultant (0.0104 vs 0.0103), because the circular mean folds under the model's own ramp and a wrong RATE scatters the evidence regardless of how sharp it is."
+  },
+  "anchor_penalty": {
+    "type": "string",
+    "default": "wrap",
+    "enum": [
+      "wrap",
+      "cos"
+    ],
+    "description": "how the window's mean offset c is scored. 'wrap' folds atan2(sin c, cos c) into the Gaussian: a SAWTOOTH, bounded, with a cusp at pi, so a diffuse anchor sample can wrap to the cheap side and the objective is paid to be uncertain exactly where it is wrong (measured d(recon)/d(resultant) = -14028). 'cos' scores c with a von Mises log-density instead -- smooth, concave at 0, monotone in |c| to pi, stationary only at the repeller c = pi."
+  },
+  "anchor_kappa": {
+    "type": "number",
+    "default": 65.0,
+    "minimum": 0.0,
+    "description": "concentration of the 'cos' anchor penalty. 65 puts one nat at the tolerance edge: a 70 ms error on a 2.5 s bar is 0.175 rad and 65*(1 - cos 0.175) = 1.0. Ignored when anchor_penalty is 'wrap'."
   }
 }

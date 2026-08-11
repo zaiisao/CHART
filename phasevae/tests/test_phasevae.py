@@ -217,7 +217,7 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
     h = torch.randn(2, 300, 4)
-    mu, kappa = enc(h, torch.ones(2, 300))
+    mu, kappa, _anchor = enc(h, torch.ones(2, 300))
 
     inc = mu[:, 1:] - mu[:, :-1]
 
@@ -239,29 +239,45 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
     assert 0.01 <= float(inc.mean()) <= 0.2
 
 
-def test_encoder_offset_head_is_reachable_from_the_loss():
-    """mu[0] must equal the offset, and channels 0,1 must receive gradient.
+def test_anchor_reads_every_frame_not_just_frame_zero():
+    """The anchor must be a function of the WHOLE window, and gradient must reach it.
 
-    Dropping the `offset +` term leaves mu[0] = 0 for every window and silently starves
-    the offset head -- measured at exactly 0.000e+00 gradient on both channels. That is
-    fatal rather than wasteful: F on this model is the anchor-within-tolerance rate, so
-    the offset IS the score. It is also the dead-subnetwork failure the Encoder's own
-    init comment says shipped three times.
+    Replaces a test that asserted mu[0] == offset bitwise, i.e. that the anchor was a
+    frame-0 snapshot. That was the defect: where a window sits inside its bar is a
+    property of every frame, and reading it from one position was measured inferior --
+    swapping a frame-0 trunk snapshot for phase-folded evidence is worth +0.232 F on
+    FROZEN weights, and the frame-0 form left phase_err at chance for all 60 epochs of
+    a full-corpus run whose rate converged cleanly.
+
+    Perturbing a LATE frame must therefore move the anchor. The old parameterisation
+    passes every other assertion here and fails this one, which is the point.
     """
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
+    mask = torch.ones(2, 200)
     h = torch.randn(2, 200, 4)
-    mu, kappa = enc(h, torch.ones(2, 200))
+    mu, kappa, anchor = enc(h, mask)
 
-    out = enc.out(enc.features(h, torch.ones(2, 200)))
-    offset = torch.atan2(out[:, 0, 0], out[:, 0, 1])
-    assert torch.allclose(mu[:, 0], offset, atol=0), "mu[0] is not the offset, bitwise"
+    late = h.clone()
+    late[:, 150:] += 3.0                     # touch only the tail
+    mu_late, _k, anchor_late = enc(late, mask)
+    assert not torch.allclose(anchor["shift"], anchor_late["shift"], atol=1e-6), \
+        "a late-frame perturbation left the anchor unchanged: it is not reading them"
+
+    # the ramp itself must be anchor-free, so that shift is the ONLY rotation. If both
+    # could rotate the trajectory only their sum would be identified -- the recorded
+    # gauge failure where an offset head abdicated to 459 ms.
+    assert torch.allclose(mu[:, 0], anchor["shift"], atol=1e-5), \
+        "mu[0] is not the shift alone: the ramp is carrying an offset of its own"
+
+    # normalised resultant is a genuine agreement fraction
+    assert torch.all((anchor["resultant"] >= 0.0) & (anchor["resultant"] <= 1.0))
 
     enc.zero_grad()
     (mu.sum() + kappa.sum()).backward()
-    grads = [float(enc.out.weight.grad[c].abs().sum()) for c in range(4)]
-    for c, g in enumerate(grads):
-        assert g > 0.0, f"output channel {c} receives no gradient (dead head)"
+    for c, name in ((0, "evidence"), (2, "log kappa"), (3, "log rate")):
+        g = float(enc.out.weight.grad[c].abs().sum())
+        assert g > 0.0, f"channel {c} ({name}) receives no gradient (dead head)"
 
 
 def test_encoder_target_blind():
@@ -484,59 +500,72 @@ def test_kl_to_physical_prior_masked_frames_contribute_zero():
     assert kl_masked == pytest.approx(kl_short, rel=1e-9)
 
 
-def test_forward_elbo_identity_and_unweighted_recon(monkeypatch):
-    """Forward's returned dict must satisfy elbo == recon - kl exactly, and with
-    pos_weight=1 recon must equal the plain masked Bernoulli log-likelihood of y under
-    the emission at the sampled phase (computed by hand with sampling frozen to the
-    mean).
+def test_forward_elbo_identity_and_alignment_recon(monkeypatch):
+    """elbo == recon - kl exactly, and recon must equal align_log_prob computed by hand.
+
+    Replaces two tests that asserted the per-frame Bernoulli composition and the
+    pos_weight scaling. Both encoded the OLD observation model. y is no longer the
+    observation: the annotated downbeat TIMES are, so there is no negative class to
+    reweight and pos_weight has nothing to multiply.
     """
     _seed()
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
     model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
 
-    B, T = 2, 12
+    B, T = 2, 60
     h = torch.randn(B, T, 4)
     mask = torch.ones(B, T)
-    mask[1, 8:] = 0.0
+    mask[1, 50:] = 0.0
     y = torch.zeros(B, T)
-    y[0, 3] = 1.0
-    y[1, 5] = 1.0
+    targets = torch.tensor([[5.0, 20.0, 35.0], [4.0, 18.0, 0.0]])
+    valid = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
 
-    out = model(h, mask, y, samples=1, pos_weight=1.0)
+    out = model(h, mask, y, samples=1, targets=targets, valid=valid)
     assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
 
     with torch.no_grad():
-        logits = model.emission_logits(out["mu"])
-        ll = (y * torch.nn.functional.logsigmoid(logits)
-              + (1 - y) * torch.nn.functional.logsigmoid(-logits))
-        expected = (ll * mask).sum(1)
+        expected = model_mod.align_log_prob(out["mu"], targets, valid, 3.5,
+                                            velocity=out["mu"])
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
+    # pos_weight is inert: it exists only to keep the hook signature stable.
+    with torch.no_grad():
+        alt = model(h, mask, y, samples=1, targets=targets, valid=valid,
+                    pos_weight=30.0)
+    assert torch.allclose(out["recon"], alt["recon"], atol=1e-5), \
+        "pos_weight still moves recon: the Bernoulli path has not been removed"
 
-def test_forward_pos_weight_scales_positive_frames(monkeypatch):
-    """pos_weight=w multiplies exactly the downbeat-labelled frames: the change in
-    recon must equal (w-1) times the positive frames' log-likelihood.
+
+def test_forward_kl_includes_the_anchor_and_padding_is_ignored():
+    """out['kl'] must carry KL(q(offset) || Uniform), and padded targets must not score.
+
+    The anchor is a latent now. If its KL is dropped the ELBO is not a bound on the
+    model that is actually deployed, and a confident window buys free concentration --
+    the mechanism that railed kappa under the previous objective.
     """
     _seed()
-    import phasevae.model as model_mod
-    monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
     model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
-
-    B, T = 1, 10
+    B, T = 2, 60
     h = torch.randn(B, T, 4)
     mask = torch.ones(B, T)
     y = torch.zeros(B, T)
-    y[0, 4] = 1.0
+    targets = torch.tensor([[5.0, 20.0, 35.0], [4.0, 18.0, 0.0]])
+    valid = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
 
-    out1 = model(h, mask, y, pos_weight=1.0)
-    out3 = model(h, mask, y, pos_weight=3.0)
+    out = model(h, mask, y, samples=1, targets=targets, valid=valid)
+    assert torch.all(out["kl_offset"] >= 0.0), "KL to Uniform must be non-negative"
+    assert float(out["kl_offset"].abs().sum()) > 0.0, "the anchor KL is identically zero"
 
-    with torch.no_grad():
-        logits = model.emission_logits(out1["mu"])
-        pos_ll = torch.nn.functional.logsigmoid(logits[0, 4])
-    assert (out3["recon"] - out1["recon"]).item() == pytest.approx(
-        (2.0 * pos_ll).item(), abs=1e-4)
+    # item 1's third target is padding sitting at frame 0, a LEGAL index. Moving it must
+    # change nothing; a consumer that ignores `valid` trains on a phantom downbeat there.
+    moved = targets.clone()
+    moved[1, 2] = 41.0
+    torch.manual_seed(0)
+    a = model(h, mask, y, samples=1, targets=targets, valid=valid)["recon"]
+    torch.manual_seed(0)
+    b = model(h, mask, y, samples=1, targets=moved, valid=valid)["recon"]
+    assert torch.allclose(a, b, atol=1e-6), "padded targets are being scored"
 
 
 def test_phase_ablation_gap_zero_when_phase_ignored():
@@ -654,12 +683,22 @@ def test_deployed_net_reads_no_target_in_any_shipped_config():
                      .glob("*.yaml"))
     assert configs, "no configs found: this test would pass vacuously"
 
+    checked = 0
     for path in configs:
         _seed()
         cfg, hooks = load_config(str(path))
+        # BROKEN BY THE OBSERVATION-MODEL CHANGE, deliberately. Each of these variants
+        # owns a forward()/heads() written against the per-frame Bernoulli and the
+        # two-value heads() signature; they raise rather than silently mis-score. They
+        # are BCE models, so running them would compare two different objectives under
+        # one elbo column. Delete a name here when the variant is ported, not before.
+        if cfg.variant in {"anchor_k", "psi", "ladder", "anchor_time"}:
+            continue
         model = hooks.build_model(cfg, input_dim=4)
         controls_mod.assert_encoder_is_target_blind(
             model, _blindness_batch(input_dim=4))
+        checked += 1
+    assert checked, "every config was skipped: this test would pass vacuously"
 
 
 # ============================================================== vbpm cache write

@@ -34,26 +34,32 @@ def _seed():
 # ================================================== 1. Encoder free branch
 
 
-def test_encoder_free_branch_per_frame_locality_and_shapes():
-    """Input: [B,T,D] audio with one frame perturbed. Asserted: with drift_bound=0
-    the mean is emitted PER FRAME ('per frame, factorised' in the class docstring),
-    so perturbing frame k must move mu at frame k; outputs are [B,T]; kappa is
-    strictly positive and below MAX_KAPPA (bounded_kappa's stated ceiling). Why:
-    the free branch is the deployed q_phi and its per-frame parameterisation is the
-    whole difference from the drift-bounded branch.
+def test_encoder_shapes_and_global_response():
+    """Shapes, kappa's range, and that perturbing ONE frame moves the whole trajectory.
+
+    The old assertion here was per-frame LOCALITY -- perturb frame k, mu[k] moves --
+    which described the free per-frame parameterisation this encoder no longer has.
+    mu is now offset + cumsum(pooled rate) with the offset a circular mean over every
+    frame, so a single perturbation propagates: it shifts the anchor (all frames) and
+    the pooled rate of its own span (that frame onward). Asserting locality now would
+    be asserting the absence of both.
     """
     _seed()
     enc = Encoder(input_dim=4)
-    h = torch.randn(1, 20, 4)
-    mu, kappa = enc(h)
-    assert mu.shape == (1, 20) and kappa.shape == (1, 20)
+    h = torch.randn(1, 200, 4)
+    mask = torch.ones(1, 200)
+    mu, kappa, anchor = enc(h, mask)
+    assert mu.shape == (1, 200) and kappa.shape == (1, 200)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
+    assert anchor["shift"].shape == (1,) and anchor["resultant"].shape == (1,)
 
     h2 = h.clone()
     h2[0, 7] += 5.0
-    mu2, _ = enc(h2)
-    assert not torch.allclose(mu[0, 7], mu2[0, 7], atol=1e-6), \
-        "per-frame mean did not respond to its own frame's input"
+    mu2, _k2, anchor2 = enc(h2, mask)
+    assert not torch.allclose(mu, mu2, atol=1e-6), \
+        "the trajectory did not respond to the input at all"
+    assert not torch.allclose(anchor["shift"], anchor2["shift"], atol=1e-6), \
+        "the anchor did not respond: it is not pooling over frames"
 
 
 # ================================================== 2. EmissionTransformer
@@ -140,6 +146,17 @@ def _batch(B=2, T=12):
     return h, delta, mask, y
 
 
+def _tv(B=2, T=12):
+    """targets/valid for the alignment objective: annotated downbeat FRAMES, padded.
+
+    y is no longer the observation, so a forward() call needs these instead. Frames are
+    spaced inside the window and well clear of T-1, since align_log_prob interpolates
+    between t_k and t_k + 1.
+    """
+    t = torch.tensor([2.0, T / 2.0, T - 4.0])
+    return t.expand(B, 3).contiguous(), torch.ones(B, 3)
+
+
 def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """Input: a padded batch through the transformer-emission forward, twice.
     Asserted: elbo == recon - kl on each returned dict (the ELBO definition in the
@@ -149,8 +166,9 @@ def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out1 = model(h, mask, y, samples=1)
-    out2 = model(h, mask, y, samples=1)
+    tg, vd = _tv()
+    out1 = model(h, mask, y, samples=1, targets=tg, valid=vd)
+    out2 = model(h, mask, y, samples=1, targets=tg, valid=vd)
     for out in (out1, out2):
         assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
     assert not torch.equal(out1["recon"], out2["recon"]), \
@@ -166,8 +184,9 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out1 = model(h, mask, y)
-    out2 = model(h, mask, y)
+    tg, vd = _tv()
+    out1 = model(h, mask, y, targets=tg, valid=vd)
+    out2 = model(h, mask, y, targets=tg, valid=vd)
     assert torch.equal(out1["recon"], out2["recon"])
 
 
@@ -178,7 +197,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     masked Bernoulli log-likelihoods at mu + offset. Why: 'samples: Monte Carlo
     samples for the reconstruction term' -- an average, not a sum.
     """
-    offsets = [0.0, 0.5, 1.0]
+    offsets = [0.0, 0.5, 1.0, 0.25, 0.75, 0.125]
     calls = {"n": 0}
 
     def fake_sampler(kappa):
@@ -189,41 +208,49 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out = model(h, mask, y, samples=3, pos_weight=1.0)
-    assert calls["n"] == 3
+    tg, vd = _tv()
+    out = model(h, mask, y, samples=3, targets=tg, valid=vd)
+    # TWO draws per sample now: the per-frame phase noise and ONE window-level anchor,
+    # so a 3-sample forward calls the sampler 6 times.
+    assert calls["n"] == 6
 
     with torch.no_grad():
         terms = []
-        for off in offsets:
-            # forward passes the mask to the emission, so this must too:
-            # the transformer emission attends across frames, and without the
-            # mask it attends over padding and the logits genuinely differ.
-            logits = model.emission_logits(out["mu"] + off, mask)
-            per_frame = torch.nn.functional.binary_cross_entropy_with_logits(
-                logits, y, reduction="none")
-            terms.append(-(per_frame * mask).sum(1))
+        for i in range(3):
+            phi = out["mu"] + offsets[2 * i] + offsets[2 * i + 1]
+            terms.append(model_mod.align_log_prob(phi, tg, vd, 3.5,
+                                                  velocity=out["mu"]))
         expected = torch.stack(terms).mean(0)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
 
 def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
-    """Input: tiny batch, sampler pinned to the mean, pos_weight=1. Asserted:
-    recon equals the plain masked Bernoulli log-likelihood of y under the
-    transformer emission at phi = mu, computed by hand. Why: pos_weight=1 is the
-    unweighted ELBO reconstruction; anything else on this path is a bug.
+    """Sampler pinned to the mean: recon equals align_log_prob at phi = mu, by hand.
+
+    The old assertion was that recon equalled the masked Bernoulli log-likelihood of y
+    under the emission. That WAS the reconstruction; it is not any more. The emission
+    no longer appears in the training objective at all, which is why `b` sits at its
+    init in every run since 2191ea9 -- it receives no gradient.
     """
     monkeypatch.setattr(model_mod, "sample_vonmises",
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch(B=1, T=8)
-    out = model(h, mask, y, samples=1, pos_weight=1.0)
+    tg, vd = _tv(B=1, T=8)
+    out = model(h, mask, y, samples=1, targets=tg, valid=vd)
 
     with torch.no_grad():
-        logits = model.emission_logits(out["mu"], mask)   # forward passes it too
-        ll = (y * torch.nn.functional.logsigmoid(logits)
-              + (1 - y) * torch.nn.functional.logsigmoid(-logits))
-        expected = (ll * mask).sum(1)
+        expected = model_mod.align_log_prob(out["mu"], tg, vd, 3.5,
+                                            velocity=out["mu"])
     assert torch.allclose(out["recon"], expected, atol=1e-4)
+
+    # and the emission is genuinely off the training path
+    model.zero_grad()
+    model(h, mask, y, samples=1, targets=tg, valid=vd)["recon"].sum().backward()
+    assert model.emission_net is not None
+    grads = [p.grad for p in model.emission_net.parameters() if p.grad is not None]
+    assert all(float(g.abs().sum()) == 0.0 for g in grads), \
+        "the emission still receives reconstruction gradient"
 
 
 # ======================================================= 4. von Mises sampler
@@ -365,7 +392,8 @@ def test_train_loss_formula_matches_documented_objective():
 
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out = model(h, mask, y, samples=1)
+    tg, vd = _tv()
+    out = model(h, mask, y, samples=1, targets=tg, valid=vd)
     beta = run_mod.beta_at(1, types.SimpleNamespace(beta_start=0.2, beta_end=0.8,
                                                     beta_warmup=3))
     assert beta == pytest.approx(0.2 + (1 / 3) * 0.6)
