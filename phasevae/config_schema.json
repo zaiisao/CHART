@@ -104,7 +104,7 @@
   },
   "kappa_physical": {
     "type": "number",
-    "default": 2000.0,
+    "default": 383.0,
     "minimum": 0.0,
     "description": "concentration of the physical prior's increment law: the DRIFT TAX. Real tempo wobble is heavy-tailed, so lowering this cuts the KL price of expressing drift."
   },

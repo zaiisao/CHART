@@ -115,6 +115,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 
         totals, steps = np.zeros(3), 0
         health = np.zeros(4)
+        gnorm = 0.0
         for raw in loader:
             with torch.set_grad_enabled(cfg.frontend_lr_scale > 0):
                 h = frontend.forward_features(raw["input"])
@@ -122,7 +123,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             mask = raw["mask"].to(device, non_blocking=True)
             y = raw["y"].to(device, non_blocking=True)
 
-            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
+            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
+                        targets=raw["targets"].to(device),
+                        valid=raw["valid"].to(device))
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
             # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.
@@ -132,7 +135,11 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             opt.zero_grad()
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip)
+            # clip_grad_norm_ returns the norm BEFORE clipping, so this is the honest
+            # size of the step the objective asked for -- logged whether or not the clip
+            # binds. Worth watching: kappa's row alone was 94% of it, which makes every
+            # other parameter's effective step a function of kappa's dynamics.
+            gnorm += float(torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip))
             if cfg.frontend_lr_scale > 0:
                 torch.nn.utils.clip_grad_norm_(fe, cfg.clip)
 
@@ -168,7 +175,8 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         print(f"  epoch {epoch:2d}  beta {beta:5.3f}  elbo {totals[0] / steps:9.2f}  "
               f"recon {totals[1] / steps:8.2f}  kl {totals[2] / steps:9.2f}{b_note}\n"
               f"            advance {adv:7.4f} (true 0.025-0.063)  kappa {kap:9.1f}  "
-              f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}"
+              f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}  "
+              f"|g| {gnorm / steps:8.2f}"
               f"{note}",
               flush=True)
 

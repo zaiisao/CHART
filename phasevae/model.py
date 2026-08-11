@@ -335,40 +335,48 @@ class BarPhaseVAE(nn.Module):
                  + (cross * mask[:, 2:]).sum(1))
         return neg_entropy - log_p
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0,
+                targets=None, valid=None, sigma_frames: float = 3.5):
         """One ELBO evaluation on a padded batch (tutorial 7.7).
+
+        The OBSERVATION is the annotated downbeat TIMES, not the per-frame indicator:
+        see align_log_prob for why, and note that both encode the same annotation, so
+        this is a change of sufficient statistic rather than extra supervision. The
+        bound is intact -- align_log_prob is a normalised density over those times.
 
         Args:
             h: [B, T, D] audio features -- the ONLY input the encoder sees.
             mask: [B, T] 1 on real frames.
-            y: [B, T] per-frame downbeat target. Enters the RECONSTRUCTION only; the
-                encoder never receives it.
+            y: [B, T] per-frame downbeat target. RETAINED for the emission read-out and
+                for variants that still use a per-frame Bernoulli; the base objective no
+                longer consumes it.
             samples: Monte Carlo samples for the reconstruction term.
-            pos_weight: multiplier on the downbeat-labelled frames. The target is ~3.2%
-                positive, so an unweighted per-frame Bernoulli lets a phase-IGNORING
-                constant predictor capture most of the achievable likelihood by being
-                right about the 96.8% of empty frames. Measured: the whole value of
-                knowing the phase perfectly rather than ignoring it is 0.051 nats/frame
-                against a KL operating at 1.13. At pos_weight=30 that rises to 0.754.
-                NOTE this makes the objective a weighted surrogate, NOT a bound on
-                log p(y|h) -- the same caveat as beta != 1, and it must be reported.
+            pos_weight: unused by this objective, kept so the hook signature is stable
+                across variants. It exists because a per-frame Bernoulli on a ~3.2%
+                positive target lets a phase-IGNORING constant predictor capture most of
+                the achievable likelihood; an alignment likelihood has no negative class
+                to drown in, so there is nothing to reweight -- and with it goes the
+                "weighted surrogate, not a bound" caveat.
+            targets: [B, K] annotated downbeat times as window-relative FRAME indices,
+                from collate_excerpts. valid: [B, K] their mask.
+            sigma_frames: timing tolerance in frames; 3.5 at 50 fps = the F tolerance.
 
         Returns:
             dict with elbo, recon, kl (per crop, [B]) and the encoder's mu and kappa.
         """
+        assert targets is not None and valid is not None, \
+            "the alignment objective needs collate_excerpts' targets/valid"
+
         mu, kappa = self.encoder(h, mask)
         kl = self.kl_to_physical_prior(mu, kappa, mask)
-
-        weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
-                                                    dtype=torch.float32),
-                             torch.ones((), device=y.device, dtype=torch.float32)) * mask
 
         recon = 0.0
         for _ in range(samples):
             phi = mu + sample_vonmises(kappa)
-            per_frame = nn.functional.binary_cross_entropy_with_logits(
-                self.emission_logits(phi, mask), y.float(), reduction="none")
-            recon = recon - (per_frame * weight).sum(1)
+            # velocity=mu: q is per-frame factorised, so the SAMPLE has no usable
+            # derivative and it appears here as a divisor. See align_log_prob.
+            recon = recon + align_log_prob(phi, targets, valid, sigma_frames,
+                                           velocity=mu)
 
         recon = recon / samples
 
@@ -408,6 +416,95 @@ class BarPhaseVAE(nn.Module):
         every bounded arm's emission-D column had been scored on that broken path.
         """
         return torch.sigmoid(self.emission_logits(self.infer_phase(h, mask), mask))
+
+
+def align_log_prob(mu, targets, valid, sigma_frames: float = 3.5, velocity=None):
+    """log p(D | phi): the annotated downbeat TIMES as the observation. [B, T], [B, K] -> [B]
+
+    The per-frame Bernoulli asks "is this frame a downbeat" 2250 times, of which ~97% are
+    negatives whose pulls cancel in pairs; the alignment information survives only when
+    EVERY downbeat lands on a peak at once, which needs the period right to ~0.2%. Measured
+    on one ballroom song: the true rate wins by 97 nats, but in a well 0.2% wide sitting in
+    a plain that is flat to +-4 nats over a 5x range. There is no gradient to the answer.
+
+    This asks a different question of the SAME annotation: the k-th bar line occurs where
+    the phase has turned exactly k times. Two consequences.
+
+      * CONVEX. For mu = offset + rate*t the cost is sum_k (offset + rate*t_k - 2 pi k)^2,
+        least squares in (offset, rate): one global minimum, usable gradient everywhere.
+      * OCTAVE-BREAKING. k is an integer COUNT, so half rate gives mu(t_11) = 11 pi against
+        22 pi -- an error of eleven turns that GROWS with k. Every circular formulation is
+        blind to this (each octave puts the downbeats at phi = 0 mod 2 pi and scores the
+        same: measured 133.6 / 133.8 / 134.0 nats at 1x / 2x / 3x).
+
+    Normalised, so recon - beta*KL stays a bound: this is a Gaussian density over the
+    OBSERVED TIMES. The phase residual is divided by the local phase velocity, which is the
+    change of variables from phase to time -- that division is what keeps the rate honest
+    and is the same Jacobian a point-process form carries as log(phidot).
+
+    Args:
+        mu: [B, T] the UNWRAPPED phase. Wrapping destroys the index and hands the octave
+            degeneracy straight back.
+        targets: [B, K] annotated downbeat times as (possibly fractional) FRAME indices,
+            window-relative -- (downbeat_times - t0) * fps. Take these from
+            ``downbeat_times``, NEVER from nonzero(y > 0.5): y is the +-target_tol_frames
+            WIDENED indicator, so that gives 3 (or 7) events per downbeat and inflates any
+            derived rate by the same factor.
+        valid: [B, K] 1 for real entries, 0 for padding.
+        sigma_frames: timing tolerance in FRAMES. 3.5 at 50 fps = 70 ms = the F tolerance,
+            which is the point: this is the same quantity the metric uses, on a continuous
+            scale, with no effect on class balance. It replaces target_tol_frames.
+
+    Returns:
+        [B] log-likelihood per crop.
+    """
+    B, T = mu.shape
+    idx = targets.clamp(0.0, T - 2.0)
+    lo = idx.floor()
+    frac = idx - lo
+    lo = lo.long()
+
+    mu_lo = torch.gather(mu, 1, lo)
+    mu_hi = torch.gather(mu, 1, lo + 1)
+    mu_at = mu_lo + frac * (mu_hi - mu_lo)          # phase at t_k, sub-frame
+
+    # The VELOCITY comes from `velocity`, not from mu, whenever mu is a SAMPLE. q is
+    # factorised over frames, so a sampled trajectory has no meaningful derivative: at
+    # kappa 383 the per-frame noise is 0.051 rad and a first difference of two draws has
+    # sd 0.072, against a real advance of ~0.05. Taken from the sample this divisor is
+    # noise twice the size of its own signal, and it can cross zero -- the clamp would
+    # then hand back a 1e6 residual. Pass the encoder's mean path.
+    src = mu if velocity is None else velocity
+    v_lo = torch.gather(src, 1, lo)
+    v_hi = torch.gather(src, 1, lo + 1)
+    rate_at = (v_hi - v_lo).clamp(min=1e-6)         # local phase velocity, rad/frame
+
+    # k counts downbeats within the window, and BOTH SIDES ARE CENTRED so the term is
+    # invariant to a constant phase shift. Which absolute bar a window starts on is
+    # arbitrary, so pinning mu(t_0) = 0 imposes a constraint the data never asked for --
+    # and the offset head cannot meet it: it emits atan2, bounded to (-pi, pi], while
+    # t_0 lands anywhere within the first bar, so rate * t_0 is roughly uniform on
+    # [0, 2 pi) and 47.1% of songs need an intercept outside the representable range.
+    # (The encoder can fake one by bending the first pooling block's rate, which is why
+    # this is a needless constraint rather than a hard wall.) Centring deletes the
+    # intercept from the problem; placing the bar line stays the anchor's job.
+    k = torch.cumsum(valid, dim=1) - 1.0
+    n = valid.sum(1, keepdim=True).clamp(min=1.0)
+
+    raw = mu_at - TWO_PI * k
+    c = (raw * valid).sum(1, keepdim=True) / n          # the window's mean offset
+    # Split it: the INTEGER part of c is a free gauge (which absolute bar the window
+    # starts on is arbitrary), the SUB-BAR part is not (it is where the bar line sits).
+    # Centring alone deletes both and the anchor loses its only signal -- measured, the
+    # rate converged faster and in-tol fell to 0%. So subtract c to free the shape, then
+    # add back its wrapped remainder, which is 0 exactly when c is a whole number of
+    # turns and grows to +-pi otherwise.
+    phase_err = (raw - c) + torch.atan2(torch.sin(c), torch.cos(c))
+    dt = phase_err / rate_at                        # phase residual -> TIME residual
+
+    log_density = (-0.5 * (dt / sigma_frames) ** 2
+                   - math.log(sigma_frames) - 0.5 * math.log(TWO_PI))
+    return (log_density * valid).sum(1)
 
 
 def downbeat_frames(mu, mask=None):

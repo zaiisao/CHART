@@ -117,7 +117,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
         # Fresh random window per call (Beat This's policy); val/test take the middle
         # so every scored window is identical across runs.
         start = longer // 2 if self.deterministic else int(np.random.randint(0, longer + 1))
-        targets = self._targets(downbeat_times, start, frames)
+        targets = self._targets(downbeat_times, start, frames, target_tol_frames=3)
 
         window = np.array(array[start:start + frames], dtype=np.float32)
         labeled = len(targets["downbeat_times"]) > 0
@@ -164,6 +164,9 @@ def collate_excerpts(batch: list) -> dict:
 
     The frontend consumes out["input"] via forward_features; the VAE consumes the
     stacked y/mask/delta exactly as the crop pipeline's collate provided them.
+
+    ``targets``/``valid`` are the ragged downbeat_times PADDED into [B, K] so a training
+    objective can consume them -- see _downbeat_targets.
     """
     out = {}
     for key in ("input", "y", "mask"):
@@ -172,4 +175,32 @@ def collate_excerpts(batch: list) -> dict:
         out[key] = torch.tensor([item[key] for item in batch])
     for key in ("downbeat_times", "anchors", "dataset", "song_id"):
         out[key] = [item[key] for item in batch]
+    out["targets"], out["valid"] = _downbeat_targets(batch)
     return out
+
+
+def _downbeat_targets(batch: list):
+    """[B, K] annotated downbeat times as window-relative FRAME indices, and their mask.
+
+    THE conversion an alignment objective needs: ``(downbeat_times - t0) * fps``. Two
+    traps it exists to close, both of which have already cost this project a day.
+
+      * downbeat_times are ABSOLUTE seconds while frame indices are window-relative.
+        Omitting the ``- t0`` inverts every landscape built on top of it.
+      * the events must come from downbeat_times, NEVER from nonzero(y > 0.5): y is the
+        +-target_tol_frames WIDENED indicator, so that route yields 3 frames per downbeat
+        (7 at tol=3) and inflates any derived rate by exactly that factor.
+
+    Ragged by nature -- songs differ in downbeat count -- so it pads to the batch max and
+    returns a validity mask. Padding is 0.0, which is a LEGAL frame index, hence the mask:
+    a consumer that ignores it silently trains on phantom downbeats at frame 0.
+    """
+    times = [(np.asarray(item["downbeat_times"], dtype=np.float32)
+              - float(item["t0"])) * float(item["fps"]) for item in batch]
+    width = max((len(t) for t in times), default=0)
+    targets = torch.zeros(len(batch), width, dtype=torch.float32)
+    valid = torch.zeros(len(batch), width, dtype=torch.float32)
+    for i, t in enumerate(times):
+        targets[i, :len(t)] = torch.from_numpy(t)
+        valid[i, :len(t)] = 1.0
+    return targets, valid
