@@ -1,14 +1,4 @@
-"""Per-song frontend primitives: FPS, the feature cache location, one-song compute.
-
-The corpus pass that drives these (fold grouping, checkpoint routing, the cache drift
-probe) is ``dataset.load_dataset`` — the loop lives there, in the open, next to the
-crop building it feeds; this module keeps only the pieces it calls per song. The song
-catalog is ``phasevae.songs``; the frontend wrappers are ``phasevae.frontends``.
-
-The beat-grid crop machinery that once shared this module (derive_y, extract_crops,
-load_crops — the Stage-0 era surface) had no remaining consumers on this branch and
-was removed 2026-08-06; it is recoverable from git history.
-"""
+"""Per-song frontend primitives: FPS, the feature cache location, one-song compute."""
 from __future__ import annotations
 
 import numpy as np
@@ -34,12 +24,7 @@ def compute_features(frontend, song):
 
 
 def atomic_save_npy(cache_path, array):
-    """Write-then-rename: a reader racing a writer never sees a half-written array.
-
-    np.save APPENDS ".npy" to any path not ending in it, silently renaming the temp
-    file; an open file handle keeps the name as given. Rename is atomic within a
-    filesystem. THE cache-write block -- the test suite exercises this function.
-    """
+    """Write-then-rename: a reader racing a writer never sees a half-written array."""
     partial = cache_path.with_suffix(".npy.partial")
     with open(partial, "wb") as fh:
         np.save(fh, array.astype(np.float32))

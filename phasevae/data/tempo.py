@@ -1,24 +1,4 @@
-"""Bar period FROM AUDIO: the estimator that removes the last oracle on the model's path.
-
-The bar rate used to come from ``bar_period(downbeat_times, ...)``, i.e. from the
-annotations. That is a value no deployment can have, so it is estimated here instead,
-from the frontend's OWN downbeat activation -- the same signal the model already reads.
-
-Method (harmonic-sum autocorrelation, the recipe measured on 2026-08-09):
-smooth and mean-remove the activation, take its linear autocorrelation, then for every
-candidate period P score the mean of r at P, 2P, 3P, 4P and accept the SMALLEST period
-whose score clears ALPHA times the maximum. Summing harmonics is what stops a bar-length
-period losing to its own half; taking the smallest accepted peak is what stops it losing
-to a multiple.
-
-MEASURED COST of switching off the oracle (gtzan, anchor_k v2, 2026-08-09):
-    oracle delta            F 0.752   true CMLt 0.844   est/ref 1.003
-    this estimator          F 0.737   true CMLt 0.710   est/ref 1.161
-F barely moves; CONTINUITY collapses, because the estimator makes octave errors (mostly
-halving) on roughly 29% of windows and the model then emits downbeats at double rate.
-That is the honest price of being deployable, and the octave error is the thing to fix
-next -- not by handing the period back.
-"""
+"""Bar period FROM AUDIO: the estimator that removes the last oracle on the model's path."""
 from __future__ import annotations
 
 import math
@@ -35,11 +15,7 @@ TWO_PI = 2.0 * math.pi
 
 
 def _autocorrelation(p: torch.Tensor, n_lags: int) -> torch.Tensor:
-    """[B, T] zero-mean signal -> [B, n_lags+1] linear (not circular) autocorrelation.
-
-    Zero-padded to at least 2T so the wrap-around of the circular ACF cannot contaminate
-    the lags we read, and normalised by the overlap length at each lag.
-    """
+    """[B, T] zero-mean signal -> [B, n_lags+1] linear (not circular) autocorrelation."""
     length = p.shape[1]
     size = 1 << (2 * length - 1).bit_length()
     spectrum = torch.fft.rfft(p, n=size)
@@ -50,11 +26,7 @@ def _autocorrelation(p: torch.Tensor, n_lags: int) -> torch.Tensor:
 
 def estimate_bar_period(activation: torch.Tensor, mask: torch.Tensor,
                         fps: float) -> torch.Tensor:
-    """[B, T] downbeat activation in [0, 1], [B, T] validity -> [B] bar period, seconds.
-
-    Reads AUDIO ONLY. ``activation`` is the frontend's downbeat channel; ``mask`` keeps
-    window padding out of both the mean removal and the correlation.
-    """
+    """[B, T] downbeat activation in [0, 1], [B, T] validity -> [B] bar period, seconds."""
     device = activation.device
     p = (activation * mask).unsqueeze(1)
     kernel = torch.full((1, 1, SMOOTH), 1.0 / SMOOTH, device=device, dtype=p.dtype)
@@ -70,12 +42,7 @@ def estimate_bar_period(activation: torch.Tensor, mask: torch.Tensor,
 
 
 def harmonic_score(p: torch.Tensor, fps: float):
-    """Zero-meaned [B, T] activation -> ([B, G] harmonic-sum score, [G] period grid, s).
-
-    Split out of ``estimate_bar_period`` so a candidate period's evidence can be read
-    directly (which peak won, by how much, and what the truth scored) rather than
-    inferred from the winner. Returns ``(None, None)`` when the window is too short.
-    """
+    """Zero-meaned [B, T] activation -> ([B, G] harmonic-sum score, [G] period grid, s)."""
     device = p.device
     lag_max = int(min(N_HARM * P_MAX_S * fps, p.shape[1] - 50))
     if lag_max <= L_MIN + 2:

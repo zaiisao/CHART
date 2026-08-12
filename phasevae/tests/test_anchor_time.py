@@ -1,24 +1,7 @@
-"""Behavioural tests for the time-anchored variant, from its contracts and the math only.
-
-Every expected value here comes from a stated contract or from an identity that can be
-written down independently, never from running the implementation first. The four core
-tests each guard a failure this project has actually shipped: an anchor that is not where
-it claims to be, a KL that is not shift-invariant after all, a posterior with mass on
-padded frames, and a closed-form identity with a sign or transpose error in it.
-"""
+"""Behavioural tests for the time-anchored variant, from its contracts and the math only."""
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------------
-# SKIPPED WHOLESALE, deliberately. This module tests a variant whose forward() and
-# heads() are written against the per-frame Bernoulli observation model and the old
-# two-value heads() signature. Commit 2191ea9 replaced the observation with the
-# annotated downbeat TIMES (model.align_log_prob) and the anchor became a circular
-# mean over every frame, so these variants raise rather than silently mis-score.
-# They are BCE models: running them would put two different objectives under one
-# elbo column. Re-enable by deleting this block WHEN the variant is ported, not
-# before -- and expect the assertions themselves to need rewriting, since several
-# encode the Bernoulli composition.
 import pytest as _pytest
 _pytest.skip("variant not ported to the alignment objective (see 2191ea9)",
              allow_module_level=True)
@@ -84,12 +67,7 @@ def test_candidate_count_follows_the_stride():
 
 @pytest.mark.parametrize("k", [1, 5, 17])
 def test_trajectory_kl_is_identical_for_every_candidate(k):
-    """The whole design rests on this: a constant shift leaves the KL untouched.
-
-    kl_to_physical_prior reads mu only through its increments, so subtracting c_k cannot
-    move it. If this ever fails, every candidate needs its own KL term and the
-    marginalisation stops being exact.
-    """
+    """The whole design rests on this: a constant shift leaves the KL untouched."""
     vae = BarPhaseVAE(8, emission="triangle")
     cum = constant_cum(frames=120)
     kappa = torch.full_like(cum, 300.0)
@@ -136,13 +114,7 @@ def test_fully_masked_window_costs_zero_rather_than_nan():
 
 
 def test_anchor_kl_is_zero_when_uniform_and_log_c_when_concentrated():
-    """The anchor term is KL(q(k) || Uniform(C_i)), i.e. the PRICE of concentrating.
-
-    0 at init is not a virtue, it is q matching its prior; the term rises to log C_i as q
-    sharpens, and that is the cost the reconstruction has to beat. Measured at init with
-    pos_weight 1.0 the best candidate beats the candidate average by only 2-4 nats against
-    a 6.33 nat cost, which is why the config runs pos_weight 5.0 -- see anchor_time.yaml.
-    """
+    """The anchor term is KL(q(k) || Uniform(C_i)), i.e. the PRICE of concentrating."""
     vae, (h, mask, y) = model(), batch()
     out = vae(h, mask, y)
     kl_traj = vae.kl_to_physical_prior(*vae.encoder(h, mask)[:2], mask)
@@ -165,17 +137,7 @@ def test_anchor_kl_is_zero_when_uniform_and_log_c_when_concentrated():
 
 
 def test_posterior_is_not_born_dead():
-    """THE regression test for the first smoke run's failure: Hq was 1.000000 at every epoch.
-
-    The cause was scale, twice over. Harmonics normalised by frame count put every descriptor
-    at ~1e-2 regardless of how peaked the evidence was, and a head initialised at std 1e-3 on
-    top of that emitted logits differing by 1.7e-5 -- a softmax uniform to six decimals, with
-    the evidence head's only gradient path running through the same flat descriptors. q could
-    not move, so nothing else in the run meant anything.
-
-    The contract this asserts is not "q is confident" -- at init it should not be -- but that
-    q is DISTINGUISHABLE from uniform, so the pricing gradient has something to act on.
-    """
+    """THE regression test for the first smoke run's failure: Hq was 1.000000 at every epoch."""
     vae, (h, mask, y) = model(), batch()
     out = vae(h, mask, y)
     q = out["logq"].exp()
@@ -189,13 +151,7 @@ def test_posterior_is_not_born_dead():
 # ------------------------------------------- 4. the closed-form harmonic identity holds
 
 def test_first_harmonic_matches_the_brute_force_matched_filter():
-    """candidate_features' stated identity, checked against the sum it claims to compute.
-
-    sum_t a_t exp(i m (cum_t - c_k)) = exp(-i m c_k) sum_t a_t exp(i m cum_t). At m = 1 the
-    real part is the matched filter whose argmax is the circular mean. A sign slip or a
-    transposed permute here is invisible in training and would silently reduce the head's
-    input to noise.
-    """
+    """candidate_features' stated identity, checked against the sum it claims to compute."""
     vae = at.AnchorTimeVAE(8, stride=STRIDE, harmonics=1, d_model=32, emission="triangle")
     h, mask, _y = batch()
     cum = constant_cum(frames=h.shape[1])
@@ -217,13 +173,7 @@ def test_first_harmonic_matches_the_brute_force_matched_filter():
 
 
 def test_matched_filter_evidence_is_sinusoidal_in_the_anchor():
-    """The identity's corollary, and the reason the head reads M > 1 harmonics.
-
-    At M = 1 the evidence is exactly a sinusoid in the anchor value, so its argmax is the
-    circular mean -- i.e. a matched-filter categorical is the closed-form read-out, which
-    measurement already credits with 82% of this project's last headline and no training.
-    Anything the learned head adds has to come from the higher harmonics.
-    """
+    """The identity's corollary, and the reason the head reads M > 1 harmonics."""
     vae = at.AnchorTimeVAE(8, stride=1, harmonics=1, d_model=32, emission="triangle")
     h, mask, _y = batch(frames=400)
     cum = constant_cum(batch=h.shape[0], frames=400)
@@ -295,18 +245,7 @@ def test_build_model_refuses_a_transformer_emission():
 
 
 def test_mixed_length_batch_has_finite_gradients():
-    """The bug that voided the first full-scale run, and the reason it hid until then.
-
-    A batch whose items have DIFFERENT valid lengths puts -inf in logq at every invalid
-    candidate. An earlier torch.where(q > 0, q * logq, 0) was correct in the forward and
-    wrong in the backward -- autograd differentiates the unselected branch, d(q logq)/dq is
-    -inf there, and where's backward multiplies it by 0 to give nan. MEASURED: loss finite
-    at 3.2621 while 34 parameter gradients were nan, at step 0 of the full 1661-song set.
-
-    With every item the same length there are no invalid candidates and no -inf, so
-    --limit-per-fold 16 ran clean for hours of smoke tests and hid it completely. Hence the
-    length regimes below rather than one batch.
-    """
+    """The bug that voided the first full-scale run, and the reason it hid until then."""
     for lengths in ([200, 200], [200, 120], [200, 40], [200, 0]):
         vae = model()
         h, mask, y = batch(batch=len(lengths))
@@ -322,13 +261,7 @@ def test_mixed_length_batch_has_finite_gradients():
 
 
 def test_standardisation_cannot_manufacture_a_one_hot_posterior():
-    """The mirror failure: eps must sit INSIDE the sqrt.
-
-    Dividing by var.sqrt().clamp(min=1e-8) permits 1e8 amplification, and in the
-    small-variance regime the standardisation exists for it produced logits so large that
-    log_softmax returned a point mass -- Hq 0.0000, agree 100.0%, the exact mirror of the
-    Hq 1.0000 it was introduced to fix. Neither extreme is learning.
-    """
+    """The mirror failure: eps must sit INSIDE the sqrt."""
     vae, (h, mask, y) = model(), batch()
     out = vae(h, mask, y)
     q = out["logq"].exp()
@@ -340,12 +273,7 @@ def test_standardisation_cannot_manufacture_a_one_hot_posterior():
 
 
 def test_epoch_note_survives_a_fully_masked_item():
-    """One backstop window must not corrupt the reported Hq.
-
-    A fully-masked item keeps exactly one candidate, so log C_i = 0 and its normalised
-    entropy is 0/0. Averaging that in gives nan (or ~1e6 under a clamped denominator) for
-    the whole batch -- and Hq is the number this variant is judged by.
-    """
+    """One backstop window must not corrupt the reported Hq."""
     vae, (h, mask, y) = model(), batch()
     mask[0] = 0.0
     note = at.epoch_note(vae, {"h": h, "mask": mask, "y": y})

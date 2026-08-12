@@ -1,33 +1,4 @@
-"""Beat Transformer frontend (Zhao, Xia & Wang, ISMIR 2022; external/beat_transformer submodule).
-
-Why this frontend matters for the ladder: Beat Transformer was DESIGNED around the madmom DBN --
-its published results are activation + DBN -- whereas Beat This performs best without one. Pairing
-the DBN-family rungs with the frontend that was co-designed with the DBN is the fairer baseline
-comparison.
-
-Wraps the OFFICIAL code: Demixed_DilatedTransformerModel (code/DilatedTransformer.py) with their
-released fold checkpoints, fed their exact input -- Spleeter 5-stem demixed, log-compressed mel
-spectrograms. Spleeter needs TensorFlow, which does not coexist with this env's torch stack, so
-demixing runs in a SUBPROCESS under a Spleeter-equipped interpreter (see
-frontends/beat_transformer_demix.py; default: the analyze-smc env, whose 5-stem weights are
-already cached). The torch model itself runs in-process.
-
-Properties of what this emits:
-  * the grid is 44100/1024 ~= 43.066 fps (Spleeter's STFT hop) -- FPS is a fact of the
-    hop, and every consumer reads it off the class rather than assuming a global grid.
-  * activations are LOGITS (ACTIVATION_FORM="logit"); Beat Transformer's own pipeline applies
-    sigmoid and feeds madmom with NO bounding (BOUNDING="none") and decorrelation floor 0
-    (eight_fold_test.py: np.maximum(beat - downbeat, 0)).
-  * their shipped decode differs from Beat This's madmom call: observation_lambda=6,
-    num_tempi=None, threshold=0.2 (and correct=True, madmom's default). To run R0/R1 as
-    Beat-Transformer-ships-it, pass those explicitly -- our shipped defaults are Beat This's.
-  * the model takes the WHOLE piece in one forward (dilated self-attention; no chunking in their
-    inference code).
-
-Checkpoints: "fold_0".."fold_7" -- their 8-fold split over ballroom/hainsworth/carnatic/
-harmonix/smc (seed-0 shuffle; NOT Beat This's folds). GTZAN was held out of ALL folds, so any
-fold is honest on GTZAN; on the training datasets, fold-honesty needs their fold mapping.
-"""
+"""Beat Transformer frontend (Zhao, Xia & Wang, ISMIR 2022; external/beat_transformer submodule)."""
 import subprocess
 import sys
 import tempfile
@@ -94,33 +65,19 @@ class BeatTransformerFrontend(Frontend):
 
     @torch.no_grad()
     def get_features(self, signal, sample_rate: int) -> torch.Tensor:
-        """[num_samples] mono audio -> [num_frames, num_channels] at FPS (~43.07).
-
-        Channels per output mode: (beat, downbeat) LOGITS; the instrument-pooled
-        pre-out_linear features [T, dmodel]; or [features ⊕ activations].
-        """
+        """[num_samples] mono audio -> [num_frames, num_channels] at FPS (~43.07)."""
         x = self._demix(signal, sample_rate)                                  # [5, T, 128]
         batch = torch.from_numpy(x).transpose(0, 1).unsqueeze(0)              # [1, T, 5, 128]
         return self.forward_features(batch)[0].cpu()                          # [T@43fps, C]
 
     def prepare_input(self, signal, sample_rate: int) -> np.ndarray:
-        """[num_samples] mono audio -> [T, 5, 128] demixed log-mel stack, TIME-FIRST.
-
-        The Spleeter demix + per-stem power_to_db -- this frontend's whole preprocessing
-        demand -- runs here (subprocess, separate env). Stored time-first per the
-        Frontend contract; forward_features permutes back to their (instr, time) layout.
-        """
+        """[num_samples] mono audio -> [T, 5, 128] demixed log-mel stack, TIME-FIRST."""
         stack = self._demix(signal, sample_rate)                              # [5, T, 128]
         return np.ascontiguousarray(stack.transpose(1, 0, 2), dtype=np.float32)
 
     @torch.no_grad()
     def forward_features(self, batch) -> torch.Tensor:
-        """[B, T, 5, 128] demixed-mel windows -> [B, T, num_channels].
-
-        One whole-window forward -- dilated self-attention has no chunk-size demand.
-        Features come off a forward hook on out_linear (its input is the instrument-
-        pooled representation, its output the logits), so one pass serves every mode.
-        """
+        """[B, T, 5, 128] demixed-mel windows -> [B, T, num_channels]."""
         x = batch.to(self.device).permute(0, 2, 1, 3)                         # [B, 5, T, 128]
         captured = []
         handle = self._model.out_linear.register_forward_hook(

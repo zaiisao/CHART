@@ -1,33 +1,4 @@
-"""Control: can the model fit ONE song, with everything else removed?
-
-The cheapest decisive test in the project. One song, one window pinned by
-``deterministic=True``, one batch reused every step, frontend features computed once
-because the frontend is frozen. Nothing here can fail for reasons of data volume,
-crop noise, tempo spread or generalisation -- so if the numbers do not converge, the
-failure is structural and no amount of data or objective redesign will reach it.
-
-Read four numbers:
-  * recon   -- if this does not fall on a SINGLE song, nothing is learning.
-  * rate    -- against the song's own bar rate, printed as a ratio. 1.00 is the target.
-                Sitting exactly on 0.0100 is the LOWER CLAMP in Encoder.heads, whose
-                gradient is exactly zero: a railed rate can never return.
-  * b       -- the emission amplitude. Falling means the likelihood is flattening; the
-                broad-emission/imprecise-phase equilibrium (see emission_b_floor).
-  * in-tol  -- wraps within +-70 ms of an annotated downbeat, i.e. F for this song.
-
-First run of this check (2026-08-11, ballroom song 0, 400 epochs): recon -340.29 ->
--336.87, rate railed to the 0.0100 clamp by epoch 50 and pinned there with the KL frozen
-at 3465.15 to six figures for 350 epochs, b decaying 1.31 -> 1.23, in-tol 0%. The model
-could not fit one song.
-
-anchor_k.yaml fails IDENTICALLY -- same clamp, same frozen KL to six figures, same b
-trace -- because kl_k = log C + sum q log q is exactly 0 while q(k) is uniform, which it
-was throughout. So the defect is in the SHARED core (Encoder.heads, BarPhaseVAE.forward),
-not in any variant. baseline is the default here for that reason: it is the smallest
-configuration that reproduces the failure.
-
-Run: PYTHONPATH=. python -m phasevae.checks.overfit_one [--epochs 400] [--gpu 1]
-"""
+"""Control: can the model fit ONE song, with everything else removed?"""
 from __future__ import annotations
 
 import argparse
@@ -134,13 +105,6 @@ def main() -> None:
         # is broken rather than merely untrained.
         res = f"  res {float(out['resultant'].mean()):5.3f}" if "resultant" in out else ""
         if args.plot:
-            # Phase proximity, NOT emission_probs. The tent is affine in (a, b), so
-            # normalising to [0, 1] deletes them -- which is what we want: under the
-            # alignment objective nothing updates a or b, so sigmoid(a + b tent) is two
-            # frozen init values (peak 0.156, trough 0.013) dressed up as a prediction,
-            # and the sigmoid's convexity over that range rounds the tent's corner into
-            # a scoop. 1 - |wrap(mu)|/pi is the same information, parameter-free, and
-            # actually pointy at the downbeat.
             phi_w = torch.atan2(torch.sin(mu_t[0]), torch.cos(mu_t[0]))
             prox = (1.0 - phi_w.abs() / math.pi).float().cpu().numpy()
             snapshots.append((epoch, prox, wraps, rate / true_rate))
@@ -152,19 +116,12 @@ def main() -> None:
               f"{res}",
               flush=True)
 
-
     if args.plot:
         _render(args.plot, snapshots, y[0].cpu().numpy(), targets, song.song_id)
 
 
 def _render(path, snapshots, y, targets, song_id):
-    """One panel per snapshot: PHASE PROXIMITY 1 - |wrap(mu)|/pi vs the annotated downbeats.
-
-    What to look for: a train of cusps whose spacing matches the red lines, moving onto
-    them over epochs. Cusps at the wrong spacing = the rate is wrong. Cusps EVENLY spaced
-    on a song with rubato = the trajectory has been straightened, which is what the KL
-    does once kappa rails and it starts to dominate the alignment term.
-    """
+    """One panel per snapshot: PHASE PROXIMITY 1 - |wrap(mu)|/pi vs the annotated downbeats."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

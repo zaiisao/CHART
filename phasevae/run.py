@@ -1,38 +1,4 @@
-"""Train and evaluate the bar-phase VAE: one continuous latent, no meter, no beat grid.
-
-The latent is a phase turning once per bar; the bar PERIOD is given (one constant per
-window, from annotations) and the model finds the bar's PHASE from audio.
-
-The RECIPE (model + training) lives in a YAML config; the CLI carries only run
-mechanics (device, seed, paths). Every MAINLINE key -- default, type and rationale in
-one record -- is declared in ``config_schema.json`` and loaded by ``config.py``, so an
-unknown or ill-typed key refuses before anything is built; variant-specific keys stay
-in the variant module's own DEFAULTS.
-
-The config's ``variant:`` key names the hooks
-module that owns the model -- ``base`` is tutorial §7 (encoder-deployed, no
-conditional prior) and is itself just the default variant. run.py drives whichever
-module is named through five hooks (build_model / optimizer / objective / on_epoch /
-epoch_note) and never branches on which one it is: a new variant is a new module and
-a new config, never a flag here.
-
-DATA (2026-08-07): Beat This-style excerpts over the plug-and-play Frontend contract.
-Each song's model INPUT (the frontend's frozen preprocessing, e.g. its log-mel) is
-cached once per frontend; every epoch draws a FRESH random window per song; the frozen
-frontend turns windows into features INSIDE the training loop -- features never touch
-disk. The config's ``frontend:``/``frontend_checkpoint:`` keys pick the frontend
-(default beat_this/final0); ONE checkpoint serves train/val/test alike: fold-honesty
-is phase-gated
-(gtzan was held out of EVERY checkpoint, so the decision metric stays clean; CV-dataset
-train/val scores are optimistic diagnostics; 8-fold routing returns before any
-baseline-comparable claim). Val/gtzan are scored straight off their
-deterministic excerpt datasets -- same frontend call as training, valid frames only.
-
-Usage:
-    PYTHONPATH=. python -m phasevae.run --config phasevae/configs/baseline.yaml --gpu 1
-    PYTHONPATH=. python -m phasevae.run --config phasevae/configs/psi.yaml --gpu 3
-    ... --set epochs=2 --set emission=cosine        # ad-hoc override, still one run
-"""
+"""Train and evaluate the bar-phase VAE: one continuous latent, no meter, no beat grid."""
 from __future__ import annotations
 
 import argparse
@@ -62,26 +28,12 @@ def beta_at(epoch: int, cfg) -> float:
 
 
 def _seed_worker(_worker_id: int) -> None:
-    """Reseed np.random per DataLoader worker.
-
-    Fork copies ONE numpy state into every worker, which would otherwise make them all
-    draw IDENTICAL windows.
-    """
+    """Reseed np.random per DataLoader worker."""
     np.random.seed(torch.initial_seed() % 2**32)
 
 
 def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
-    """One seed: run the controls, then fit the objective the hooks define.
-
-    Windows come fresh from the DataLoader every epoch. The frontend trains only when
-    ``frontend_lr_scale > 0``; at the default 0 it is frozen and only the VAE moves.
-
-    Each epoch closes with ``hooks.epoch_note`` on a FROZEN probe batch -- the variant's
-    own diagnostic, which the base recipe leaves empty. It exists because the ELBO and the
-    four trajectory numbers cannot see a variant's internal state: anchor_time's posterior
-    over candidate anchors sat at Hq 0.998 for six epochs while advance and elbo moved,
-    and without Hq that run was indistinguishable from one where the anchor was working.
-    """
+    """One seed: run the controls, then fit the objective the hooks define."""
     torch.manual_seed(seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
 
@@ -97,14 +49,6 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
         fe = list(frontend._audio2frames.model.parameters())
         opt.add_param_group({"params": fe, "lr": cfg.lr * cfg.frontend_lr_scale})
 
-    # ONE fixed batch for the variant diagnostic, drawn before training and never redrawn.
-    # It must be the IDENTICAL input every epoch: against a moving probe, a moving number
-    # tells you nothing about whether the MODEL moved. The windows are frozen here; the
-    # features are recomputed each epoch because a thawed frontend changes them.
-    # Contract: a variant's epoch_note receives {"h", "mask", "y"} -- audio features, the
-    # validity mask, and the target. y is present because a variant may report a quantity
-    # that reads it (anchor_time's `agree` compares argmax q against argmax of the
-    # reconstruction); nothing here is on the deployed path.
     probe_raw = collate_excerpts([dataset[i] for i in
                                   range(min(cfg.batch_size, len(dataset)))])
 
@@ -138,11 +82,14 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             opt.zero_grad()
             loss.backward()
 
-            # clip_grad_norm_ returns the norm BEFORE clipping, so this is the honest
-            # size of the step the objective asked for -- logged whether or not the clip
-            # binds. Worth watching: kappa's row alone was 94% of it, which makes every
-            # other parameter's effective step a function of kappa's dynamics.
-            gnorm += float(torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip))
+            # clip_per_group: per-TENSOR clip budgets (pooled norm ran 93-1330 vs clip 5.0
+            # all run long; evidence: search-read-out-verdict). |g| logged = pooled norm
+            # when off, LARGEST single-tensor norm when on.
+            if cfg.clip_per_group:
+                gnorm += max(float(torch.nn.utils.clip_grad_norm_([p], cfg.clip))
+                             for p in clip_params if p.grad is not None)
+            else:
+                gnorm += float(torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip))
             if cfg.frontend_lr_scale > 0:
                 torch.nn.utils.clip_grad_norm_(fe, cfg.clip)
 
@@ -151,13 +98,6 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             totals += [float(out["elbo"].mean()),
                        float(out["recon"].mean()),
                        float(out["kl"].mean())]
-            # The anchor's own health, which the ELBO and the four trajectory numbers
-            # cannot show. `res` is the NORMALISED resultant of the phase-folded evidence
-            # in [0, 1]: how much the bars agree about where the downbeat sits. It splits
-            # the two ways an anchor fails, which need opposite fixes -- res ~ 0 means the
-            # evidence head produces nothing coherent and the circular mean is averaging
-            # noise; res high with phase_err still at chance means the evidence is
-            # coherent and pointing at the WRONG phase (the half-bar flip).
             if "resultant" in out:
                 anchor += [float(out["resultant"].mean()),
                            float(out["kl_offset"].mean())]

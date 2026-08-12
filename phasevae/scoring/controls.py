@@ -1,8 +1,4 @@
-"""Pre-flight controls.
-
-Each one exists because its absence once shipped a wrong number; the measurements
-behind them are in docs/phasevae_decisions.md.
-"""
+"""Pre-flight controls."""
 from __future__ import annotations
 
 import torch
@@ -18,12 +14,7 @@ def assert_no_duplicate_crops(crops):
 
 
 def assert_encoder_is_target_blind(model, batch):
-    """The encoder may read h and the GIVEN bar rate delta -- never the target.
-
-    Asserted structurally (signature) AND behaviourally (corrupt y, require the
-    inferred phase bit-identical). delta being annotation-derived is a recorded
-    widening of the deployable surface, not a waiver.
-    """
+    """The encoder may read h and the GIVEN bar rate delta -- never the target."""
     model.eval()
     deployed = model.deployed_net
     allowed = {"self", "h", "mask"}

@@ -1,10 +1,4 @@
-"""Behavioural tests for the phasevae package, derived from docstrings and math only.
-
-Every expected value here comes from a function's stated contract (docstring, signature,
-or the mathematical definition it names), never from running the implementation first.
-Tests that expose a contract violation keep their honest assertion and carry a strict=False
-xfail with the violation spelled out.
-"""
+"""Behavioural tests for the phasevae package, derived from docstrings and math only."""
 from __future__ import annotations
 
 import math
@@ -202,18 +196,7 @@ def test_vonmises_entropy_uniform_limit_and_scipy():
 
 
 def test_encoder_trajectory_rotates_monotonically_by_construction():
-    """mu = offset + cumsum(exp(pooled log-rate)): rotation is STRUCTURAL, not learned.
-
-    Replaces a test that asserted the opposite -- that mu was emitted freely per frame.
-    That parameterisation was measured to collapse: from a random init the second
-    differences are of order 1 rad, the KL opens at ~151k against a reconstruction of
-    ~286, and the steepest descent is to flatten mu. The trace showed the endpoint
-    precisely -- increments sign-balanced at frac>0 = 0.50 with mean +0.00001, i.e. two
-    parts in a thousand of the phase motion contributing net rotation.
-
-    The three properties below are what the new parameterisation guarantees so that the
-    objective never has to be persuaded of them.
-    """
+    """mu = offset + cumsum(exp(pooled log-rate)): rotation is STRUCTURAL, not learned."""
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
     h = torch.randn(2, 300, 4)
@@ -240,18 +223,7 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
 
 
 def test_anchor_reads_every_frame_not_just_frame_zero():
-    """The anchor must be a function of the WHOLE window, and gradient must reach it.
-
-    Replaces a test that asserted mu[0] == offset bitwise, i.e. that the anchor was a
-    frame-0 snapshot. That was the defect: where a window sits inside its bar is a
-    property of every frame, and reading it from one position was measured inferior --
-    swapping a frame-0 trunk snapshot for phase-folded evidence is worth +0.232 F on
-    FROZEN weights, and the frame-0 form left phase_err at chance for all 60 epochs of
-    a full-corpus run whose rate converged cleanly.
-
-    Perturbing a LATE frame must therefore move the anchor. The old parameterisation
-    passes every other assertion here and fails this one, which is the point.
-    """
+    """The anchor must be a function of the WHOLE window, and gradient must reach it."""
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
     mask = torch.ones(2, 200)
@@ -358,9 +330,9 @@ def test_emission_b_floor_semantics():
 
 def test_emission_b_floor_survives_state_dict_roundtrip():
     """Set the scheduled floor, save state_dict, load into a fresh model: emission_b
-    must be preserved, because the floor is part of the likelihood the checkpoint
-    claims to represent. (Was an xfail: the floor used to be a plain attribute and
-    silently reset to 0.0 on reload; it is a registered buffer now.)
+        must be preserved, because the floor is part of the likelihood the checkpoint
+        claims to represent. (Was an xfail: the floor used to be a plain attribute and
+        silently reset to 0.0 on reload; it is a registered buffer now.)
     """
     _seed()
     model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
@@ -389,19 +361,7 @@ def test_kl_to_physical_prior_nonnegative():
 
 
 def test_kl_to_physical_prior_analytic_three_frame():
-    """T=3 hand computation against the docstring's constant-rate prior.
-
-    phi_1, phi_2 are unconditioned (the second difference needs two predecessors), so
-    each contributes log p = -log 2pi. Only t=3 has a chain term, whose prior mean is
-    2*phi_2 - phi_1, giving
-
-        E log p(phi_3 | phi_2, phi_1)
-          = kappa_p * A_1(k3) * A_2(k2) * A_1(k1) * cos(mu3 - 2 mu2 + mu1)
-            - log 2pi - log I0(kappa_p)
-
-    The MIDDLE frame carries coefficient 2, hence A_2 = I_2/I_0 and not A_1^2 -- the
-    factor this test exists to pin. Every piece below comes from scipy independently.
-    """
+    """T=3 hand computation against the docstring's constant-rate prior."""
     scipy_stats = pytest.importorskip("scipy.stats")
     scipy_special = pytest.importorskip("scipy.special")
     model = BarPhaseVAE(input_dim=4, d_model=8)
@@ -429,12 +389,7 @@ def test_kl_to_physical_prior_analytic_three_frame():
 
 
 def test_kl_to_physical_prior_second_order_needs_a2_not_a1_squared():
-    """A_2(kappa) != A_1(kappa)^2, so the closed form must not use the square.
-
-    At a moderate kappa the two differ by tens of percent (A_2 = 0.302 vs A_1^2 = 0.487
-    at kappa = 2), which is large enough that substituting the square shifts the KL well
-    outside float tolerance. Guards the one algebraic step that is easy to get wrong.
-    """
+    """A_2(kappa) != A_1(kappa)^2, so the closed form must not use the square."""
     scipy_special = pytest.importorskip("scipy.special")
     model = BarPhaseVAE(input_dim=4, d_model=8)
     mu = torch.tensor([[0.1, 0.2, 0.35]], dtype=torch.float64)
@@ -465,9 +420,9 @@ def test_kl_to_physical_prior_second_order_needs_a2_not_a1_squared():
 
 def test_kl_to_physical_prior_invariant_to_shift_and_rate():
     """The prior penalises rate CHANGE only, so the KL must be unchanged by (a) adding a
-    constant to the whole trajectory and (b) adding a constant RATE ramp. Both leave the
-    second difference identical -- the docstring's phase-blindness and tempo-scale-
-    freedom, which together are why only the emission can locate or size a bar.
+        constant to the whole trajectory and (b) adding a constant RATE ramp. Both leave the
+        second difference identical -- the docstring's phase-blindness and tempo-scale-
+        freedom, which together are why only the emission can locate or size a bar.
     """
     _seed()
     model = BarPhaseVAE(input_dim=4, d_model=8)
@@ -501,13 +456,7 @@ def test_kl_to_physical_prior_masked_frames_contribute_zero():
 
 
 def test_forward_elbo_identity_and_alignment_recon(monkeypatch):
-    """elbo == recon - kl exactly, and recon must equal align_log_prob computed by hand.
-
-    Replaces two tests that asserted the per-frame Bernoulli composition and the
-    pos_weight scaling. Both encoded the OLD observation model. y is no longer the
-    observation: the annotated downbeat TIMES are, so there is no negative class to
-    reweight and pos_weight has nothing to multiply.
-    """
+    """elbo == recon - kl exactly, and recon must equal align_log_prob computed by hand."""
     _seed()
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
@@ -538,12 +487,7 @@ def test_forward_elbo_identity_and_alignment_recon(monkeypatch):
 
 
 def test_forward_kl_includes_the_anchor_and_padding_is_ignored():
-    """out['kl'] must carry KL(q(offset) || Uniform), and padded targets must not score.
-
-    The anchor is a latent now. If its KL is dropped the ELBO is not a bound on the
-    model that is actually deployed, and a confident window buys free concentration --
-    the mechanism that railed kappa under the previous objective.
-    """
+    """out['kl'] must carry KL(q(offset) || Uniform), and padded targets must not score."""
     _seed()
     model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
     B, T = 2, 60
@@ -638,11 +582,7 @@ def test_beta_at_schedule_edges():
 
 
 def _blindness_batch(input_dim: int, batch_size: int = 2, frames: int = 10):
-    """A synthetic batch for the target-blindness control: no real audio needed.
-
-    The control reads only signatures and determinism, so random h is equivalent to a
-    frontend batch -- which is why this is a unit test and not a per-run assertion.
-    """
+    """A synthetic batch for the target-blindness control: no real audio needed."""
     return {"h": torch.randn(batch_size, frames, input_dim),
             "delta": torch.full((batch_size, frames), 0.06),
             "mask": torch.ones(batch_size, frames),
@@ -672,13 +612,7 @@ def test_target_blindness_control_detects_leak():
 
 
 def test_deployed_net_reads_no_target_in_any_shipped_config():
-    """EVERY config's deployed net must read h and delta only.
-
-    This is what the removed per-run control covered: the signature contract holds for
-    the model each recipe actually builds, not just for a bare BarPhaseVAE. A variant
-    that starts reading y at deploy time is unusable at test time, and the failure is
-    silent -- scores would simply be too good.
-    """
+    """EVERY config's deployed net must read h and delta only."""
     configs = sorted((pathlib.Path(__file__).resolve().parent.parent / "configs")
                      .glob("*.yaml"))
     assert configs, "no configs found: this test would pass vacuously"
@@ -750,16 +684,7 @@ def test_cache_write_overwrites_existing(tmp_path):
 
 
 def test_trajectory_health_separates_the_recorded_failure_modes():
-    """The four numbers must distinguish trajectories that F cannot.
-
-    Each row is a failure this project actually measured, with its published signature:
-      oracle              advance 2*pi/(P*fps), phase_err 0, full circle
-      oracle + half bar   SAME advance and circle, phase_err pi -- a pure offset error,
-                          which is what F punishes and the KL is provably blind to
-      spike train         advance 0.715 (the 2026-06 measurement), phase_err ~= chance
-      frozen phase        advance 0, phase_err = chance, circle = one bin
-    A diagnostic that cannot tell these apart cannot read a training run.
-    """
+    """The four numbers must distinguish trajectories that F cannot."""
     from phasevae.scoring.evaluation import scoring_records, trajectory_health
 
     n, fps, period = 600, 50.0, 2.0

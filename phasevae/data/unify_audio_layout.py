@@ -1,39 +1,4 @@
-"""Build the by-stem audio store: every corpus, one layout, exact names.
-
-``dataset_store/audio_by_stem/<dataset>/<annotation_stem>.<ext>`` is a tree of
-SYMLINKS, one per song, named exactly by the Beat This annotation stem. The loader
-never matches names at runtime -- audio lookup is a dict ``.get`` on the stem -- and
-all the naming archaeology lives HERE, once, where its output is verified. Sources
-are never moved or copied; re-running rebuilds and RE-VERIFIES the whole mapping
-from the raw stores, so the layout stays re-derivable rather than becoming a one-off
-artifact nobody can certify.
-
-Three pairing regimes:
-
-  * ordinary corpora (gtzan, ballroom, beatles, hjdb, hainsworth): audio lives under
-    labeled_data/<dir>/ with names that ALMOST match the annotation stems -- an index
-    prefix and '.'-vs-'_' differences (gtzan stores 0001_blues.00000.wav for the stem
-    gtzan_blues_00000). ``match_audio`` tolerates exactly those differences.
-  * rwc: annotations are named by disc and track (rwc_classical_CD4_07); the audio
-    rips carry RWC catalog numbers (RWC_C038.wav, multi-movement pieces suffixed
-    A-E). The two share no stem, so the pairing is POSITIONAL -- both sequences
-    sorted into disc order. That is inherently risky, so it is verified, not
-    assumed: equal counts per subset (else the subset is refused outright), zero
-    songs whose last annotated beat falls past the end of the audio, and
-    corr(last beat time, audio duration) > 0.99 per subset. A shuffled pairing
-    collapses that correlation to ~0.01.
-  * asap: audio was assembled from MAESTRO recordings into
-    _repos/asap-dataset/<Composer>/<Piece>/<Performer>.wav, and the annotation stem
-    is exactly that relative path with separators replaced by underscores --
-    deterministic, not positional. Annotations with no exact structural match (a
-    ``no_repeat`` token on one side only) are DROPPED, deliberately: a repeat and a
-    no-repeat performance are different lengths, so fuzzy-matching would pair
-    annotations with audio they do not describe -- the silent-misalignment failure
-    that quarantined harmonix.
-
-Usage:
-    /disk4/anaconda3/envs/vbpm/bin/python -m phasevae.data.unify_audio_layout
-"""
+"""Build the by-stem audio store: every corpus, one layout, exact names."""
 from __future__ import annotations
 
 import re
@@ -65,11 +30,7 @@ def _link(target_dir: Path, stem: str, audio_path: Path):
 
 
 def match_audio(unprefixed_stem: str, audio_index: dict) -> Optional[Path]:
-    """Match an annotation stem to an audio file.
-
-    Exact match first; else tolerate an index prefix and '.'/'_' differences on the
-    audio side (gtzan stores '0001_blues.00000.wav' for the stem 'gtzan_blues_00000').
-    """
+    """Match an annotation stem to an audio file."""
     if unprefixed_stem in audio_index:
         return audio_index[unprefixed_stem]
     normalized_stem = unprefixed_stem.replace(".", "_")
@@ -109,11 +70,7 @@ def build_ordinary(dataset: str) -> int:
 
 
 def _rwc_sort_key(path: Path):
-    """Disc-order sort key: C023A sorts after C022 and before C024.
-
-    Plain lexical order would agree too, but only by luck of zero-padding; making the
-    intent explicit means a 3-digit overflow cannot reorder it.
-    """
+    """Disc-order sort key: C023A sorts after C022 and before C024."""
     match = re.match(r"RWC_[CJR](\d+)([A-Z]?)", path.stem)
     return (int(match.group(1)), match.group(2)) if match else (10**6, path.stem)
 

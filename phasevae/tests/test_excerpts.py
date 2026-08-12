@@ -1,9 +1,4 @@
-"""Excerpt dataset: window draws, target math, padding, collate — frontend-free.
-
-A stub frontend (name + FPS only) and a synthetic input cache exercise every
-path that does not need a GPU model; the real frontends' forward paths are covered by
-their own __main__ smoke checks.
-"""
+"""Excerpt dataset: window draws, target math, padding, collate — frontend-free."""
 import numpy as np
 import torch
 

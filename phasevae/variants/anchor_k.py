@@ -1,50 +1,4 @@
-"""The categorical-anchor variant: q(k | x) over enumerated bar shifts, exact sum.
-
-What it fixes (2026-08-07 workflow verdicts): the anchor landscape over constant
-shifts of mu is UNIMODAL with a flat top (~330 ms of the bar within 20 nats), so the
-pathwise gradient trains the scalar offset head only to "somewhere on the top"
-(train-fold median 70 ms, gtzan 137 ms) while the VALUE-argmax of the same trained
-objective is precise (6-9 ms, 92% < 70 ms). The estimator, not the objective, was
-the bottleneck: this variant gives q a head whose gradient reads objective VALUES.
-
-Construction (auxiliary-variable ELBO; p is bitwise unchanged): extend the latent
-with k ~ p(k) = Uniform(C), p(y | phi, k) = p(y | phi). Then
-
-    L = sum_k q(k|x) E_{q(phi|x)}[ log p(y | phi + c_k) ]  -  KL_trajectory
-        - ( log C - H[q(k|x)] )
-
-is a standard ELBO on the SAME marginal p(y). The trajectory KL needs no per-k term:
-kl_to_physical_prior reads increments only and phi_1 ~ Uniform, so it is exactly
-invariant under the constant shift c_k. Only the reconstruction varies with k, and k
-is marginalised EXACTLY -- C closed-form emission evaluations, no REINFORCE, no
-Gumbel; common random numbers (one eps shared across k) keep the R_k differences
-low-variance. dL/dlogit_j = q_j (R_j - sum_k q_k R_k): every slot is priced every
-step, so anchor discovery is by construction rather than by search.
-
-v2 head (2026-08-08 head-lab verdicts). v1's linear+time-mean trunk head could not
-amortize (deployed slot 115 ms from value-argmax; gtzan F 0.278). The lab winner is
-the PHASE-BINNED ACTIVATION head: the two frontend activation channels
-(h[..., -2:], the beat/downbeat logits) are masked-mean pooled into C phase bins
-under the encoder's own mu, and an MLP maps the [C, 2] histogram to slot logits
-(lab: 27 ms / 70% <70 ms vs value-argmax bound 11 ms / 92%; v1-style head 141 ms).
-Trunk features added nothing under augmentation and were dropped on parsimony.
-
-Rotation augmentation (train only): the raw anchor of mu is unreliable, and the
-un-augmented head FAILS the rotation-composition test (a slot-16 rotation of mu
-costs 26 -> 135 ms). Fix: draw r ~ Uniform(C) per example and use mu_eff = mu + c_r
-everywhere k-related -- implemented exactly by rotating the binned histogram by r
-and re-indexing recon_k by (k + r) mod C. Because the slots tile the full circle
-and the trajectory KL is shift-invariant, the objective for each r is the SAME
-exact ELBO evaluated under a reparameterised q (q(k|x, r) with independent noise
-r; the average over r is still a valid lower bound on log p(y)). p is untouched.
-Lab: augmentation makes the head rotation-robust (26-28 ms at every tested r) AND
-improves the un-rotated grade (27 ms / 70%).
-
-Precedent heeded: psi's K>1 rotation mixture never learned the anchor -- but it was
-trained by stop-gradient distillation, pathwise. Watch the epoch log's Hk (normalised
-categorical entropy) and agree (argmax q == argmax R_k on the probe batch): the
-mechanism is working exactly when Hk falls while agree rises.
-"""
+"""The categorical-anchor variant: q(k | x) over enumerated bar shifts, exact sum."""
 from __future__ import annotations
 
 import math
@@ -80,15 +34,7 @@ class AnchorKVAE(BarPhaseVAE):
                              torch.atan2(torch.sin(shifts), torch.cos(shifts)))
 
     def bin_activations(self, h, mu, mask=None):
-        """[B, T, D], [B, T] -> [B, C, 2]: activations pooled into C phase bins.
-
-        The last two input dims (the frontend's beat/downbeat channels, sigmoided) are
-        masked-mean pooled into C phase bins under mu.
-
-        Bin indices are integer functions of mu (no gradient path), and the pooled
-        values come from the frozen frontend: the k-head's ELBO gradient prices
-        slots without back-pressure on the encoder through the binning.
-        """
+        """[B, T, D], [B, T] -> [B, C, 2]: activations pooled into C phase bins."""
         B, T = mu.shape
         C = self.anchor_slots
         acts = torch.sigmoid(h[..., -2:])
@@ -102,12 +48,7 @@ class AnchorKVAE(BarPhaseVAE):
         return (sums / cnt.clamp(min=1.0)[:, None]).reshape(B, C, 2)
 
     def slot_logits(self, h, mu, mask=None):
-        """[B, T, D], [B, T] -> [B, C]: slot scores from the binned histogram.
-
-        The mask keeps pad frames out of the pool: without it, untrained pad-frame
-        content (1/3 of every gtzan window) corrupts the histogram and flips the
-        deployed anchor by whole slots (v1 lesson; the pad-vote gate enforces this).
-        """
+        """[B, T, D], [B, T] -> [B, C]: slot scores from the binned histogram."""
         return self.k_head(self.bin_activations(h, mu, mask).flatten(1))
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
@@ -190,12 +131,7 @@ def optimizer(model, cfg):
 
 
 def epoch_note(model, probe) -> str:
-    """Epoch telemetry: Hk (categorical entropy) and agree (argmax match).
-
-    Hk = normalised H[q(k)] (1 = uniform, 0 = collapsed); agree = argmax q vs argmax
-    R_k on the probe batch (the mechanism is learning exactly when Hk falls while
-    agree rises).
-    """
+    """Epoch telemetry: Hk (categorical entropy) and agree (argmax match)."""
     if model.anchor_slots == 1:
         return ""
     was_training = model.training

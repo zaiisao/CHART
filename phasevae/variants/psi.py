@@ -1,21 +1,4 @@
-"""The §9 variant: q(z|h,b) scaffolding + conditional prior p_psi(z|h), Sohn-orthodox.
-
-Deployment reads the PRIOR (the posterior is training scaffolding, discarded at
-test). Selected by ``variant: psi`` in a config; run.py imports this module and
-drives it through the same five hooks as the base recipe -- nothing in base.py
-knows psi exists.
-
-Ladder verdict (2026-08-06) carried as design constraints here:
-  * q trains against the PHYSICAL prior only; psi learns by stop-gradient
-    DISTILLATION (joint KL(q||psi) collapsed q in every attempt).
-  * The K>1 rotation mixture NEVER learned to carry the anchor (uniform or
-    confidently-arbitrary logits in every arm, clip-exempt 10x-lr head included);
-    K=1 -- psi as bare base path -- reaches parity with the base model (gtzan 0.510
-    vs 0.505). Default is therefore rotations: 1; the mixture stays available for
-    another attempt at the transfer mechanism.
-  * With the mixture present, lambda_prior=1 correlated with teacher collapse at
-    beta-warmup 0 (causality unproven); K=1 trained clean under both.
-"""
+"""The §9 variant: q(z|h,b) scaffolding + conditional prior p_psi(z|h), Sohn-orthodox."""
 from __future__ import annotations
 
 import torch
@@ -26,11 +9,7 @@ from ..model import (TWO_PI, BarPhaseVAE, Encoder, sample_vonmises,
 
 
 class PosteriorEncoder(Encoder):
-    """q(z | h, b): the target enters as frame t's SECOND variable (h_t, y_t).
-
-    Training scaffolding only -- it can never be deployed (reads y). Same trunk and
-    heads as the base encoder; the only change is the input.
-    """
+    """q(z | h, b): the target enters as frame t's SECOND variable (h_t, y_t)."""
 
     reads_target = True
 
@@ -45,13 +24,7 @@ class PosteriorEncoder(Encoder):
 
 
 class RotationPrior(Encoder):
-    """p_psi(z | h): a base path plus (for K > 1) a whole-trajectory rotation mixture.
-
-    The rotation logits get their OWN head: sharing the mu/kappa output tensor put
-    their ~1e7x smaller gradients where the global clip rescaled them to nothing
-    (measured: rot-spread 0.10 after 60 distillation epochs). K = 1 builds no head
-    at all -- a one-component softmax is constant, i.e. a dead parameter.
-    """
+    """p_psi(z | h): a base path plus (for K > 1) a whole-trajectory rotation mixture."""
 
     def __init__(self, input_dim: int, rotations: int = 1, **kw):
         super().__init__(input_dim, **kw)
@@ -84,14 +57,7 @@ class PsiBarPhaseVAE(BarPhaseVAE):
 
     def kl_to_conditional_prior(self, z, mu_q, kappa_q, mu_p, kappa_p, rot_logits,
                                 mask):
-        """MC estimate of KL( q(z|h,b) || p_psi(z|h) ) at the sampled trajectory z.
-
-        For K > 1, p_psi is a MIXTURE over whole-trajectory rotations: component k
-        rotates the base path by 2 pi k / K with weight softmax(rot_logits)_k -- the
-        correlated this-all-shifts-together uncertainty a factorised posterior cannot
-        express. Single-sample MC because KL(vM || mixture) has no closed form; the
-        sample is the same reparameterised z the reconstruction already uses.
-        """
+        """MC estimate of KL( q(z|h,b) || p_psi(z|h) ) at the sampled trajectory z."""
         log_q = (vonmises_log_density(z, mu_q, kappa_q) * mask).sum(1)
         if rot_logits is None:
             log_p = (vonmises_log_density(z, mu_p, kappa_p) * mask).sum(1)
@@ -107,11 +73,7 @@ class PsiBarPhaseVAE(BarPhaseVAE):
         return log_q - log_p
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
-        """ELBO plus the psi terms; q trains against the PHYSICAL prior only.
-
-        Joint KL(q||psi) collapsed q onto the ignorant psi in every attempt; psi
-        chases a stop-gradient teacher instead (Sohn's two-step EB, as one run).
-        """
+        """ELBO plus the psi terms; q trains against the PHYSICAL prior only."""
         mu, kappa = self.encoder(h, mask, y)
         prior_out = self.prior_net(h, mask)
         mu_p, kappa_p = prior_out[0], prior_out[1]

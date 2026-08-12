@@ -1,24 +1,4 @@
-"""Spleeter 5-stem demixing for the Beat Transformer frontend. RUNS IN A SEPARATE ENV.
-
-Beat Transformer consumes Spleeter-demixed mel spectrograms, and Spleeter needs TensorFlow --
-which does not coexist with the chart env's torch stack. So the frontend shells out to this script
-under a Spleeter-equipped interpreter (default: the analyze-smc env, which has spleeter + the
-5-stem weights already cached from the SMC-paper analysis).
-
-    <spleeter-env-python> beat_transformer_demix.py in.wav out.npz [--model-path DIR]
-
-Writes out.npz with x: [5, T, 128] float32 -- log-compressed (power_to_db, ref=max, per stem)
-demixed mel spectrograms, EXACTLY the Demixed_DilatedTransformerModel input.
-
-The recipe is behavior-copied from the proven extractor in
-Analyze-SMC/scripts/run_beat_transformer.py (the SMC blind-spot paper's Beat Transformer runs),
-which itself mirrors Beat-Transformer/preprocessing/demixing.py: the masked STFTs are taken
-DIRECTLY from Spleeter's TensorFlow graph -- no ISTFT -> re-STFT round-trip -- then
-complex-averaged over the stereo channels, magnitude-squared, and mel-projected
-(sr 44100, n_fft 4096, hop 1024 -> fps 44100/1024, 128 mels, 30-11000 Hz).
-(The upstream preprocessing/demixing.py file itself has a dict-vs-append bug and cannot run
-as published; this is the working form of the same math.)
-"""
+"""Spleeter 5-stem demixing for the Beat Transformer frontend. RUNS IN A SEPARATE ENV."""
 import argparse
 import json
 import os

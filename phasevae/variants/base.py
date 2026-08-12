@@ -1,12 +1,4 @@
-"""The base hooks: tutorial §7, encoder-deployed, no conditional prior.
-
-``run.py`` drives training entirely through this interface and never branches on
-which variant is active. A variant is a sibling module (named by the config's
-``variant:`` key) exporting the same five functions; this file is both the default
-and the template. Variants extend by SUBCLASSING the base model, never by
-adding flags here -- if a change needs an ``if`` in run.py, it belongs in a variant
-module instead.
-"""
+"""The base hooks: tutorial §7, encoder-deployed, no conditional prior."""
 from __future__ import annotations
 
 import torch
@@ -20,7 +12,11 @@ def build_model(cfg, input_dim: int) -> BarPhaseVAE:
                        emission_layers=cfg.emission_layers,
                        emission_positional=cfg.emission_positional,
                        kappa_physical=cfg.kappa_physical,
-                       evidence=cfg.evidence)
+                       evidence=cfg.evidence,
+                       detector_layers=cfg.detector_layers,
+                       rate_init_seconds=cfg.rate_init_seconds,
+                       rate_bias_learnable=cfg.rate_bias_learnable,
+                       readout=cfg.readout)
 
 
 def optimizer(model, cfg):

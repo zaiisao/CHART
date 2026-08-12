@@ -1,24 +1,4 @@
-"""Isolation ladder: baseline -> anchor_k v2, ONE change per rung.
-
-The v2 variant shipped six changes under one name and we could not say which bought the
-F 0.468 -> 0.752. This module exposes each of them as an independent flag so a rung is a
-config that differs from the rung below it in exactly one key.
-
-    key            baseline (R0)      v2 (R5)
-    k_slots        0 (no k)           64
-    head_input     trunk_frame0       folded_acts
-    head_arch      linear             mlp
-    head_lr        0 (one group)      1e-3
-    rotation_aug   false              true
-
-R0  k_slots=0  trunk_frame0  linear            == baseline exactly
-R1  + k_slots=64, head_input=trunk_mean        == anchor_k v1
-R2  + head_input=folded_acts                   <- the representation change
-R3  + head_arch=mlp                            <- head capacity
-R4  + head_lr=1e-3                             <- the separate optimiser group
-R5  + rotation_aug=true                        == anchor_k v2 exactly
-R2b k_slots=0, head_input=folded_acts          <- representation WITHOUT k (off-ladder)
-"""
+"""Isolation ladder: baseline -> anchor_k v2, ONE change per rung."""
 from __future__ import annotations
 
 import math
@@ -67,8 +47,9 @@ class LadderVAE(BarPhaseVAE):
 
     # ---- head input representations -------------------------------------------------
     def bin_activations(self, h, mu, mask=None):
-        """[B,T,D],[B,T] -> [B,C,2]: frontend activations masked-mean pooled into C phase
-        bins under mu. Identical arithmetic to anchor_k.bin_activations (mu detached).
+        """[B,T,D],[B,T] -> [B,C,2]: activations masked-mean pooled into C phase bins.
+
+        Identical arithmetic to anchor_k.bin_activations (mu detached).
         """
         B, T = mu.shape
         C = self.slots

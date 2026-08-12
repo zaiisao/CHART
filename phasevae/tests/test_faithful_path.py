@@ -1,14 +1,4 @@
-"""Tests for the phasevae paths not covered by test_phasevae.py.
-
-Covered here: the free (per-frame) posterior branch of Encoder, the
-EmissionTransformer, the sampled-reconstruction ELBO path of BarPhaseVAE.forward,
-the reparameterised von Mises sampler, the KL of the free posterior against Monte
-Carlo, and the train-loop objective arithmetic in run.py.
-
-Every expected value is derived from a signature, docstring, or the mathematics it
-names -- never from running the implementation first. Contract violations, if any,
-keep their honest assertion under @pytest.mark.xfail(strict=False).
-"""
+"""Tests for the phasevae paths not covered by test_phasevae.py."""
 from __future__ import annotations
 
 import inspect
@@ -35,15 +25,7 @@ def _seed():
 
 
 def test_encoder_shapes_and_global_response():
-    """Shapes, kappa's range, and that perturbing ONE frame moves the whole trajectory.
-
-    The old assertion here was per-frame LOCALITY -- perturb frame k, mu[k] moves --
-    which described the free per-frame parameterisation this encoder no longer has.
-    mu is now offset + cumsum(pooled rate) with the offset a circular mean over every
-    frame, so a single perturbation propagates: it shifts the anchor (all frames) and
-    the pooled rate of its own span (that frame onward). Asserting locality now would
-    be asserting the absence of both.
-    """
+    """Shapes, kappa's range, and that perturbing ONE frame moves the whole trajectory."""
     _seed()
     enc = Encoder(input_dim=4)
     h = torch.randn(1, 200, 4)
@@ -67,9 +49,9 @@ def test_encoder_shapes_and_global_response():
 
 def test_emission_transformer_reads_only_phi_and_mask():
     """Input: the forward signature itself. Asserted: the only possible inputs are
-    phi and mask ('Reads the LATENT only, never h'), and the output on a [B,T]
-    phase is [B,T]. Why: Point 1 -- an emission that could receive h would fit the
-    target directly and kill the latent.
+        phi and mask ('Reads the LATENT only, never h'), and the output on a [B,T]
+        phase is [B,T]. Why: Point 1 -- an emission that could receive h would fit the
+        target directly and kill the latent.
     """
     code = EmissionTransformer.forward.__code__
     assert set(code.co_varnames[:code.co_argcount]) <= {"self", "phi", "mask"}
@@ -81,10 +63,10 @@ def test_emission_transformer_reads_only_phi_and_mask():
 
 def test_emission_transformer_time_constant_phi_gives_time_constant_logits():
     """Input: a TIME-CONSTANT phi sequence, use_positional=False. Asserted: all
-    logits on the sequence are equal. Why: without positional encoding a
-    self-attention stack is permutation-equivariant, so identical tokens must map
-    to identical outputs -- any variation would mean position information leaks in,
-    the exact shortcut the docstring flags.
+        logits on the sequence are equal. Why: without positional encoding a
+        self-attention stack is permutation-equivariant, so identical tokens must map
+        to identical outputs -- any variation would mean position information leaks in,
+        the exact shortcut the docstring flags.
     """
     _seed()
     net = EmissionTransformer(d_model=16, layers=2, heads=2, use_positional=False)
@@ -108,9 +90,9 @@ def test_emission_transformer_sensitive_to_phi():
 
 def test_emission_transformer_masked_frames_do_not_influence_unmasked():
     """Input: two batches identical on frames 0..7, differing ONLY on frames 8..15
-    which the mask marks as padding. Asserted: the logits on the unmasked frames
-    agree. Why: src_key_padding_mask semantics -- padded frames must be excluded
-    from attention, else padding length would change real predictions.
+        which the mask marks as padding. Asserted: the logits on the unmasked frames
+        agree. Why: src_key_padding_mask semantics -- padded frames must be excluded
+        from attention, else padding length would change real predictions.
     """
     _seed()
     net = EmissionTransformer(d_model=16, layers=2, heads=2)
@@ -147,22 +129,17 @@ def _batch(B=2, T=12):
 
 
 def _tv(B=2, T=12):
-    """targets/valid for the alignment objective: annotated downbeat FRAMES, padded.
-
-    y is no longer the observation, so a forward() call needs these instead. Frames are
-    spaced inside the window and well clear of T-1, since align_log_prob interpolates
-    between t_k and t_k + 1.
-    """
+    """targets/valid for the alignment objective: annotated downbeat FRAMES, padded."""
     t = torch.tensor([2.0, T / 2.0, T - 4.0])
     return t.expand(B, 3).contiguous(), torch.ones(B, 3)
 
 
 def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """Input: a padded batch through the transformer-emission forward, twice.
-    Asserted: elbo == recon - kl on each returned dict (the ELBO definition in the
-    forward docstring), and recon DIFFERS across the two calls. Why: the
-    reconstruction is the model's only Monte Carlo term (vonmises module
-    docstring), so with finite kappa two evaluations must draw different phases.
+        Asserted: elbo == recon - kl on each returned dict (the ELBO definition in the
+        forward docstring), and recon DIFFERS across the two calls. Why: the
+        reconstruction is the model's only Monte Carlo term (vonmises module
+        docstring), so with finite kappa two evaluations must draw different phases.
     """
     model = _tf_model()
     h, delta, mask, y = _batch()
@@ -192,10 +169,10 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
 
 def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     """Input: samples=3 with the sampler monkeypatched to return a counted,
-    per-call constant offset (0, 0.5, 1.0 rad). Asserted: the sampler is called
-    exactly 3 times and recon equals the arithmetic mean of the three hand-computed
-    masked Bernoulli log-likelihoods at mu + offset. Why: 'samples: Monte Carlo
-    samples for the reconstruction term' -- an average, not a sum.
+        per-call constant offset (0, 0.5, 1.0 rad). Asserted: the sampler is called
+        exactly 3 times and recon equals the arithmetic mean of the three hand-computed
+        masked Bernoulli log-likelihoods at mu + offset. Why: 'samples: Monte Carlo
+        samples for the reconstruction term' -- an average, not a sum.
     """
     offsets = [0.0, 0.5, 1.0, 0.25, 0.75, 0.125]
     calls = {"n": 0}
@@ -225,13 +202,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
 
 
 def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
-    """Sampler pinned to the mean: recon equals align_log_prob at phi = mu, by hand.
-
-    The old assertion was that recon equalled the masked Bernoulli log-likelihood of y
-    under the emission. That WAS the reconstruction; it is not any more. The emission
-    no longer appears in the training objective at all, which is why `b` sits at its
-    init in every run since 2191ea9 -- it receives no gradient.
-    """
+    """Sampler pinned to the mean: recon equals align_log_prob at phi = mu, by hand."""
     monkeypatch.setattr(model_mod, "sample_vonmises",
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
@@ -258,9 +229,9 @@ def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
 
 def test_sampler_gradient_wrt_mu_is_one():
     """Input: phi = mu + sample_vonmises(kappa), the exact composition the recon
-    path uses. Asserted: d(phi)/d(mu) == 1 elementwise. Why: the mean enters
-    additively outside the sampler (rotation equivariance of the von Mises), so
-    its pathwise gradient is exactly 1 -- the sampler docstring calls it exact.
+        path uses. Asserted: d(phi)/d(mu) == 1 elementwise. Why: the mean enters
+        additively outside the sampler (rotation equivariance of the von Mises), so
+        its pathwise gradient is exactly 1 -- the sampler docstring calls it exact.
     """
     _seed()
     mu = torch.zeros(50, requires_grad=True)
@@ -271,9 +242,9 @@ def test_sampler_gradient_wrt_mu_is_one():
 
 def test_sampler_gradient_wrt_kappa_exists_and_is_finite():
     """Input: kappa spanning small to large concentrations, requires_grad. Asserted:
-    backward succeeds and every gradient entry is finite. Why: the module promises
-    d(sample)/d(kappa) exists (reparameterised-rejection path), and the numerics
-    comments promise every derivative stays finite.
+        backward succeeds and every gradient entry is finite. Why: the module promises
+        d(sample)/d(kappa) exists (reparameterised-rejection path), and the numerics
+        comments promise every derivative stays finite.
     """
     _seed()
     kappa = torch.tensor([0.5, 5.0, 50.0, 2000.0, 1e5] * 20, requires_grad=True)
@@ -296,9 +267,9 @@ def test_sampler_huge_kappa_concentrates_at_mean():
 
 def test_sampler_circular_mean_matches_mu_at_kappa_five():
     """Input: 5000 draws at kappa = 5, shifted by mu = 1.1. Asserted: the empirical
-    circular mean atan2(E sin, E cos) is within 0.06 rad of mu. Why: the circular
-    mean of vM(mu, kappa) is mu; the standard error at n=5000, kappa=5 is well
-    under the tolerance.
+        circular mean atan2(E sin, E cos) is within 0.06 rad of mu. Why: the circular
+        mean of vM(mu, kappa) is mu; the standard error at n=5000, kappa=5 is well
+        under the tolerance.
     """
     _seed()
     mu = 1.1
@@ -312,18 +283,10 @@ def test_sampler_circular_mean_matches_mu_at_kappa_five():
 
 def test_kl_free_posterior_matches_monte_carlo_three_frames():
     """Input: a 3-frame free posterior (per-frame mu, moderate kappas). Asserted:
-    kl_to_physical_prior agrees with a seeded 400k-sample Monte Carlo estimate of
-    E_q[log q - log p] within 2% relative. Why: this is KL's definition, and it is the
-    independent check on the A_1(k3) A_2(k2) A_1(k1) product -- the MC estimator never
-    forms those factors, it just samples the three phases and evaluates the prior
-    density at 2*phi_2 - phi_1. A dropped A_2, a wrong coefficient, or a sign error all
-    move the value far beyond 2%.
-
-    Three frames is the minimum that exercises the chain at all: with the constant-rate
-    prior, phi_1 and phi_2 are unconditioned (uniform) and only t=3 has a transition.
-    kappa_p is lowered here so the MC estimate converges -- at kappa_p = 2000 the prior
-    density varies over ~1e3 nats across the sampled phases and the mean is dominated by
-    a handful of draws.
+        kl_to_physical_prior agrees with a seeded 400k-sample Monte Carlo estimate of
+        E_q[log q - log p] within 2% relative. Why: this is KL's definition, and it is the
+        independent check on the A_1(k3) A_2(k2) A_1(k1) product -- the MC estimator never
+        forms those factors, it just samples the three phases and evaluates the prior
     """
     scipy_special = pytest.importorskip("scipy.special")
     model = BarPhaseVAE(input_dim=4, d_model=8, kappa_physical=40.0)
@@ -351,11 +314,10 @@ def test_kl_free_posterior_matches_monte_carlo_three_frames():
 
 def test_kl_free_posterior_two_frames_is_entropy_to_uniform():
     """Input: a 2-frame crop. Asserted: KL == -H(q1) - H(q2) + 2*log(2*pi) EXACTLY.
-    Why: the constant-rate prior needs TWO predecessors, so with T=2 no transition term
-    exists and both frames are uniform -- KL(q || Uniform^2) = -H(q) + 2 log 2pi. This
-    also pins that the number of unconditioned frames is 2 and not 1: with the old
-    first-difference prior a T=2 crop DID have a chain term, and getting this boundary
-    wrong applies the prior to the wrong frames without changing any shape.
+        Why: the constant-rate prior needs TWO predecessors, so with T=2 no transition term
+        exists and both frames are uniform -- KL(q || Uniform^2) = -H(q) + 2 log 2pi. This
+        also pins that the number of unconditioned frames is 2 and not 1: with the old
+        first-difference prior a T=2 crop DID have a chain term, and getting this boundary
     """
     scipy_stats = pytest.importorskip("scipy.stats")
     model = BarPhaseVAE(input_dim=4, d_model=8)
@@ -375,13 +337,10 @@ def test_kl_free_posterior_two_frames_is_entropy_to_uniform():
 
 def test_train_loss_formula_matches_documented_objective():
     """Input: a real forward pass's out dict plus a fake args namespace. Asserted:
-    (a) run.train's source contains exactly the documented per-frame annealed loss
-    '-((out["recon"] - beta * out["kl"]) / frames).mean()' with frames =
-    mask.sum(1), and (b) that expression evaluated on the out dict equals the
-    hand-assembled scalar mean over crops of -(recon_i - beta*kl_i)/T_i. A full
-    1-step train() run is not exercised here: it requires the Batches/pinned-memory
-    stack and a gradient audit, so the objective is verified at the formula level
-    as the brief allows.
+        (a) run.train's source contains exactly the documented per-frame annealed loss
+        '-((out["recon"] - beta * out["kl"]) / frames).mean()' with frames =
+        mask.sum(1), and (b) that expression evaluated on the out dict equals the
+        hand-assembled scalar mean over crops of -(recon_i - beta*kl_i)/T_i. A full
     """
     src = inspect.getsource(run_mod.train)
     assert "frames = mask.sum(1)" in src

@@ -1,18 +1,4 @@
-"""The mainline config schema, loaded from ``config_schema.json``.
-
-Every key the MAINLINE understands lives in that table as key -> spec, where a spec is
-JSON Schema vocabulary (``type``, ``default``, ``enum``, ``minimum``) plus a required
-``description``. Two things follow from keeping the default and its rationale in one
-record: the prose cannot drift from the value it explains, and a config is checked by
-NAME, TYPE, ENUM and BOUND before anything is built -- ``--set emission=triangel``
-refuses at parse time instead of training for an hour under a silently ignored key.
-
-Variant-specific keys are still the variant module's own business (its ``DEFAULTS``
-dict); they are merged in here and name-checked, but only mainline keys are typed.
-
-    from phasevae.config import load_config
-    cfg, hooks = load_config("phasevae/configs/anchor_k.yaml", ["epochs=2"])
-"""
+"""The mainline config schema, loaded from ``config_schema.json``."""
 from __future__ import annotations
 
 import importlib
@@ -68,11 +54,7 @@ def defaults() -> dict:
 
 
 def load_config(path: str, overrides: list[str] = ()):
-    """YAML + --set overrides -> (cfg namespace, hooks module).
-
-    Unknown keys refuse, as do mainline keys of the wrong type or outside their
-    declared range -- all before any model or frontend is built.
-    """
+    """YAML + --set overrides -> (cfg namespace, hooks module)."""
     recipe = yaml.safe_load(pathlib.Path(path).read_text()) or {}
     for item in overrides:
         key, _, value = item.partition("=")

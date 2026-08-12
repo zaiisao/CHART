@@ -1,23 +1,4 @@
-"""Live song catalog: Beat This annotations + official 8-fold splits + local audio. NO CACHES.
-
-User decision 2026-07-15: activation caches are retired. The June cache builder was a second,
-uncertified code path through the frontend (its own audio loading, padding, unchunked forward);
-computing activations live through frontends/ makes live == eval by construction, so the whole
-"does the cache match the wrapper" question can never arise again. Cost: ~1-2 s of frontend forward
-per song per run, paid at run start instead of cached on disk.
-
-This module is the data half of that: the Song record and the coverage report, over
-    dataset_store/beat_this_annotations/<dataset>/    the official annotations + splits
-    dataset_store/audio_by_stem/<dataset>/            audio SYMLINKS named by annotation stem
-The audio tree is built and VERIFIED by ``unify_audio_layout.py``; because link names are
-annotation stems, audio lookup at load time is exact -- no name matching. The enumeration
-itself (walk the annotations, look up audio, group by fold) is written out in
-``dataset.load_dataset``. This module deliberately knows nothing about frontends or crops.
-
-Fold-honesty (standing directive): `fold` is the Beat This CV fold this song is HELD OUT of, read
-from the official 8-folds.split. Any evaluation on song s must use checkpoint fold{s.fold}; final0
-saw s in training.
-"""
+"""Live song catalog: Beat This annotations + official 8-fold splits + local audio. NO CACHES."""
 from pathlib import Path
 
 import numpy as np

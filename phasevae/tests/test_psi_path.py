@@ -1,28 +1,7 @@
-"""Tests for the psi-mode (conditional-prior) code paths of phasevae.
-
-Covered here and nowhere else: vonmises_log_density, the psi variant module's
-PosteriorEncoder / RotationPrior extensions, PsiBarPhaseVAE forward and its mixture
-KL, the psi deployment path of infer_phase, the target-blindness control on the
-deployed prior_net, the physics anchor's rotation invariance, and a psi state-dict
-roundtrip.
-
-Every expected value is derived from a signature, docstring, or the mathematics it
-names -- never from running the implementation first. Contract violations, if any,
-keep their honest assertion under @pytest.mark.xfail(strict=False).
-"""
+"""Tests for the psi-mode (conditional-prior) code paths of phasevae."""
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------------
-# SKIPPED WHOLESALE, deliberately. This module tests a variant whose forward() and
-# heads() are written against the per-frame Bernoulli observation model and the old
-# two-value heads() signature. Commit 2191ea9 replaced the observation with the
-# annotated downbeat TIMES (model.align_log_prob) and the anchor became a circular
-# mean over every frame, so these variants raise rather than silently mis-score.
-# They are BCE models: running them would put two different objectives under one
-# elbo column. Re-enable by deleting this block WHEN the variant is ported, not
-# before -- and expect the assertions themselves to need rewriting, since several
-# encode the Bernoulli composition.
 import pytest as _pytest
 _pytest.skip("variant not ported to the alignment objective (see 2191ea9)",
              allow_module_level=True)
@@ -66,9 +45,9 @@ def _batch(B=2, T=10):
 
 def test_vonmises_log_density_normalises_over_circle():
     """Input: a dense grid on [0, 2*pi) at several kappas. Asserted: the quadrature
-    of exp(log f) over the circle is 1. Why: 'Per-element log vM(z; mu, kappa)'
-    names a probability density on the circle; a density that does not integrate
-    to 1 has a wrong normaliser.
+        of exp(log f) over the circle is 1. Why: 'Per-element log vM(z; mu, kappa)'
+        names a probability density on the circle; a density that does not integrate
+        to 1 has a wrong normaliser.
     """
     z = torch.linspace(0.0, TWO_PI, 200_001, dtype=torch.float64)
     for k in (0.0, 0.5, 5.0, 200.0, 2000.0):
@@ -97,9 +76,9 @@ def test_vonmises_log_density_matches_scipy_logpdf():
 
 def test_vonmises_log_density_rotation_invariant():
     """Input: (z, mu) pairs and a set of global rotations c. Asserted:
-    log f(z + c; mu + c, k) == log f(z; mu, k). Why: the density depends on z and
-    mu only through z - mu (kappa*cos(z - mu) in the docstring), so a shared
-    rotation must cancel.
+        log f(z + c; mu + c, k) == log f(z; mu, k). Why: the density depends on z and
+        mu only through z - mu (kappa*cos(z - mu) in the docstring), so a shared
+        rotation must cancel.
     """
     _seed()
     z = torch.rand(30, dtype=torch.float64) * TWO_PI
@@ -127,10 +106,10 @@ def test_encoder_reads_target_requires_y():
 
 def test_encoder_reads_target_output_depends_on_y_and_h_unmutated():
     """Input: the same h with two different targets. Asserted: (mu, kappa) CHANGE
-    when y changes, and the h tensor is bit-identical before and after forward.
-    Why: reads_target=True makes q a posterior over (h, y) -- the target 'enters as
-    frame t's SECOND variable, joined here, never by mutating the feature tensor
-    upstream'.
+        when y changes, and the h tensor is bit-identical before and after forward.
+        Why: reads_target=True makes q a posterior over (h, y) -- the target 'enters as
+        frame t's SECOND variable, joined here, never by mutating the feature tensor
+        upstream'.
     """
     _seed()
     enc = PosteriorEncoder(input_dim=4, d_model=8)
@@ -159,9 +138,9 @@ def test_base_encoder_structurally_target_blind():
 
 def test_encoder_rotations_returns_third_output_of_shape_bk():
     """Input: Encoder(rotations=K) on a [B, T, D] batch. Asserted: forward returns
-    a 3-tuple whose third element has shape [B, K]. Why: the docstring promises
-    '[, rotation logits [B, K]]' -- one logit per whole-trajectory rotation, pooled
-    over frames, not per frame.
+        a 3-tuple whose third element has shape [B, K]. Why: the docstring promises
+        '[, rotation logits [B, K]]' -- one logit per whole-trajectory rotation, pooled
+        over frames, not per frame.
     """
     _seed()
     for K in (2, 5):
@@ -192,9 +171,9 @@ def test_encoder_rotations_zero_keeps_two_tuple():
 
 def test_psi_forward_returns_prior_anchor_and_elbo_identity():
     """Input: a padded batch through BarPhaseVAE(psi=True). Asserted: the dict
-    contains 'prior_anchor', and elbo == recon - kl exactly. Why: psi mode adds
-    the Eq. 27 physics-anchoring term to the output, and the ELBO definition
-    (recon minus KL) is unchanged by which prior the KL is taken against.
+        contains 'prior_anchor', and elbo == recon - kl exactly. Why: psi mode adds
+        the Eq. 27 physics-anchoring term to the output, and the ELBO definition
+        (recon minus KL) is unchanged by which prior the KL is taken against.
     """
     model = _psi_model()
     h, delta, mask, y = _batch()
@@ -206,11 +185,10 @@ def test_psi_forward_returns_prior_anchor_and_elbo_identity():
 
 def test_psi_kl_zero_when_prior_equals_posterior():
     """Input: psi model with K=1 whose prior_net is monkeypatched to return EXACTLY
-    the posterior's (mu, kappa). Asserted: the MEAN MC KL over many forward calls
-    is ~0, with tolerance set by the empirical sd of the estimates. Why:
-    KL(q || p) = E_q[log q(z) - log p(z)] = 0 when p == q; K=1 builds NO rotation
-    head (a one-logit softmax is constant, i.e. a dead parameter), so p_psi is the
-    bare base path and the densities coincide directly.
+        the posterior's (mu, kappa). Asserted: the MEAN MC KL over many forward calls
+        is ~0, with tolerance set by the empirical sd of the estimates. Why:
+        KL(q || p) = E_q[log q(z) - log p(z)] = 0 when p == q; K=1 builds NO rotation
+        head (a one-logit softmax is constant, i.e. a dead parameter), so p_psi is the
     """
     model = _psi_model(psi_rotations=1)
     h, delta, mask, y = _batch()
@@ -261,11 +239,10 @@ def test_psi_kl_invariant_to_constant_logit_shift():
 
 def test_psi_kl_invariant_to_cyclic_component_permutation():
     """Input: the mixture with its components cyclically permuted -- logits rolled
-    by j while the base path is rotated by -2*pi*j/K, so component k's mean
-    mu_p - 2*pi*j/K + 2*pi*k/K with weight w_{k-j} re-enumerates exactly the
-    original set of (weight, mean) pairs mod 2*pi. Asserted: identical KL. Why: a
-    mixture is a set of weighted components; relabelling them must not change its
-    density (the von Mises is 2*pi-periodic, so mod-2*pi means coincide).
+        by j while the base path is rotated by -2*pi*j/K, so component k's mean
+        mu_p - 2*pi*j/K + 2*pi*k/K with weight w_{k-j} re-enumerates exactly the
+        original set of (weight, mean) pairs mod 2*pi. Asserted: identical KL. Why: a
+        mixture is a set of weighted components; relabelling them must not change its
     """
     model = _psi_model(psi_rotations=6)
     K = model.psi_rotations
@@ -301,9 +278,9 @@ def test_psi_infer_phase_requires_eval_mode():
 
 def test_psi_infer_phase_is_prior_mu_plus_best_rotation():
     """Input: prior_net monkeypatched to fixed (mu_p, kappa_p, rot_logits) with a
-    known argmax per crop. Asserted: infer_phase == mu_p + 2*pi*argmax(logits)/K,
-    reconstructed by hand. Why: the psi deployment rule in infer_phase is exactly
-    'the conditional prior's base path shifted by the winning rotation'.
+        known argmax per crop. Asserted: infer_phase == mu_p + 2*pi*argmax(logits)/K,
+        reconstructed by hand. Why: the psi deployment rule in infer_phase is exactly
+        'the conditional prior's base path shifted by the winning rotation'.
     """
     model = _psi_model(psi_rotations=4)
     model.eval()
@@ -322,9 +299,9 @@ def test_psi_infer_phase_is_prior_mu_plus_best_rotation():
 
 def test_psi_infer_phase_never_consults_posterior_encoder():
     """Input: a psi model whose posterior encoder's forward is monkeypatched to
-    raise. Asserted: infer_phase still succeeds. Why: the posterior reads y and is
-    training scaffolding in psi mode; deployment must run entirely off p_psi(z|h),
-    or the model would be unusable exactly when the target is unavailable.
+        raise. Asserted: infer_phase still succeeds. Why: the posterior reads y and is
+        training scaffolding in psi mode; deployment must run entirely off p_psi(z|h),
+        or the model would be unusable exactly when the target is unavailable.
     """
     model = _psi_model()
     model.eval()
@@ -343,9 +320,9 @@ def test_psi_infer_phase_never_consults_posterior_encoder():
 
 def test_target_blindness_control_passes_on_psi_model():
     """Input: controls.assert_encoder_is_target_blind on a genuine psi model.
-    Asserted: no exception. Why: in psi mode the DEPLOYED net is prior_net, which
-    reads (h, delta) only, so both the structural and the behavioural check must
-    pass even though the posterior encoder legitimately reads y.
+        Asserted: no exception. Why: in psi mode the DEPLOYED net is prior_net, which
+        reads (h, delta) only, so both the structural and the behavioural check must
+        pass even though the posterior encoder legitimately reads y.
     """
     model = _psi_model()
     h, delta, mask, y = _batch()
@@ -355,10 +332,10 @@ def test_target_blindness_control_passes_on_psi_model():
 
 def test_target_blindness_control_catches_target_reading_prior_net():
     """Input: a psi model sabotaged so its prior_net has reads_target=True.
-    Asserted: the control raises AssertionError. Why: the control's whole purpose
-    is to refuse a deployed inference network that consumes the target -- a
-    y-reading prior_net is unusable at test time and must be caught before any
-    number is produced.
+        Asserted: the control raises AssertionError. Why: the control's whole purpose
+        is to refuse a deployed inference network that consumes the target -- a
+        y-reading prior_net is unusable at test time and must be caught before any
+        number is produced.
     """
     model = _psi_model()
     model.prior_net = PosteriorEncoder(input_dim=4, d_model=8)
@@ -373,11 +350,10 @@ def test_target_blindness_control_catches_target_reading_prior_net():
 
 def test_physics_anchor_invariant_to_global_rotation_of_prior_mean():
     """Input: kl_to_physical_prior at mu_p and at mu_p + c for several global
-    rotations c. Asserted: identical anchor value (float tolerance). Why: the
-    physical prior is uniform in phi_1 and Markov in increments, so the anchor
-    reads mu only through mu_t - mu_{t-1}; a shared rotation must cancel. This is
-    exactly why psi mode needs the rotation mixture: the anchor alone cannot pin
-    the absolute phase.
+        rotations c. Asserted: identical anchor value (float tolerance). Why: the
+        physical prior is uniform in phi_1 and Markov in increments, so the anchor
+        reads mu only through mu_t - mu_{t-1}; a shared rotation must cancel. This is
+        exactly why psi mode needs the rotation mixture: the anchor alone cannot pin
     """
     model = _psi_model()
     _seed()
@@ -398,10 +374,10 @@ def test_physics_anchor_invariant_to_global_rotation_of_prior_mean():
 
 def test_psi_state_dict_roundtrip_bit_identical_inference():
     """Input: a psi model's state_dict loaded into a freshly constructed psi model
-    with different random init. Asserted: infer_phase output bit-identical between
-    the two in eval mode. Why: the checkpoint must carry the entire deployed
-    object (prior_net weights included); any parameter or buffer missing from the
-    state_dict would silently change the deployed phase.
+        with different random init. Asserted: infer_phase output bit-identical between
+        the two in eval mode. Why: the checkpoint must carry the entire deployed
+        object (prior_net weights included); any parameter or buffer missing from the
+        state_dict would silently change the deployed phase.
     """
     model = _psi_model()
     h, delta, _, _ = _batch()

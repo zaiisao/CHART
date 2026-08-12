@@ -210,3 +210,6 @@ external/beatfm_repro/
 # Experiment result dumps (per-song estimate arrays, activation caches; regenerable)
 *.npy
 *.npz
+
+# Research documents (private; do NOT push)
+*.pdf

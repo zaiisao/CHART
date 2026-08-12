@@ -1,32 +1,4 @@
-"""Beat This frontend (Foscarin, Schlueter & Widmer, ISMIR 2024; external/beat_this submodule).
-
-Wraps the OFFICIAL beat_this.inference.Audio2Frames -- their spectrogram, their chunked
-split-predict-aggregate, their checkpoint loading -- rather than re-plumbing the model. We add only
-the property surface the Tracker needs (fps, ACTIVATION_FORM) and optional resampling of the
-activation grid.
-
-Training-loop factorization (the Frontend data contract):
-  * ``prepare_input`` = their exact log-mel (22050 Hz, n_fft 1024, hop 441, 128 mels,
-    log1p(1000x), Audio2Frames.signal2spect verbatim) -> [T, 128] float32 at 50 fps.
-    Checkpoint-independent, so the excerpt dataset caches ONE copy per song for all folds.
-  * ``forward_features`` = batched frozen forward on mel windows. Their model is trained
-    on 1500-frame chunks and their inference splits longer input at 1500 with 6-frame
-    borders (keep_first) -- windows longer than one chunk get the SAME split-predict-
-    aggregate here, applied batch-wise, because that is this frontend's own demand.
-
-Properties of what this emits:
-  * the grid is EXACTLY 50 fps (22050 Hz audio, hop 441) -- FPS is a fact of the hop,
-    and every consumer reads it off the class rather than assuming it.
-  * activations are LOGITS (ACTIVATION_FORM="logit"): Beat This's own DBN path feeds
-    sigmoid(logits) to madmom, and the Tracker applies the same conversion where a bar-pointer
-    model wants probabilities.
-
-Checkpoints (all cached locally under ~/.cache/torch/hub/checkpoints/):
-  * "final0" -- trained on everything except GTZAN. Fine for deployment and demos; NOT fold-honest
-    for evaluation on the training datasets.
-  * "fold0".."fold7" -- the Beat This 8-fold protocol. For any number reported on our val folds,
-    use the checkpoint whose held-out fold matches; final0 numbers on those songs are leakage.
-"""
+"""Beat This frontend (Foscarin, Schlueter & Widmer, ISMIR 2024; external/beat_this submodule)."""
 import torch
 
 from . import Frontend
@@ -66,15 +38,7 @@ class BeatThisFrontend(Frontend):
 
     @torch.no_grad()
     def get_features(self, signal, sample_rate: int) -> torch.Tensor:
-        """[num_samples] mono audio -> [num_frames, num_channels] at FPS (50).
-
-        Any sample rate (Beat This resamples internally). Channels: (beat, downbeat)
-        LOGITS in "activations" mode, penultimate transformer_blocks features in
-        "features" mode, and [features ⊕ beat ⊕ downbeat] ([T, C+2], activations LAST)
-        in "features+activations" mode — one forward pass for both depths, valid because
-        the task heads are frame-wise linears on the features (commutation with the
-        chunk aggregation is verified in _penultimate's docstring).
-        """
+        """[num_samples] mono audio -> [num_frames, num_channels] at FPS (50)."""
         if self.output == "activations":
             beat_logits, downbeat_logits = self._audio2frames(signal, sample_rate)
             out = torch.stack([beat_logits, downbeat_logits], dim=-1)         # [T@50fps, 2]
@@ -94,12 +58,7 @@ class BeatThisFrontend(Frontend):
         return np.ascontiguousarray(spect.cpu().numpy(), dtype=np.float32)
 
     def forward_features(self, batch) -> torch.Tensor:
-        """[B, T, 128] mel windows -> [B, T, num_channels] in the instance's output mode.
-
-        T <= 1500 is one forward; longer runs their split-predict-aggregate (chunk 1500,
-        border 6, keep_first) batch-wise -- window starts depend only on T, so one split
-        serves the whole batch.
-        """
+        """[B, T, 128] mel windows -> [B, T, num_channels] in the instance's output mode."""
         batch = batch.to(self.device)
         num_frames = batch.shape[1]
         if num_frames <= self._CHUNK_SIZE:
@@ -138,11 +97,7 @@ class BeatThisFrontend(Frontend):
         return captured[0].float()
 
     def _head_channels(self, features: torch.Tensor) -> torch.Tensor:
-        """[B, T, C] features -> the instance's output mode ([B, T, 2/C/C+2]).
-
-        The task heads are frame-wise linears on the features, so computing them here is
-        exactly the model's own logits path (verified in _penultimate's docstring).
-        """
+        """[B, T, C] features -> the instance's output mode ([B, T, 2/C/C+2])."""
         if self.output == "features":
             return features
         heads = self._audio2frames.model.task_heads(features)
@@ -158,20 +113,7 @@ class BeatThisFrontend(Frontend):
     _BORDER_SIZE = 6
 
     def _penultimate(self, signal, sample_rate: int) -> torch.Tensor:
-        """[T, transformer_dim] transformer_blocks output.
-
-        The model with its final task heads cut off, non-destructively: a forward hook
-        captures the heads' input during the normal forward pass (the heads still run;
-        their logits are ignored).
-
-        Replicates Spect2Frames.spect2frames' split-predict-aggregate exactly (same split_piece,
-        chunk_size=1500, border_size=6, overlap_mode="keep_first"), applied to feature chunks
-        instead of logit chunks: borders are discarded, and earlier chunks win in overlaps
-        (iterate reversed, later writes overwritten by earlier ones). Verified in __main__:
-        task_heads(aggregated features) == aggregated logits (exact on a single chunk, float noise
-        ~1e-6 across separate CUDA passes on multi-chunk), which certifies both the hook placement
-        and the aggregation, since the heads are frame-wise.
-        """
+        """[T, transformer_dim] transformer_blocks output."""
         from beat_this.inference import split_piece
 
         model = self._audio2frames.model

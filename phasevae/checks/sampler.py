@@ -1,15 +1,4 @@
-"""Control 1: the von Mises sampler against scipy, before any training happens.
-
-A previous implementation in this project returned E[cos x] ~ 0.8 regardless of kappa,
-and every number taken through it was worthless. Three independent checks:
-  * mean resultant length E[cos x] vs the analytic A(kappa) = I1/I0,
-  * a tail comparison: P(|x| > pi/2) vs scipy's survival function,
-  * a two-sample Kolmogorov-Smirnov test against scipy's own sampler,
-plus a finite-difference check that d E[cos x] / d kappa flows (the sample is
-reparameterised, not detached).
-
-Run: PYTHONPATH=. python -m phasevae.checks.sampler
-"""
+"""Control 1: the von Mises sampler against scipy, before any training happens."""
 from __future__ import annotations
 
 import numpy as np

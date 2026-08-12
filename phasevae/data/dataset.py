@@ -1,11 +1,4 @@
-"""The song catalog and the CV split, plus the true-phase reference used for scoring.
-
-Crop construction lived here too until the excerpt pipeline replaced it: windows are cut
-in data/excerpts.py from a cached, model-free input representation, so nothing in this
-module builds features or touches audio. What remains is the enumeration (which songs
-exist, which fold each is held out of) and true_phase, the annotated trajectory every
-trajectory-quality measurement compares against.
-"""
+"""The song catalog and the CV split, plus the true-phase reference used for scoring."""
 from __future__ import annotations
 
 import numpy as np
@@ -16,21 +9,7 @@ MIN_DOWNBEATS = 4
 
 
 def true_phase(crop):
-    """(phase [T], valid [T]) -- the true bar phase per frame. SCORING ONLY.
-
-    Linear interpolation between consecutive annotated downbeats, so phase is exactly 0
-    at each one and 2*pi just before the next. Frames outside the annotated span are
-    marked invalid rather than extrapolated. Nothing on the deployable path may read this.
-    The frame grid comes from the crop itself (``fps`` key) -- there is no global grid.
-
-    Exists for ONE reason: F(+-70 ms) is blind to what phase does between downbeats. A
-    model whose F is high because its wrap TIMES land right, with an otherwise arbitrary
-    trajectory, is indistinguishable from one that learned the bar pointer -- measured:
-    the spike train scored |mu - oracle| 1.44 rad against 1.57 for chance while advancing
-    at 0.715 rad/frame, and the anchor read-out lifted F 0.468 -> 0.752 with training
-    contributing 0.002. Comparing mu to this, frame by frame, is the only thing that
-    separates the two. Requires ``anchors`` (bracketed downbeats), not downbeat_times.
-    """
+    """(phase [T], valid [T]) -- the true bar phase per frame. SCORING ONLY."""
     n = len(crop["y"])
     times = crop["t0"] + np.arange(n) / crop["fps"]
     downbeats = crop["anchors"]
@@ -42,14 +21,7 @@ def true_phase(crop):
 
 
 def load_catalog(datasets=None) -> dict:
-    """The song catalog, grouped by CV fold (fold -> [Song]).
-
-    Every song with BOTH a .beats annotation and an audio link. Links are named by
-    annotation stem (built and VERIFIED by unify_audio_layout.py) so the lookup is
-    exact -- no name matching here. A dataset with no audio is silently absent;
-    songs.coverage_report() shows it. fold None = the test-only/gtzan group, held out
-    of EVERY checkpoint.
-    """
+    """The song catalog, grouped by CV fold (fold -> [Song])."""
     songs_by_fold: dict = {}
     for dataset_dir in sorted(ANNOTATIONS_ROOT.iterdir()):
         dataset = dataset_dir.name
@@ -83,11 +55,7 @@ def load_catalog(datasets=None) -> dict:
 
 
 def split_songs(val_fold, limit_per_fold=None):
-    """(train, val, test) Song lists: train folds / fold VAL_FOLD / fold None (gtzan).
-
-    The song-level counterpart of split_folds -- same policy, one owner. limit_per_fold
-    trims each fold for smoke runs.
-    """
+    """(train, val, test) Song lists: train folds / fold VAL_FOLD / fold None (gtzan)."""
     # JA: folds is a dictionary with keys 0, 1, 2, 3, 4, 5, 6, 7, None. Each key
     # corresponds to a fold number and the value is a list of Song objects in that fold.
     # None corresponds to the test-only group that is held out of every checkpoint.
