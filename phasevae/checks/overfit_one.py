@@ -24,6 +24,11 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=400)
     p.add_argument("--every", type=int, default=25)
     p.add_argument("--gpu", type=int, default=1, choices=(0, 1, 2, 3))
+    p.add_argument("--oracle-tempo", action="store_true")
+    p.add_argument("--kl-only", action="store_true")
+    p.add_argument("--pin-tempo", action="store_true")
+    p.add_argument("--pin-gain", action="store_true")
+    p.add_argument("--lr-anneal", type=float, default=0.0)
     p.add_argument("--plot", default="/tmp/overfit_emission.png",
                    help='PNG of emission vs ground truth at each snapshot; "" disables')
     return p.parse_args()
@@ -63,6 +68,23 @@ def main() -> None:
     torch.manual_seed(0)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
     opt, clip_params = hooks.optimizer(model, cfg)
+    if args.pin_gain:
+        with torch.no_grad():
+            model.emission_b_raw.fill_(2.0)
+        model.emission_a.requires_grad_(False)
+        model.emission_b_raw.requires_grad_(False)
+    if args.oracle_tempo:
+        with torch.no_grad():
+            model.encoder.out.bias[2] = (math.log(true_dotphi)
+                - 0.5 * (math.log(0.01) + math.log(0.2)))
+    if args.pin_tempo:
+        raw_value = math.log(true_dotphi) - 0.5 * (math.log(0.01) + math.log(0.2))
+        orig_channels = model.encoder.output_channels
+        def pinned_channels(trunk):
+            r = orig_channels(trunk)
+            r["log_dotphi"] = torch.full_like(r["log_dotphi"], raw_value)
+            return r
+        model.encoder.output_channels = pinned_channels
 
     # ONCE: the frontend is frozen, so its features never change. Recomputing them per
     # epoch is pure waste and drags 20M parameters into the graph.
@@ -76,8 +98,16 @@ def main() -> None:
     for epoch in range(args.epochs):
         model.train()
         hooks.on_epoch(model, cfg, epoch)
+        if args.lr_anneal and epoch == cfg.sharpness_warmup:
+            for g in opt.param_groups:
+                g["lr"] *= args.lr_anneal
+        if args.pin_gain:
+            model.emission_a.data.fill_(2.2 - float(model.emission_b))
         out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
-        loss = -(hooks.objective(out, run_mod.beta_at(epoch, cfg), cfg) / frames).mean()
+        if args.kl_only:
+            loss = (out["kl"] / frames).mean()
+        else:
+            loss = -(hooks.objective(out, run_mod.beta_at(epoch, cfg), cfg) / frames).mean()
 
         opt.zero_grad()
         loss.backward()

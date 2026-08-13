@@ -98,7 +98,7 @@ class Encoder(nn.Module):
         lo, hi = TEMPO_LO, TEMPO_HI
         m = TEMPO_BOUND_MARGIN
         mid, half = 0.5 * (lo + hi), 0.5 * (hi - lo)
-        d = log_dotphi - mid
+        d = log_dotphi
         flat = half - m
         over = (d.abs() - flat).clamp(min=0.0)
         squashed = flat + m * torch.tanh(over / m)
@@ -139,9 +139,11 @@ class Encoder(nn.Module):
             channels["log_sigma_dotphi"], log_dotphi, seg, w)
 
         dotphi, mu0 = self._ramp(log_dotphi)
-        mu = mu0
+        a = torch.sigmoid(channels["downbeat_logit"]) * w
+        offset, _ = self._anchor(mu0.detach(), a)
+        mu = mu0 + offset[:, None]
 
-        tempo_prior = self._tempo_log_prior(torch.log(dotphi), seg, w)
+        tempo_prior = self._tempo_log_prior(log_dotphi, seg, w)
 
         return mu, kappa, {"tempo_prior": tempo_prior,
                            "tempo_entropy": tempo_entropy}
@@ -155,18 +157,15 @@ class Encoder(nn.Module):
 
         if seg is not None:
             n_seg = int(seg.max().item()) + 1
-            counts = sigma.new_zeros(sigma.shape[0], n_seg).scatter_add(1, seg, w)
             eps = torch.gather(torch.randn(sigma.shape[0], n_seg, device=sigma.device,
                                            dtype=sigma.dtype), 1, seg)
-            per_bar_weight = w / torch.gather(counts, 1, seg).clamp(min=1.0)
         else:
             eps = torch.randn_like(sigma)
-            per_bar_weight = w
 
         if self.training:
             log_dotphi = log_dotphi + sigma * eps
         entropy = ((0.5 * math.log(2.0 * math.pi * math.e) + torch.log(sigma))
-                   * per_bar_weight).sum(1)
+                   * w).sum(1)
         return log_dotphi, entropy
 
     def _tempo_log_prior(self, log_dotphi, seg, w):
@@ -181,8 +180,8 @@ class Encoder(nn.Module):
             return init
 
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
-        crossing = (seg[:, 1:] != seg[:, :-1]) & (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        walk = -(step.abs() / TEMPO_WALK_B + math.log(2.0 * TEMPO_WALK_B)) * crossing
+        pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        walk = -(step.abs() / TEMPO_WALK_B + math.log(2.0 * TEMPO_WALK_B)) * pair
         return init + walk.sum(1)
 
     @staticmethod
@@ -346,10 +345,20 @@ class BarPhaseVAE(nn.Module):
         for _ in range(samples):
             phi = mu + sample_vonmises(kappa)
             w = torch.ones_like(y) if mask is None else mask
-            pw = torch.where(y > 0.5, pos_weight, 1.0) * w
-            bce = torch.nn.functional.binary_cross_entropy_with_logits(
-                self.emission_logits(phi, mask), y, reduction="none")
-            recon = recon - (bce * pw).sum(1)
+            logits = self.emission_logits(phi, mask)
+            pos = (y > 0.5) & (w > 0)
+            log_miss = -torch.nn.functional.softplus(logits)
+            start = pos & ~torch.nn.functional.pad(pos, (1, 0))[:, :-1]
+            run_id = torch.cumsum(start.long(), dim=1) * pos.long()
+            n_run = int(run_id.max().item()) + 1
+            miss_sum = logits.new_zeros(logits.shape[0], n_run).scatter_add(
+                1, run_id, log_miss * pos.to(log_miss.dtype))
+            counts = logits.new_zeros(logits.shape[0], n_run).scatter_add(
+                1, run_id, pos.to(log_miss.dtype))
+            hit = torch.log1p(-torch.exp(miss_sum).clamp(max=1.0 - 1e-6))
+            event_ll = (hit[:, 1:] * (counts[:, 1:] > 0)).sum(1)
+            neg_ll = (log_miss * (~pos).to(log_miss.dtype) * w).sum(1)
+            recon = recon + pos_weight * event_ll + neg_ll
 
         recon = recon / samples
 
