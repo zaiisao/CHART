@@ -14,7 +14,7 @@ def assert_no_duplicate_crops(crops):
 
 
 def assert_encoder_is_target_blind(model, batch):
-    """The encoder may read h and the GIVEN bar rate delta -- never the target."""
+    """The encoder may read h and the GIVEN bar tempo delta -- never the target."""
     model.eval()
     deployed = model.deployed_net
     allowed = {"self", "h", "mask"}

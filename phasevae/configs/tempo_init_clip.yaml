@@ -1,7 +1,5 @@
-# ARM 2 of the 2026-08-12 rate-init/clip test: arm 1 PLUS per-tensor clipping. Control = /tmp/thaw10 (F 0.206).
+# ARM 2 of the 2026-08-12 tempo-init/clip test: arm 1 PLUS per-tensor clipping. Control = /tmp/thaw10 (F 0.206).
 emission: triangle
-drift_bound: 0.01
-bar_rate: true
 pos_weight: 1.0
 epochs: 60
 beta_warmup: 0
@@ -10,6 +8,4 @@ batch_size: 16
 lr: 3.0e-5
 kappa_physical: 50.0   # the control's value, NOT the schema default 383
 frontend_lr_scale: 1.0
-rate_init_seconds: 1.92
-rate_bias_learnable: true
 clip_per_group: true

@@ -1,7 +1,7 @@
 # baseline.yaml's recipe + the anchor as a discrete TIME grid (variant: anchor_time).
 #
 # UNMEASURED. No run of this config exists yet. It is the MVP for one hypothesis --
-# "enumerating the anchor is what makes the rate learnable" -- and the number to read is
+# "enumerating the anchor is what makes the tempo learnable" -- and the number to read is
 # NOT F but `advance`, which the base recipe pins at its 0.2 clamp against a true
 # 0.025-0.063. F cannot separate a bar pointer from a frozen path that happens to cross
 # zero in the right places; advance and phase_err can.
@@ -10,16 +10,16 @@
 #   Hq -> 1.0            the evidence head is not concentrating; suspect the head, not the
 #                        mechanism, and try the warm-start diagnostic arm
 #   Hq falls, then
-#   advance -> 0.03-0.06 hypothesis confirmed: the anchor gated the rate
+#   advance -> 0.03-0.06 hypothesis confirmed: the anchor gated the tempo
 #   Hq falls, advance
-#   stays at 0.2         placement is fixed and the rate is a SEPARATE breaker; next target
+#   stays at 0.2         placement is fixed and the tempo is a SEPARATE breaker; next target
 #                        is the saturated emission (kappa pinned at MAX_KAPPA)
 #   advance moves first  the causal story is wrong
 #
 # gtzan decides. The val fold is asap, which is the WORST corpus for this family: 23.9% of
 # its windows contain a stretch longer than 1.5 bars with no annotated downbeat (corpus
 # median 1.02), and a pointer that emits every bar unconditionally must produce false
-# positives there. gtzan's rate is 0.8%. Treat val as a diagnostic, not a verdict.
+# positives there. gtzan's tempo is 0.8%. Treat val as a diagnostic, not a verdict.
 #
 # drift_bound and bar_rate are deliberately ABSENT: they are dead keys that the schema
 # still declares, so setting them here would look like configuration and do nothing.

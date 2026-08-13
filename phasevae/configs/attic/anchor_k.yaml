@@ -14,8 +14,6 @@
 # dominant lever. Single seed, dev protocol; folds+seeds owed before any external claim.
 variant: anchor_k
 emission: triangle
-drift_bound: 0.01
-bar_rate: true
 pos_weight: 1.0
 epochs: 60
 beta_warmup: 0

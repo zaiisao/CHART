@@ -120,18 +120,4 @@ def collate_excerpts(batch: list) -> dict:
         out[key] = torch.tensor([item[key] for item in batch])
     for key in ("downbeat_times", "anchors", "dataset", "song_id"):
         out[key] = [item[key] for item in batch]
-    out["targets"], out["valid"] = _downbeat_targets(batch)
     return out
-
-
-def _downbeat_targets(batch: list):
-    """[B, K] annotated downbeat times as window-relative FRAME indices, and their mask."""
-    times = [(np.asarray(item["downbeat_times"], dtype=np.float32)
-              - float(item["t0"])) * float(item["fps"]) for item in batch]
-    width = max((len(t) for t in times), default=0)
-    targets = torch.zeros(len(batch), width, dtype=torch.float32)
-    valid = torch.zeros(len(batch), width, dtype=torch.float32)
-    for i, t in enumerate(times):
-        targets[i, :len(t)] = torch.from_numpy(t)
-        valid[i, :len(t)] = 1.0
-    return targets, valid

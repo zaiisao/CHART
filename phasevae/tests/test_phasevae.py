@@ -15,7 +15,9 @@ from phasevae.scoring import controls as controls_mod
 from phasevae.scoring.evaluation import f_measure, null_times, peak_times
 from phasevae.model import (BarPhaseVAE, Encoder, KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI,
                             bounded_kappa, downbeat_frames, inverse_softplus,
-                            vonmises_entropy)
+                            vonmises_entropy,
+                            TEMPO_SIGMA_CEIL, TEMPO_SIGMA_INIT)
+from phasevae.vonmises import log_i0, mean_resultant, sample_vonmises
 
 from phasevae.data.features import FPS, atomic_save_npy
 
@@ -196,7 +198,7 @@ def test_vonmises_entropy_uniform_limit_and_scipy():
 
 
 def test_encoder_trajectory_rotates_monotonically_by_construction():
-    """mu = offset + cumsum(exp(pooled log-rate)): rotation is STRUCTURAL, not learned."""
+    """mu = offset + cumsum(exp(pooled log-dotphi)): rotation is STRUCTURAL, not learned."""
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
     h = torch.randn(2, 300, 4)
@@ -204,52 +206,14 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
 
     inc = mu[:, 1:] - mu[:, :-1]
 
-    # 1. strictly increasing: the rate is exp(...) so every step is positive. A frozen or
+    # 1. strictly increasing: the tempo is exp(...) so every step is positive. A frozen or
     #    sign-balanced trajectory -- the measured collapse -- is unrepresentable.
     assert torch.all(inc > 0), "phase is not monotonically advancing"
 
-    # 2. constant within a pooling span: within-bar increment variance is 100% of what the
-    #    collapsed model produced and 0% of what the annotations contain, so the degrees of
-    #    freedom are DELETED here rather than taxed by the prior.
-    for start in (0, 50, 100):
-        block = inc[:, start:start + 49]
-        assert torch.allclose(block, block[:, :1].expand_as(block), atol=1e-6), \
-            "increment is not constant inside a pooling span"
-
-    # 3. the rate lands in the physical band at initialisation (a 0.6-12 s bar), which is
+    # 3. the tempo lands in the physical band at initialisation (a 0.6-12 s bar), which is
     #    what puts a fresh model inside the +-3% basin where the reconstruction gradient
-    #    on the rate is coherent at all.
+    #    on the tempo is coherent at all.
     assert 0.01 <= float(inc.mean()) <= 0.2
-
-
-def test_anchor_reads_every_frame_not_just_frame_zero():
-    """The anchor must be a function of the WHOLE window, and gradient must reach it."""
-    _seed()
-    enc = Encoder(input_dim=4, d_model=8, pool_span=50)
-    mask = torch.ones(2, 200)
-    h = torch.randn(2, 200, 4)
-    mu, kappa, anchor = enc(h, mask)
-
-    late = h.clone()
-    late[:, 150:] += 3.0                     # touch only the tail
-    mu_late, _k, anchor_late = enc(late, mask)
-    assert not torch.allclose(anchor["shift"], anchor_late["shift"], atol=1e-6), \
-        "a late-frame perturbation left the anchor unchanged: it is not reading them"
-
-    # the ramp itself must be anchor-free, so that shift is the ONLY rotation. If both
-    # could rotate the trajectory only their sum would be identified -- the recorded
-    # gauge failure where an offset head abdicated to 459 ms.
-    assert torch.allclose(mu[:, 0], anchor["shift"], atol=1e-5), \
-        "mu[0] is not the shift alone: the ramp is carrying an offset of its own"
-
-    # normalised resultant is a genuine agreement fraction
-    assert torch.all((anchor["resultant"] >= 0.0) & (anchor["resultant"] <= 1.0))
-
-    enc.zero_grad()
-    (mu.sum() + kappa.sum()).backward()
-    for c, name in ((0, "evidence"), (2, "log kappa"), (3, "log rate")):
-        g = float(enc.out.weight.grad[c].abs().sum())
-        assert g > 0.0, f"channel {c} ({name}) receives no gradient (dead head)"
 
 
 def test_encoder_target_blind():
@@ -345,7 +309,7 @@ def test_emission_b_floor_survives_state_dict_roundtrip():
         "scheduled emission floor lost across save/load"
 
 
-def test_kl_to_physical_prior_nonnegative():
+def test_kl_jitter_nonnegative():
     """KL(q||p) >= 0 for any q and p; the closed form must respect this up to float
     tolerance across many random (mu, kappa, delta) draws.
     """
@@ -356,70 +320,47 @@ def test_kl_to_physical_prior_nonnegative():
         mu = (torch.rand(B, T) * 2 - 1) * math.pi
         kappa = torch.rand(B, T) * 3000 + 1.0
         mask = torch.ones(B, T)
-        kl = model.kl_to_physical_prior(mu, kappa, mask)
+        kl = model.kl_jitter(mu, kappa, mask)
         assert torch.all(kl > -1e-3), f"negative KL {kl.min().item()}"
 
 
-def test_kl_to_physical_prior_analytic_three_frame():
-    """T=3 hand computation against the docstring's constant-rate prior."""
-    scipy_stats = pytest.importorskip("scipy.stats")
+def test_kl_jitter_analytic_three_frame():
+    """T=3 hand computation: same-mean vM KL per frame, summed under the mask."""
     scipy_special = pytest.importorskip("scipy.special")
     model = BarPhaseVAE(input_dim=4, d_model=8)
     mu = torch.tensor([[0.30, 0.36, 0.43]], dtype=torch.float64)
-    kappa = torch.tensor([[800.0, 1200.0, 950.0]], dtype=torch.float64)
+    kappas = (800.0, 1200.0, 950.0)
     mask = torch.ones(1, 3, dtype=torch.float64)
-    got = model.kl_to_physical_prior(mu, kappa, mask).item()
+    got = model.kl_jitter(mu, torch.tensor([list(kappas)], dtype=torch.float64), mask).item()
+
+    def log_i0(k):
+        return float(np.log(scipy_special.ive(0, k)) + k)
 
     def A1(k):
-        return scipy_special.ive(1, k) / scipy_special.ive(0, k)
+        return float(scipy_special.ive(1, k) / scipy_special.ive(0, k))
 
-    def A2(k):
-        return scipy_special.ive(2, k) / scipy_special.ive(0, k)
-
-    entropies = [float(scipy_stats.vonmises(kappa=float(k)).entropy())
-                 for k in (800.0, 1200.0, 950.0)]
-    log_i0_p = float(np.log(scipy_special.ive(0, KAPPA_PHYSICAL)) + KAPPA_PHYSICAL)
-    accel = 0.43 - 2 * 0.36 + 0.30
-    cross = (KAPPA_PHYSICAL * A1(950.0) * A2(1200.0) * A1(800.0) * math.cos(accel)
-             - math.log(TWO_PI) - log_i0_p)
-    expected = -sum(entropies) - (-2 * math.log(TWO_PI) + cross)
-
-    # tolerance limited by scipy's own vonmises.entropy precision at large kappa
-    assert got == pytest.approx(expected, abs=1e-3)
+    expected = sum(log_i0(KAPPA_PHYSICAL) - log_i0(k) + A1(k) * (k - KAPPA_PHYSICAL)
+                   for k in kappas)
+    assert got == pytest.approx(expected, rel=1e-9)
 
 
-def test_kl_to_physical_prior_second_order_needs_a2_not_a1_squared():
-    """A_2(kappa) != A_1(kappa)^2, so the closed form must not use the square."""
-    scipy_special = pytest.importorskip("scipy.special")
+def test_kl_jitter_zero_at_the_prior_and_masked_frames_free():
+    """kappa == kappa_physical costs exactly 0, and a masked frame contributes 0."""
     model = BarPhaseVAE(input_dim=4, d_model=8)
-    mu = torch.tensor([[0.1, 0.2, 0.35]], dtype=torch.float64)
-    kappa = torch.full((1, 3), 2.0, dtype=torch.float64)
+    mu = torch.tensor([[0.30, 0.36, 0.43]], dtype=torch.float64)
+    kappa = torch.full((1, 3), KAPPA_PHYSICAL, dtype=torch.float64)
     mask = torch.ones(1, 3, dtype=torch.float64)
-    got = model.kl_to_physical_prior(mu, kappa, mask).item()
+    assert model.kl_jitter(mu, kappa, mask).item() == pytest.approx(0.0, abs=1e-12)
 
-    a1 = float(scipy_special.ive(1, 2.0) / scipy_special.ive(0, 2.0))
-    a2 = float(scipy_special.ive(2, 2.0) / scipy_special.ive(0, 2.0))
-    accel = 0.35 - 2 * 0.2 + 0.1
-    log_i0_p = float(np.log(scipy_special.ive(0, KAPPA_PHYSICAL)) + KAPPA_PHYSICAL)
-
-    def kl_with(middle):
-        cross = (KAPPA_PHYSICAL * a1 * middle * a1 * math.cos(accel)
-                 - math.log(TWO_PI) - log_i0_p)
-        return -3 * float(vonmises_entropy(torch.tensor(2.0, dtype=torch.float64))) \
-            - (-2 * math.log(TWO_PI) + cross)
-
-    # rel rather than abs: the KL is ~1.7e3 here because log I0(kappa_p) is ~kappa_p
-    assert got == pytest.approx(kl_with(a2), rel=1e-7)
-
-    # The wrong factor is not subtle -- but its size scales with kappa_physical, so state
-    # the threshold in units of kappa_p rather than as a constant that goes stale the next
-    # time the prior is recalibrated (2000 -> 383 broke a hardcoded 100 here).
-    wrong = abs(kl_with(a1 * a1) - kl_with(a2))
-    assert wrong > 0.05 * KAPPA_PHYSICAL, f"A_1^2 vs A_2 differ by only {wrong:.1f} nats"
+    kappa2 = kappa.clone()
+    kappa2[0, 2] = 5.0
+    mask2 = mask.clone()
+    mask2[0, 2] = 0.0
+    assert model.kl_jitter(mu, kappa2, mask2).item() == pytest.approx(0.0, abs=1e-12)
 
 
-def test_kl_to_physical_prior_invariant_to_shift_and_rate():
-    """The prior penalises rate CHANGE only, so the KL must be unchanged by (a) adding a
+def test_kl_jitter_invariant_to_shift_and_rate():
+    """The prior penalises tempo CHANGE only, so the KL must be unchanged by (a) adding a
         constant to the whole trajectory and (b) adding a constant RATE ramp. Both leave the
         second difference identical -- the docstring's phase-blindness and tempo-scale-
         freedom, which together are why only the emission can locate or size a bar.
@@ -430,17 +371,17 @@ def test_kl_to_physical_prior_invariant_to_shift_and_rate():
     mu = torch.cumsum(torch.rand(1, T, dtype=torch.float64) * 0.02 + 0.05, dim=1)
     kappa = torch.rand(1, T, dtype=torch.float64) * 500 + 50
     mask = torch.ones(1, T, dtype=torch.float64)
-    base = model.kl_to_physical_prior(mu, kappa, mask).item()
+    base = model.kl_jitter(mu, kappa, mask).item()
 
-    shifted = model.kl_to_physical_prior(mu + 1.234, kappa, mask).item()
+    shifted = model.kl_jitter(mu + 1.234, kappa, mask).item()
     ramp = torch.arange(T, dtype=torch.float64)[None] * 0.031
-    rerated = model.kl_to_physical_prior(mu + ramp, kappa, mask).item()
+    rerated = model.kl_jitter(mu + ramp, kappa, mask).item()
 
     assert shifted == pytest.approx(base, rel=1e-9)
     assert rerated == pytest.approx(base, rel=1e-9)
 
 
-def test_kl_to_physical_prior_masked_frames_contribute_zero():
+def test_kl_jitter_masked_frames_contribute_zero():
     """A frame with mask 0 must contribute nothing: the KL of a [1,5] sequence whose
     last two frames are masked equals the KL of the first three frames alone. Three
     real frames because the chain term needs two predecessors.
@@ -449,14 +390,14 @@ def test_kl_to_physical_prior_masked_frames_contribute_zero():
     mu5 = torch.tensor([[0.30, 0.36, 0.43, 9.0, -9.0]], dtype=torch.float64)
     kappa5 = torch.tensor([[800.0, 1200.0, 950.0, 7.0, 7.0]], dtype=torch.float64)
     mask5 = torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0]], dtype=torch.float64)
-    kl_masked = model.kl_to_physical_prior(mu5, kappa5, mask5).item()
-    kl_short = model.kl_to_physical_prior(
+    kl_masked = model.kl_jitter(mu5, kappa5, mask5).item()
+    kl_short = model.kl_jitter(
         mu5[:, :3], kappa5[:, :3], torch.ones(1, 3, dtype=torch.float64)).item()
     assert kl_masked == pytest.approx(kl_short, rel=1e-9)
 
 
-def test_forward_elbo_identity_and_alignment_recon(monkeypatch):
-    """elbo == recon - kl exactly, and recon must equal align_log_prob computed by hand."""
+def test_forward_elbo_identity_and_bernoulli_recon(monkeypatch):
+    """elbo == recon - kl exactly, and recon must equal the masked BCE computed by hand."""
     _seed()
     import phasevae.model as model_mod
     monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
@@ -467,49 +408,22 @@ def test_forward_elbo_identity_and_alignment_recon(monkeypatch):
     mask = torch.ones(B, T)
     mask[1, 50:] = 0.0
     y = torch.zeros(B, T)
-    targets = torch.tensor([[5.0, 20.0, 35.0], [4.0, 18.0, 0.0]])
-    valid = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+    y[0, 5] = 1.0
+    y[1, 18] = 1.0
 
-    out = model(h, mask, y, samples=1, targets=targets, valid=valid)
+    out = model(h, mask, y, samples=1)
     assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
 
     with torch.no_grad():
-        expected = model_mod.align_log_prob(out["mu"], targets, valid, 3.5,
-                                            velocity=out["mu"])
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            model.emission_logits(out["mu"], mask), y, reduction="none")
+        expected = -(bce * mask).sum(1)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
-    # pos_weight is inert: it exists only to keep the hook signature stable.
     with torch.no_grad():
-        alt = model(h, mask, y, samples=1, targets=targets, valid=valid,
-                    pos_weight=30.0)
-    assert torch.allclose(out["recon"], alt["recon"], atol=1e-5), \
-        "pos_weight still moves recon: the Bernoulli path has not been removed"
-
-
-def test_forward_kl_includes_the_anchor_and_padding_is_ignored():
-    """out['kl'] must carry KL(q(offset) || Uniform), and padded targets must not score."""
-    _seed()
-    model = BarPhaseVAE(input_dim=4, d_model=8, emission="cosine")
-    B, T = 2, 60
-    h = torch.randn(B, T, 4)
-    mask = torch.ones(B, T)
-    y = torch.zeros(B, T)
-    targets = torch.tensor([[5.0, 20.0, 35.0], [4.0, 18.0, 0.0]])
-    valid = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
-
-    out = model(h, mask, y, samples=1, targets=targets, valid=valid)
-    assert torch.all(out["kl_offset"] >= 0.0), "KL to Uniform must be non-negative"
-    assert float(out["kl_offset"].abs().sum()) > 0.0, "the anchor KL is identically zero"
-
-    # item 1's third target is padding sitting at frame 0, a LEGAL index. Moving it must
-    # change nothing; a consumer that ignores `valid` trains on a phantom downbeat there.
-    moved = targets.clone()
-    moved[1, 2] = 41.0
-    torch.manual_seed(0)
-    a = model(h, mask, y, samples=1, targets=targets, valid=valid)["recon"]
-    torch.manual_seed(0)
-    b = model(h, mask, y, samples=1, targets=moved, valid=valid)["recon"]
-    assert torch.allclose(a, b, atol=1e-6), "padded targets are being scored"
+        alt = model(h, mask, y, samples=1, pos_weight=30.0)
+    assert not torch.allclose(out["recon"], alt["recon"], atol=1e-5), \
+        "pos_weight no longer reweights the positive frames"
 
 
 def test_phase_ablation_gap_zero_when_phase_ignored():
@@ -626,7 +540,7 @@ def test_deployed_net_reads_no_target_in_any_shipped_config():
         # two-value heads() signature; they raise rather than silently mis-score. They
         # are BCE models, so running them would compare two different objectives under
         # one elbo column. Delete a name here when the variant is ported, not before.
-        if cfg.variant in {"anchor_k", "psi", "ladder", "anchor_time"}:
+        if cfg.variant in {"psi", "ladder", "anchor_time"}:
             continue
         model = hooks.build_model(cfg, input_dim=4)
         controls_mod.assert_encoder_is_target_blind(
@@ -699,7 +613,7 @@ def test_trajectory_health_separates_the_recorded_failure_modes():
            "dataset": ["toy"] * 2, "song_id": ["a", "b"]}
     crops = scoring_records(raw)
     t = torch.arange(n, dtype=torch.float32)
-    rate = TWO_PI / (period * fps)
+    tempo = TWO_PI / (period * fps)
     kappa = torch.full((2, n), 2000.0)
 
     def wrap(x):
@@ -708,12 +622,12 @@ def test_trajectory_health_separates_the_recorded_failure_modes():
     def health(mu):
         return trajectory_health(mu[None].repeat(2, 1), kappa, torch.ones(2, n), crops)
 
-    adv, kap, err, cov = health(wrap(rate * (t - db[0] * fps)))
-    assert adv == pytest.approx(rate, rel=1e-3)
+    adv, kap, err, cov = health(wrap(tempo * (t - db[0] * fps)))
+    assert adv == pytest.approx(tempo, rel=1e-3)
     assert err < 1e-3 and cov == 1.0 and kap == pytest.approx(2000.0)
 
-    adv_o, _, err_o, cov_o = health(wrap(rate * (t - db[0] * fps) + math.pi))
-    assert adv_o == pytest.approx(rate, rel=1e-3)      # rate right, offset wrong
+    adv_o, _, err_o, cov_o = health(wrap(tempo * (t - db[0] * fps) + math.pi))
+    assert adv_o == pytest.approx(tempo, rel=1e-3)      # tempo right, offset wrong
     assert err_o == pytest.approx(math.pi, abs=1e-3)   # worse than chance, not random
     assert cov_o == 1.0
 
@@ -725,3 +639,82 @@ def test_trajectory_health_separates_the_recorded_failure_modes():
     assert adv_f == pytest.approx(0.0, abs=1e-6)
     assert err_f == pytest.approx(math.pi / 2, rel=0.02)
     assert cov_f == pytest.approx(1 / 16)
+
+
+def test_rate_bound_is_identity_in_the_interior():
+    """The bound may soften the rails; it must not move interior tempos."""
+    for seconds in (1.0, 1.5, 2.0, 3.0, 5.0):
+        x = torch.tensor([[math.log(TWO_PI / (seconds * 50.0))]], dtype=torch.float64)
+        tempo, _ = Encoder._ramp(x)
+        assert float(TWO_PI / (float(tempo) * 50.0)) == pytest.approx(seconds, rel=1e-9)
+    x = torch.tensor([[math.log(TWO_PI / (60.0 * 50.0))]], dtype=torch.float64,
+                     requires_grad=True)
+    Encoder._ramp(x)[0].sum().backward()
+    assert float(x.grad) > 0.0, "the tempo bound is an absorbing rail again"
+
+
+def test_learned_sigma_one_draw_per_bar_and_entropy_formula():
+    """tempo_sigma_learned: the noise is constant within a bar, and tempo_entropy
+    equals sum over bars of 0.5*log(2*pi*e*sigma_k^2) computed by hand."""
+    torch.manual_seed(0)
+    enc = Encoder(input_dim=4, d_model=8).double().train()
+    h = torch.randn(1, 700, 4).double()
+    w = torch.ones(1, 700).double()
+    torch.manual_seed(1)
+    mu, _k, aux = enc(h, w)
+
+    trunk = enc.features(h, w)
+    out = enc.output_channels(trunk)
+    log_dotphi, seg_full = enc._bar_seg(out["log_dotphi"], w)
+
+    inc = mu[0, 1:] - mu[0, :-1]
+    same_bar = (seg_full[0, 1:] == seg_full[0, :-1])[1:]
+    inc_pair = (inc[1:] - inc[:-1]).abs()
+    assert float(inc_pair[same_bar].max()) < 1e-9, \
+        "dotphi varies inside a bar: the draw is not one-per-bar"
+    bias = math.log(TEMPO_SIGMA_INIT / (TEMPO_SIGMA_CEIL - TEMPO_SIGMA_INIT))
+    sig_pooled = enc._pool_by_bar(out["log_sigma_dotphi"], seg_full, w)
+    sigma = TEMPO_SIGMA_CEIL * torch.sigmoid(sig_pooled + bias)
+    expected = 0.0
+    for b in range(int(seg_full.max()) + 1):
+        m = seg_full[0] == b
+        if int(m.sum()) == 0:
+            continue
+        expected += 0.5 * math.log(2 * math.pi * math.e) + math.log(float(sigma[0, m][0]))
+    torch.manual_seed(0)
+    _mu2, _k2, aux2 = enc(h, w)
+    assert float(aux2["tempo_entropy"][0]) == pytest.approx(expected, rel=1e-6)
+
+
+def test_learned_sigma_starts_at_init_and_gets_gradient():
+    """A fresh sigma head reads ~TEMPO_SIGMA_INIT everywhere, and the ELBO trains it."""
+    _seed()
+    model = BarPhaseVAE(input_dim=4, d_model=8, emission="triangle").train()
+    h, mask = torch.randn(2, 300, 4), torch.ones(2, 300)
+    y = torch.zeros(2, 300); y[:, ::100] = 1.0
+
+    trunk = model.encoder.features(h, mask)
+    raw = model.encoder.output_channels(trunk)["log_sigma_dotphi"]
+    bias = math.log(TEMPO_SIGMA_INIT / (TEMPO_SIGMA_CEIL - TEMPO_SIGMA_INIT))
+    sigma = TEMPO_SIGMA_CEIL * torch.sigmoid(raw + bias)
+    assert float((sigma - TEMPO_SIGMA_INIT).abs().max()) < 0.01
+
+    out = model(h, mask, y, samples=1)
+    model.zero_grad()
+    (-out["elbo"].mean()).backward()
+    g = float(model.encoder.out.weight.grad[3].abs().sum())
+    assert g > 0.0, "the sigma channel receives no gradient"
+
+
+def test_anchor_k_folds_its_own_evidence_not_a_frontend_channel():
+    """anchor_k must fold the model's own evidence, not a raw frontend channel."""
+    import inspect
+    from phasevae.variants import anchor_k as ak
+    code = "\n".join(line.split("#")[0] for line in inspect.getsource(ak).splitlines())
+    assert "h[..., -2:]" not in code, \
+        "anchor_k is folding a raw frontend channel again"
+    assert "downbeat_scores" in code, \
+        "anchor_k no longer folds the model's own evidence head"
+    sig = inspect.signature(ak.AnchorKVAE.bin_downbeat)
+    assert list(sig.parameters)[1] == "a", \
+        "bin_downbeat's first argument is not the evidence a_t"

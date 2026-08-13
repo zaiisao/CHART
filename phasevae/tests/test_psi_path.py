@@ -349,7 +349,7 @@ def test_target_blindness_control_catches_target_reading_prior_net():
 
 
 def test_physics_anchor_invariant_to_global_rotation_of_prior_mean():
-    """Input: kl_to_physical_prior at mu_p and at mu_p + c for several global
+    """Input: kl_jitter at mu_p and at mu_p + c for several global
         rotations c. Asserted: identical anchor value (float tolerance). Why: the
         physical prior is uniform in phi_1 and Markov in increments, so the anchor
         reads mu only through mu_t - mu_{t-1}; a shared rotation must cancel. This is
@@ -363,9 +363,9 @@ def test_physics_anchor_invariant_to_global_rotation_of_prior_mean():
     mask = torch.ones(B, T, dtype=torch.float64)
     mask[-1, T - 4:] = 0.0
 
-    base = model.kl_to_physical_prior(mu_p, kappa_p, mask)
+    base = model.kl_jitter(mu_p, kappa_p, mask)
     for c in (1.3, -4.0, 20.0 * math.pi):
-        rotated = model.kl_to_physical_prior(mu_p + c, kappa_p, mask)
+        rotated = model.kl_jitter(mu_p + c, kappa_p, mask)
         assert torch.allclose(base, rotated, atol=1e-5), f"c={c}"
 
 

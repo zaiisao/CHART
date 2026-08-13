@@ -1,12 +1,10 @@
 variant: ladder
 emission: triangle
-drift_bound: 0.01
-bar_rate: true
 pos_weight: 1.0
 epochs: 60
 beta_warmup: 0
 k_slots: 0
-head_input: trunk_frame0
+head_input: folded_acts
 head_arch: linear
 head_lr: 0
 rotation_aug: false

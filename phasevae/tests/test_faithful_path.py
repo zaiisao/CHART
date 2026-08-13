@@ -33,15 +33,15 @@ def test_encoder_shapes_and_global_response():
     mu, kappa, anchor = enc(h, mask)
     assert mu.shape == (1, 200) and kappa.shape == (1, 200)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
-    assert anchor["shift"].shape == (1,) and anchor["resultant"].shape == (1,)
+    assert anchor["tempo_prior"].shape == (1,) and anchor["tempo_entropy"].shape == (1,)
 
     h2 = h.clone()
     h2[0, 7] += 5.0
     mu2, _k2, anchor2 = enc(h2, mask)
     assert not torch.allclose(mu, mu2, atol=1e-6), \
         "the trajectory did not respond to the input at all"
-    assert not torch.allclose(anchor["shift"], anchor2["shift"], atol=1e-6), \
-        "the anchor did not respond: it is not pooling over frames"
+    assert not torch.allclose(anchor["tempo_prior"], anchor2["tempo_prior"], atol=1e-9), \
+        "the tempo prior did not respond to the input at all"
 
 
 # ================================================== 2. EmissionTransformer
@@ -128,12 +128,6 @@ def _batch(B=2, T=12):
     return h, delta, mask, y
 
 
-def _tv(B=2, T=12):
-    """targets/valid for the alignment objective: annotated downbeat FRAMES, padded."""
-    t = torch.tensor([2.0, T / 2.0, T - 4.0])
-    return t.expand(B, 3).contiguous(), torch.ones(B, 3)
-
-
 def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """Input: a padded batch through the transformer-emission forward, twice.
         Asserted: elbo == recon - kl on each returned dict (the ELBO definition in the
@@ -143,9 +137,8 @@ def test_forward_transformer_elbo_identity_and_stochastic_recon():
     """
     model = _tf_model()
     h, delta, mask, y = _batch()
-    tg, vd = _tv()
-    out1 = model(h, mask, y, samples=1, targets=tg, valid=vd)
-    out2 = model(h, mask, y, samples=1, targets=tg, valid=vd)
+    out1 = model(h, mask, y, samples=1)
+    out2 = model(h, mask, y, samples=1)
     for out in (out1, out2):
         assert torch.allclose(out["elbo"], out["recon"] - out["kl"], atol=1e-5)
     assert not torch.equal(out1["recon"], out2["recon"]), \
@@ -161,9 +154,10 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch()
-    tg, vd = _tv()
-    out1 = model(h, mask, y, targets=tg, valid=vd)
-    out2 = model(h, mask, y, targets=tg, valid=vd)
+    torch.manual_seed(7)
+    out1 = model(h, mask, y)
+    torch.manual_seed(7)
+    out2 = model(h, mask, y)
     assert torch.equal(out1["recon"], out2["recon"])
 
 
@@ -185,43 +179,41 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
     model = _tf_model()
     h, delta, mask, y = _batch()
-    tg, vd = _tv()
-    out = model(h, mask, y, samples=3, targets=tg, valid=vd)
-    # TWO draws per sample now: the per-frame phase noise and ONE window-level anchor,
-    # so a 3-sample forward calls the sampler 6 times.
-    assert calls["n"] == 6
+    out = model(h, mask, y, samples=3)
+    assert calls["n"] == 3
 
     with torch.no_grad():
         terms = []
         for i in range(3):
-            phi = out["mu"] + offsets[2 * i] + offsets[2 * i + 1]
-            terms.append(model_mod.align_log_prob(phi, tg, vd, 3.5,
-                                                  velocity=out["mu"]))
+            phi = out["mu"] + offsets[i]
+            bce = torch.nn.functional.binary_cross_entropy_with_logits(
+                model.emission_logits(phi, mask), y, reduction="none")
+            terms.append(-(bce * mask).sum(1))
         expected = torch.stack(terms).mean(0)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
 
 def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
-    """Sampler pinned to the mean: recon equals align_log_prob at phi = mu, by hand."""
+    """Sampler pinned to the mean: recon equals the masked BCE at phi = mu, by hand."""
     monkeypatch.setattr(model_mod, "sample_vonmises",
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch(B=1, T=8)
-    tg, vd = _tv(B=1, T=8)
-    out = model(h, mask, y, samples=1, targets=tg, valid=vd)
+    out = model(h, mask, y, samples=1)
 
     with torch.no_grad():
-        expected = model_mod.align_log_prob(out["mu"], tg, vd, 3.5,
-                                            velocity=out["mu"])
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            model.emission_logits(out["mu"], mask), y, reduction="none")
+        expected = -(bce * mask).sum(1)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
-    # and the emission is genuinely off the training path
+    # and the emission is on the training path
     model.zero_grad()
-    model(h, mask, y, samples=1, targets=tg, valid=vd)["recon"].sum().backward()
+    model(h, mask, y, samples=1)["recon"].sum().backward()
     assert model.emission_net is not None
     grads = [p.grad for p in model.emission_net.parameters() if p.grad is not None]
-    assert all(float(g.abs().sum()) == 0.0 for g in grads), \
-        "the emission still receives reconstruction gradient"
+    assert any(float(g.abs().sum()) > 0.0 for g in grads), \
+        "the emission receives no reconstruction gradient"
 
 
 # ======================================================= 4. von Mises sampler
@@ -282,47 +274,41 @@ def test_sampler_circular_mean_matches_mu_at_kappa_five():
 
 
 def test_kl_free_posterior_matches_monte_carlo_three_frames():
-    """Input: a 3-frame free posterior (per-frame mu, moderate kappas). Asserted:
-        kl_to_physical_prior agrees with a seeded 400k-sample Monte Carlo estimate of
-        E_q[log q - log p] within 2% relative. Why: this is KL's definition, and it is the
-        independent check on the A_1(k3) A_2(k2) A_1(k1) product -- the MC estimator never
-        forms those factors, it just samples the three phases and evaluates the prior
+    """kl_jitter agrees with a seeded 400k-sample Monte Carlo estimate of
+    E_q[log q - log p] with p = vM(mu, kappa_physical) per frame -- KL's definition,
+    checked without ever forming the closed-form resultant terms.
     """
     scipy_special = pytest.importorskip("scipy.special")
     model = BarPhaseVAE(input_dim=4, d_model=8, kappa_physical=40.0)
-    mu = torch.tensor([[0.30, 0.36, 0.43]], dtype=torch.float64)
-    kappa = torch.tensor([[50.0, 80.0, 65.0]], dtype=torch.float64)
-    got = model.kl_to_physical_prior(mu, kappa,
-                                     torch.ones(1, 3, dtype=torch.float64)).item()
+    mus, kappas = (0.30, 0.36, 0.43), (50.0, 80.0, 65.0)
+    got = model.kl_jitter(torch.tensor([list(mus)], dtype=torch.float64),
+                          torch.tensor([list(kappas)], dtype=torch.float64),
+                          torch.ones(1, 3, dtype=torch.float64)).item()
 
     rng = np.random.default_rng(0)
     n = 400_000
-    phi = [rng.vonmises(m, k, n) for m, k in ((0.30, 50.0), (0.36, 80.0), (0.43, 65.0))]
+    phi = [rng.vonmises(m, k, n) for m, k in zip(mus, kappas)]
 
     def log_i0(k):
         return np.log(scipy_special.i0e(k)) + k
 
     log_q = sum(k * np.cos(p - m) - math.log(TWO_PI) - log_i0(k)
-                for p, m, k in zip(phi, (0.30, 0.36, 0.43), (50.0, 80.0, 65.0)))
-    # phi_1, phi_2 uniform; phi_3 ~ vM(2*phi_2 - phi_1, kappa_p)
-    log_p = (-2 * math.log(TWO_PI)
-             + 40.0 * np.cos(phi[2] - 2 * phi[1] + phi[0])
-             - math.log(TWO_PI) - log_i0(40.0))
+                for p, m, k in zip(phi, mus, kappas))
+    log_p = sum(40.0 * np.cos(p - m) - math.log(TWO_PI) - log_i0(40.0)
+                for p, m in zip(phi, mus))
     mc = float(np.mean(log_q - log_p))
     assert got == pytest.approx(mc, rel=0.02)
 
 
-def test_kl_free_posterior_two_frames_is_entropy_to_uniform():
-    """Input: a 2-frame crop. Asserted: KL == -H(q1) - H(q2) + 2*log(2*pi) EXACTLY.
-        Why: the constant-rate prior needs TWO predecessors, so with T=2 no transition term
-        exists and both frames are uniform -- KL(q || Uniform^2) = -H(q) + 2 log 2pi. This
-        also pins that the number of unconditioned frames is 2 and not 1: with the old
-        first-difference prior a T=2 crop DID have a chain term, and getting this boundary
+def test_kl_free_posterior_uniform_prior_is_entropy_to_uniform():
+    """With kappa_physical = 0 the jitter prior is Uniform, so the KL must equal
+    -H(q_t) + log 2pi summed over frames, exactly.
     """
     scipy_stats = pytest.importorskip("scipy.stats")
     model = BarPhaseVAE(input_dim=4, d_model=8)
+    model.kappa_physical = 0.0
     kappas = (7.0, 11.0)
-    got = model.kl_to_physical_prior(
+    got = model.kl_jitter(
         torch.tensor([[0.4, 0.9]], dtype=torch.float64),
         torch.tensor([list(kappas)], dtype=torch.float64),
         torch.ones(1, 2, dtype=torch.float64)).item()
@@ -351,8 +337,7 @@ def test_train_loss_formula_matches_documented_objective():
 
     model = _tf_model()
     h, delta, mask, y = _batch()
-    tg, vd = _tv()
-    out = model(h, mask, y, samples=1, targets=tg, valid=vd)
+    out = model(h, mask, y, samples=1)
     beta = run_mod.beta_at(1, types.SimpleNamespace(beta_start=0.2, beta_end=0.8,
                                                     beta_warmup=3))
     assert beta == pytest.approx(0.2 + (1 / 3) * 0.6)

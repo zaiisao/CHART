@@ -6,6 +6,7 @@ import math
 import torch
 from torch import nn
 
+from .base import refuse_unsupported
 from ..model import (BarPhaseVAE, Encoder, bounded_kappa, sample_vonmises)
 
 
@@ -27,22 +28,19 @@ class AnchorEncoder(Encoder):
     """q(phi_t | x) with the OFFSET HEAD REMOVED: the anchor is enumerated, not emitted."""
 
     def __init__(self, input_dim: int, *args, **kw):
-        super().__init__(input_dim, *args, **kw)
-        self.out = nn.Linear(self.out.in_features, 3)
-        nn.init.normal_(self.out.weight, std=1e-2)
-        nn.init.zeros_(self.out.bias)          # raw 0 on every channel = kappa_physical,
-                                               # the prior's rate, and residual 0
+        super().__init__(input_dim, *args,
+                         channels=("log_phi_kappa", "log_dotphi", "residual"), **kw)
 
-    def heads(self, trunk):
+    def heads(self, trunk, mask=None, h=None):
         """Trunk -> (cum [B, T], kappa [B, T], residual_raw [B, T]). Not a sample."""
-        out = self.out(trunk)
-        kappa = bounded_kappa(torch.exp(out[..., 0] + self.log_kappa_bias) + 1e-3)
+        out = self.read_out(trunk)
+        kappa = bounded_kappa(torch.exp(out["log_phi_kappa"] + self.log_phi_kappa_bias) + 1e-3)
 
-        log_rate = self._pool(out[..., 1] + self.log_rate_bias, self.pool_span)
-        rate = torch.exp(log_rate.clamp(math.log(0.01), math.log(0.2)))
-        cum = torch.cumsum(rate, dim=1) - rate[:, :1]         # monotone, cum[:, 0] = 0
+        log_dotphi = self._pool(out["log_dotphi"] + self.log_dotphi_bias, self.pool_span)
+        dotphi = torch.exp(log_dotphi.clamp(math.log(0.01), math.log(0.2)))
+        cum = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]         # monotone, cum[:, 0] = 0
 
-        return cum, kappa, out[..., 2]
+        return cum, kappa, out["residual"]
 
 
 class AnchorTimeVAE(BarPhaseVAE):
@@ -60,7 +58,7 @@ class AnchorTimeVAE(BarPhaseVAE):
         # own activation channels: see the module docstring on attribution, and note the
         # frontend's task heads are frame-wise linears on these same features, so this form
         # can represent them exactly -- only the initialisation differs.
-        self.evidence = nn.Linear(input_dim, 1)
+        self.downbeat_head = nn.Linear(input_dim, 1)
         self.k_head = nn.Sequential(nn.Linear(2 * harmonics, K_HEAD_HIDDEN),
                                     nn.GELU(),
                                     nn.Linear(K_HEAD_HIDDEN, 1))
@@ -75,7 +73,7 @@ class AnchorTimeVAE(BarPhaseVAE):
 
     def candidate_features(self, h, cum, c, mask):
         """[B, C, 2M] descriptors for every candidate, EXACTLY, in O(M T + M C)."""
-        a = torch.sigmoid(self.evidence(h).squeeze(-1)) * mask                 # [B, T]
+        a = torch.sigmoid(self.downbeat_head(h).squeeze(-1)) * mask                 # [B, T]
         m = torch.arange(1, self.harmonics + 1, device=cum.device,
                          dtype=cum.dtype)                                      # [M]
 
@@ -105,8 +103,8 @@ class AnchorTimeVAE(BarPhaseVAE):
     def residual(self, residual_raw, cum, mask):
         """[B] a sub-bin refinement of the anchor, BOUNDED to half a bin of phase."""
         inc = (cum[:, 1:] - cum[:, :-1]) * mask[:, 1:]
-        rate = inc.sum(1) / mask[:, 1:].sum(1).clamp(min=1.0)                  # [B]
-        half_bin = rate * self.stride / 2.0
+        tempo = inc.sum(1) / mask[:, 1:].sum(1).clamp(min=1.0)                  # [B]
+        half_bin = tempo * self.stride / 2.0
         scalar = (residual_raw * mask).sum(1) / mask.sum(1).clamp(min=1.0)
         return half_bin * torch.tanh(scalar)
 
@@ -115,7 +113,7 @@ class AnchorTimeVAE(BarPhaseVAE):
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """One ELBO evaluation with k marginalised exactly. Same signature as the base."""
         cum, kappa, residual_raw = self.encoder(h, mask)
-        kl_traj = self.kl_to_physical_prior(cum, kappa, mask)
+        kl_traj = self.kl_jitter(cum, kappa, mask)
 
         c, ok = candidate_anchors(cum, mask, self.stride)                      # [B, C]
         logq = torch.log_softmax(self.candidate_logits(h, cum, c, ok, mask), dim=-1)
@@ -187,6 +185,7 @@ DEFAULTS = dict(
 
 def build_model(cfg, input_dim: int) -> AnchorTimeVAE:
     """The time-anchored model. REQUIRES an elementwise emission -- see the assert."""
+    refuse_unsupported(cfg, "anchor_time")
     assert cfg.emission in ("triangle", "cosine"), (
         f"anchor_time needs an elementwise emission, got {cfg.emission!r}: the "
         f"reconstruction is evaluated at every candidate, so a transformer emission would "

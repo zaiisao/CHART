@@ -7,7 +7,7 @@ class Frontend:
     OUTPUT_MODES: dict = {"activations": 2}
     ACTIVATION_FORM: str = "probability"
     BOUNDING: str = "clip"
-    FPS: float                 # the frame rate this frontend's output ticks at -- fixed
+    FPS: float                 # the frame tempo this frontend's output ticks at -- fixed
                                # by its STFT hop, not chosen. Everything downstream
                                # (targets, scoring) reads THIS; there is no global grid.
 

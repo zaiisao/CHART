@@ -8,6 +8,7 @@ from torch import nn
 
 from ..model import TWO_PI, BarPhaseVAE, sample_vonmises
 from .base import objective, on_epoch  # noqa: F401  -- re-exported hooks
+from .base import refuse_unsupported
 
 DEFAULTS = {"k_slots": 0, "head_input": "trunk_frame0", "head_arch": "linear",
             "head_lr": 0.0, "rotation_aug": False, "k_hidden": 256}
@@ -72,7 +73,7 @@ class LadderVAE(BarPhaseVAE):
     def base_path(self, h, mask=None):
         """(trunk, mu, kappa) from the encoder. mu still carries its own offset head."""
         trunk = self.encoder.features(h, mask)
-        mu, kappa = self.encoder.heads(trunk)
+        mu, kappa, _anchor = self.encoder.heads(trunk, mask, h)
         return trunk, mu, kappa
 
     def scalar_offset(self, h, trunk, mu, mask):
@@ -96,7 +97,7 @@ class LadderVAE(BarPhaseVAE):
             return super().forward(h, mask, y, samples, pos_weight)
 
         trunk, mu, kappa = self.base_path(h, mask)
-        kl = self.kl_to_physical_prior(mu, kappa, mask)
+        kl = self.kl_jitter(mu, kappa, mask)
         C = self.k_slots
 
         feats = self.head_features(h, trunk, mu, mask)
@@ -137,6 +138,7 @@ class LadderVAE(BarPhaseVAE):
 
 
 def build_model(cfg, input_dim: int) -> LadderVAE:
+    refuse_unsupported(cfg, "ladder")
     assert cfg.beta_warmup == 0, "ladder folds kl_k into kl; run at beta=1"
     return LadderVAE(input_dim, k_slots=cfg.k_slots, head_input=cfg.head_input,
                      head_arch=cfg.head_arch, rotation_aug=cfg.rotation_aug,

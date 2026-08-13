@@ -6,17 +6,30 @@ import torch
 from ..model import BarPhaseVAE
 
 
+COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "kappa_physical")
+
+DEFAULTS_IF_UNSUPPORTED = {}
+
+
+def common_kwargs(cfg) -> dict:
+    """The kwargs every BarPhaseVAE subclass should be built with."""
+    return {k: getattr(cfg, k) for k in COMMON_KEYS}
+
+
+def refuse_unsupported(cfg, variant: str, supported=()) -> None:
+    """Fail loudly if the config asks for a key this variant does not forward."""
+    for key, default in DEFAULTS_IF_UNSUPPORTED.items():
+        if key in supported:
+            continue
+        got = getattr(cfg, key, default)
+        assert got == default, (
+            f"variant {variant!r} does not forward {key}={got!r}; it would train "
+            f"{key}={default!r} and the result would be a null by construction")
+
+
 def build_model(cfg, input_dim: int) -> BarPhaseVAE:
     """The §7 model: encoder + fixed physical prior + latent-only emission."""
-    return BarPhaseVAE(input_dim, emission=cfg.emission,
-                       emission_layers=cfg.emission_layers,
-                       emission_positional=cfg.emission_positional,
-                       kappa_physical=cfg.kappa_physical,
-                       evidence=cfg.evidence,
-                       detector_layers=cfg.detector_layers,
-                       rate_init_seconds=cfg.rate_init_seconds,
-                       rate_bias_learnable=cfg.rate_bias_learnable,
-                       readout=cfg.readout)
+    return BarPhaseVAE(input_dim, **common_kwargs(cfg))
 
 
 def optimizer(model, cfg):
@@ -31,7 +44,7 @@ def objective(out, beta: float, cfg):
 
 
 def on_epoch(model, cfg, epoch: int) -> None:
-    """Scheduled emission-sharpness floor (0 = free); see model.emission_b_floor."""
+    """Scheduled emission-sharpness floor, and the tempo posterior's annealed width."""
     if cfg.emission_sharpness > 0 and model.emission_net is None:
         ramp = min(1.0, epoch / max(cfg.sharpness_warmup, 1))
         model.emission_b_floor.fill_(cfg.emission_sharpness * ramp)

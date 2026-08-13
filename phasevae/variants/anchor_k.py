@@ -7,7 +7,8 @@ import torch
 from torch import nn
 
 from ..model import TWO_PI, BarPhaseVAE, sample_vonmises
-from .base import objective, on_epoch  # noqa: F401  -- re-exported hooks
+from .base import (common_kwargs, objective, on_epoch,
+                   refuse_unsupported)
 
 DEFAULTS = {"anchor_slots": 64}
 
@@ -22,8 +23,7 @@ class AnchorKVAE(BarPhaseVAE):
             "anchor_k vectorises the closed-form emission over [B, C, T]; " \
             "the transformer emission is not supported here"
         self.anchor_slots = anchor_slots
-        # phase-binned activation histogram [C, 2] -> slot logits [C]
-        self.k_head = nn.Sequential(nn.Linear(2 * anchor_slots, k_hidden), nn.ReLU(),
+        self.k_head = nn.Sequential(nn.Linear(anchor_slots, k_hidden), nn.ReLU(),
                                     nn.Linear(k_hidden, anchor_slots))
         # same birth rule as Encoder.out: small but NOT zero (dead-subnetwork lesson)
         nn.init.normal_(self.k_head[-1].weight, std=1e-2)
@@ -33,42 +33,42 @@ class AnchorKVAE(BarPhaseVAE):
         self.register_buffer("slot_shifts",
                              torch.atan2(torch.sin(shifts), torch.cos(shifts)))
 
-    def bin_activations(self, h, mu, mask=None):
-        """[B, T, D], [B, T] -> [B, C, 2]: activations pooled into C phase bins."""
+    def bin_downbeat(self, a, mu, mask=None):
+        """[B, T] evidence, [B, T] phase -> [B, C]: a_t pooled into C phase bins."""
         B, T = mu.shape
         C = self.anchor_slots
-        acts = torch.sigmoid(h[..., -2:])
         w = torch.ones(B, T, device=mu.device) if mask is None else mask
         bins = torch.remainder(mu.detach(), TWO_PI).div(TWO_PI).mul(C) \
                     .long().clamp(max=C - 1)
         flat = (torch.arange(B, device=mu.device)[:, None] * C + bins).reshape(-1)
-        sums = torch.zeros(B * C, 2, device=mu.device).index_add_(
-            0, flat, acts.reshape(-1, 2) * w.reshape(-1, 1))
+        sums = torch.zeros(B * C, device=mu.device).index_add_(
+            0, flat, (a * w).reshape(-1))
         cnt = torch.zeros(B * C, device=mu.device).index_add_(0, flat, w.reshape(-1))
-        return (sums / cnt.clamp(min=1.0)[:, None]).reshape(B, C, 2)
+        return (sums / cnt.clamp(min=1.0)).reshape(B, C)
 
-    def slot_logits(self, h, mu, mask=None):
-        """[B, T, D], [B, T] -> [B, C]: slot scores from the binned histogram."""
-        return self.k_head(self.bin_activations(h, mu, mask).flatten(1))
+    def slot_logits(self, a, mu, mask=None):
+        """[B, T], [B, T] -> [B, C]: slot scores from the binned histogram."""
+        return self.k_head(self.bin_downbeat(a, mu, mask))
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """ELBO with k marginalised exactly; same contract as the base forward."""
         trunk = self.encoder.features(h, mask)
-        mu, kappa = self.encoder.heads(trunk)
-        kl = self.kl_to_physical_prior(mu, kappa, mask)
+        mu, kappa, _anchor = self.encoder.heads(trunk, mask, h)
+        kl = self.kl_jitter(mu, kappa, mask)
 
         C = self.anchor_slots
-        a_bin = self.bin_activations(h, mu, mask)
+        w_mask = torch.ones_like(mu) if mask is None else mask
+        a_t = self.encoder.downbeat_scores(trunk, self.encoder.read_out(trunk), w_mask, h)
+        a_bin = self.bin_downbeat(a_t, mu, mask)
         if self.training and C > 1:
             # rotation augmentation: mu_eff = mu + c_r, exactly (see module doc)
             r = torch.randint(0, C, (mu.shape[0],), device=mu.device)
             ar = torch.arange(C, device=mu.device)
-            a_bin = torch.gather(a_bin, 1,
-                                 ((ar[None] - r[:, None]) % C)[..., None].expand(-1, -1, 2))
+            a_bin = torch.gather(a_bin, 1, (ar[None] - r[:, None]) % C)
             recon_gather = (ar[None] + r[:, None]) % C
         else:
             recon_gather = None
-        log_q = nn.functional.log_softmax(self.k_head(a_bin.flatten(1)), dim=-1)
+        log_q = nn.functional.log_softmax(self.k_head(a_bin), dim=-1)
         q_k = log_q.exp()
 
         weight = torch.where(y > 0, torch.as_tensor(pos_weight, device=y.device,
@@ -99,8 +99,10 @@ class AnchorKVAE(BarPhaseVAE):
         """Deployment: mu shifted by the argmax slot. Reads audio (+ length mask) only."""
         assert not self.training, "deployment path must run in eval mode"
         trunk = self.encoder.features(h, mask)
-        mu, _kappa = self.encoder.heads(trunk)
-        k = self.slot_logits(h, mu, mask).argmax(-1)
+        mu, _kappa, _anchor = self.encoder.heads(trunk, mask, h)
+        w_mask = torch.ones_like(mu) if mask is None else mask
+        a_t = self.encoder.downbeat_scores(trunk, self.encoder.read_out(trunk), w_mask, h)
+        k = self.slot_logits(a_t, mu, mask).argmax(-1)
         return mu + self.slot_shifts[k].unsqueeze(-1)
 
 
@@ -110,10 +112,12 @@ def build_model(cfg, input_dim: int) -> AnchorKVAE:
     # beta 1 throughout (warmup 0) the objective is the exact ELBO. Revisit before
     # enabling annealing with this variant (pre-launch review, lens 1).
     assert cfg.beta_warmup == 0, "anchor_k folds kl_k into kl; run it at beta=1"
-    return AnchorKVAE(input_dim, anchor_slots=cfg.anchor_slots,
-                      emission=cfg.emission, emission_layers=cfg.emission_layers,
-                      emission_positional=cfg.emission_positional,
-                      kappa_physical=cfg.kappa_physical)
+    refuse_unsupported(cfg, "anchor_k",
+                       supported=("downbeat_source", "detector_layers", "unified_bar_tempo"))
+    kw = common_kwargs(cfg)
+    for k in ("readout",):
+        kw.pop(k, None)
+    return AnchorKVAE(input_dim, anchor_slots=cfg.anchor_slots, **kw)
 
 
 def optimizer(model, cfg):

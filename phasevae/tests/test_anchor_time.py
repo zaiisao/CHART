@@ -22,9 +22,9 @@ STRIDE = 4
 
 # ---------------------------------------------------------------------------- helpers
 
-def constant_cum(batch=2, frames=200, rate=0.0628):
+def constant_cum(batch=2, frames=200, tempo=0.0628):
     """A monotone cumulative rotation with cum[:, 0] = 0, as AnchorEncoder.heads returns."""
-    inc = torch.full((batch, frames), rate)
+    inc = torch.full((batch, frames), tempo)
     return torch.cumsum(inc, dim=1) - inc[:, :1]
 
 
@@ -74,8 +74,8 @@ def test_trajectory_kl_is_identical_for_every_candidate(k):
     mask = torch.ones_like(cum)
 
     c, _ok = at.candidate_anchors(cum, mask, STRIDE)
-    reference = vae.kl_to_physical_prior(cum, kappa, mask)
-    shifted = vae.kl_to_physical_prior(cum - c[:, k : k + 1], kappa, mask)
+    reference = vae.kl_jitter(cum, kappa, mask)
+    shifted = vae.kl_jitter(cum - c[:, k : k + 1], kappa, mask)
     assert torch.allclose(reference, shifted, atol=1e-4)
 
 
@@ -117,7 +117,7 @@ def test_anchor_kl_is_zero_when_uniform_and_log_c_when_concentrated():
     """The anchor term is KL(q(k) || Uniform(C_i)), i.e. the PRICE of concentrating."""
     vae, (h, mask, y) = model(), batch()
     out = vae(h, mask, y)
-    kl_traj = vae.kl_to_physical_prior(*vae.encoder(h, mask)[:2], mask)
+    kl_traj = vae.kl_jitter(*vae.encoder(h, mask)[:2], mask)
     anchor = out["kl"] - kl_traj
     n_i = out["n_i"]
 
@@ -160,7 +160,7 @@ def test_first_harmonic_matches_the_brute_force_matched_filter():
     feat = vae.candidate_features(h, cum, c, mask)
     assert feat.shape == (h.shape[0], c.shape[1], 2)
 
-    a = torch.sigmoid(vae.evidence(h).squeeze(-1)) * mask
+    a = torch.sigmoid(vae.downbeat_head(h).squeeze(-1)) * mask
     # normalised by the EVIDENCE MASS, not the frame count: dividing by T put every case at
     # ~1e-2 and left the softmax uniform to six decimals. See candidate_features.
     evidence_mass = a.sum(1)
@@ -194,7 +194,7 @@ def test_gradient_reaches_the_evidence_head_and_the_k_head():
     out = vae(h, mask, y)
     (-(out["elbo"]).mean()).backward()
 
-    for name in ("evidence", "k_head"):
+    for name in ("downbeat_source", "k_head"):
         grads = [p.grad for p in getattr(vae, name).parameters() if p.grad is not None]
         assert grads, f"{name} received no gradient at all"
         assert max(float(g.abs().max()) for g in grads) > 0.0, f"{name} gradient is all zero"
@@ -203,7 +203,7 @@ def test_gradient_reaches_the_evidence_head_and_the_k_head():
 def test_encoder_has_no_offset_head_left_to_go_dead():
     """The anchor is enumerated, so channels 0-1 of the base encoder must be gone."""
     vae = model()
-    assert vae.encoder.out.out_features == 3
+    assert set(vae.encoder.out.keys()) == {"log_phi_kappa", "log_dotphi", "residual"}
 
 
 def test_residual_is_bounded_to_half_a_bin_of_phase():
@@ -211,10 +211,10 @@ def test_residual_is_bounded_to_half_a_bin_of_phase():
     vae = model()
     cum = constant_cum(frames=200)
     mask = torch.ones_like(cum)
-    rate = 0.0628
+    tempo = 0.0628
     for extreme in (-50.0, 50.0):
         residual = vae.residual(torch.full_like(cum, extreme), cum, mask)
-        assert float(residual.abs().max()) <= rate * STRIDE / 2 + 1e-6
+        assert float(residual.abs().max()) <= tempo * STRIDE / 2 + 1e-6
 
 
 def test_deployed_path_is_target_blind_and_selects_by_q():

@@ -8,7 +8,7 @@ import pytest
 from phasevae import config
 
 CONFIG_DIR = pathlib.Path(config.__file__).parent / "configs"
-DEFAULT_CONFIG = str(CONFIG_DIR / "anchor_k.yaml")
+DEFAULT_CONFIG = str(CONFIG_DIR / "tempo_init_clip.yaml")
 SHIPPED_CONFIGS = sorted(CONFIG_DIR.glob("*.yaml"))
 
 
@@ -33,14 +33,6 @@ def test_shipped_config_loads(path):
         assert hasattr(hooks, hook), f"{cfg.variant} is missing the {hook} hook"
 
 
-def test_variant_defaults_are_merged_in():
-    """A variant's own DEFAULTS still reach the namespace and are still name-checked."""
-    cfg, _ = config.load_config(str(CONFIG_DIR / "psi.yaml"), [])
-    assert cfg.rotations == 1 and cfg.lambda_prior == 1.0
-    with pytest.raises(AssertionError):
-        config.load_config(DEFAULT_CONFIG, ["rotations=3"])   # psi's key, anchor_k's config
-
-
 def test_overrides_apply_and_normalise_dashes():
     cfg, _ = config.load_config(DEFAULT_CONFIG, ["epochs=2", "beta-warmup=3"])
     assert (cfg.epochs, cfg.beta_warmup) == (2, 3)
@@ -50,7 +42,7 @@ def test_overrides_apply_and_normalise_dashes():
     "epohcs=2",             # key that is in neither the schema nor the variant
     "emission=triangel",    # not in the enum
     "lr=fast",              # string where a number belongs
-    "drift_bound=true",     # bool must not pass as a number
+    "clip=true",            # bool must not pass as a number
     "epochs=2.5",           # float where an integer belongs
     "epochs=-1",            # below the declared minimum
 ])

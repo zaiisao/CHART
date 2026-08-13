@@ -67,11 +67,11 @@ def trajectory_period(mu, mask, fps):
     inc = mu[:, 1:] - mu[:, :-1]
     inc = torch.atan2(torch.sin(inc), torch.cos(inc))
     weight = mask[:, 1:] * mask[:, :-1]
-    rate = (inc * weight).sum(1) / weight.sum(1).clamp(min=1.0)
+    tempo = (inc * weight).sum(1) / weight.sum(1).clamp(min=1.0)
     # a non-advancing (or backward) trajectory has no period; fall back to the window
     # length so the grid degenerates to a single time rather than dividing by zero
     span = mask.sum(1).clamp(min=1.0) / fps
-    period = torch.where(rate > 1e-6, TWO_PI / (rate.clamp(min=1e-6) * fps), span)
+    period = torch.where(tempo > 1e-6, TWO_PI / (tempo.clamp(min=1e-6) * fps), span)
     return period.cpu().numpy()
 
 
@@ -158,7 +158,7 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
             probs = model.emission_probs(h, mask)[keep].cpu().numpy()
 
             # the peak picker and the nulls need a bar period; take the model's OWN
-            # inferred rate, the only period left in the pipeline now that delta is gone
+            # inferred tempo, the only period left in the pipeline now that delta is gone
             period = trajectory_period(mu, mask[keep], float(raw["fps"][0]))
             for i, crop in enumerate(crops):
                 crop["bar_period"] = float(period[i])
