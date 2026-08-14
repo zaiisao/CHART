@@ -24,7 +24,7 @@ import collections
 import numpy as np
 import torch
 
-from phasevae.data.tempo import (ALPHA, N_HARM, P_MAX_S, P_MIN_S, SMOOTH,
+from vbpm.data.tempo import (ALPHA, N_HARM, P_MAX_S, P_MIN_S, SMOOTH,
                                  harmonic_score, pick_period)
 
 RATIOS = [(1 / 3, "1/3"), (0.5, "1/2"), (2 / 3, "2/3"), (1.0, "1"),

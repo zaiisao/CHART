@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "phasevae"
+name = "vbpm"
 version = "0.1.0"
-description = "Bar-phase VAE: a §7 bar-pointer model on frozen fold-honest frontends"
+description = "VBPM: a variational bar-pointer model on frozen fold-honest frontends"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.6",
@@ -21,11 +21,11 @@ dev = ["pytest", "ruff"]
 
 # ONE package. Inside it: model + hooks modules (mainline/psi) at the top, the data
 # layer (data.py catalog+features, songs.py, frontends/), checks/ diagnostics, and
-# configs/ YAML recipes. tests live in phasevae/tests and are not shipped.
+# configs/ YAML recipes. tests live in vbpm/tests and are not shipped.
 [tool.setuptools]
-packages = ["phasevae", "phasevae.variants", "phasevae.data",
-            "phasevae.data.frontends", "phasevae.scoring", "phasevae.checks"]
+packages = ["vbpm", "vbpm.variants", "vbpm.data",
+            "vbpm.data.frontends", "vbpm.scoring", "vbpm.checks"]
 
 # The config schema is code, not data: run.py refuses a config without it.
 [tool.setuptools.package-data]
-phasevae = ["config_schema.json"]
+vbpm = ["config_schema.json"]

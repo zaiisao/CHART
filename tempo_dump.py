@@ -12,8 +12,8 @@ import importlib
 import numpy as np
 import torch
 
-from phasevae.data.dataset import split_songs
-from phasevae.data.excerpts import ExcerptDataset, collate_excerpts
+from vbpm.data.dataset import split_songs
+from vbpm.data.excerpts import ExcerptDataset, collate_excerpts
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     args = ap.parse_args()
 
     device = f"cuda:{args.gpu}"
-    frontend = importlib.import_module("phasevae.data.frontends.beat_this").FRONTEND(
+    frontend = importlib.import_module("vbpm.data.frontends.beat_this").FRONTEND(
         checkpoint="final0", device=device, output="features+activations")
 
     train_songs, val_songs, test_songs = split_songs()

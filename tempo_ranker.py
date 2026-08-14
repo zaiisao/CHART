@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from phasevae.data.tempo import P_MAX_S, P_MIN_S, harmonic_score, pick_period
+from vbpm.data.tempo import P_MAX_S, P_MIN_S, harmonic_score, pick_period
 from tempo_lab import (TOL, acf_candidates, comb_contrast, fold_profile, label_ratio,
                        ladder, peakpick_period, smooth_zero_mean)
 

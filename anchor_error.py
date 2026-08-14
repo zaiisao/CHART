@@ -11,10 +11,10 @@ import argparse
 import numpy as np
 import torch
 
-from phasevae.data.dataset import split_songs
-from phasevae.data.excerpts import ExcerptDataset, collate_excerpts, to_model_batch
-from phasevae.model import BarPhaseVAE, TWO_PI
-from phasevae.scoring.evaluation import scoring_records
+from vbpm.data.dataset import split_songs
+from vbpm.data.excerpts import ExcerptDataset, collate_excerpts, to_model_batch
+from vbpm.model import VBPM, TWO_PI
+from vbpm.scoring.evaluation import scoring_records
 
 
 def circular_anchor(mu, act, mask=None, center=True, eps=1e-12):
@@ -38,13 +38,13 @@ ap = argparse.ArgumentParser(); ap.add_argument("--gpu", type=int, default=3)
 args = ap.parse_args()
 device = torch.device(f"cuda:{args.gpu}")
 
-fe_mod = __import__("phasevae.data.frontends.beat_this", fromlist=["FRONTEND"])
+fe_mod = __import__("vbpm.data.frontends.beat_this", fromlist=["FRONTEND"])
 frontend = fe_mod.FRONTEND(checkpoint="final0", device=f"cuda:{args.gpu}",
                            output="features+activations")
 _, _, test_songs = split_songs(None)
 test_set = ExcerptDataset(test_songs, frontend, 45.0, deterministic=True)
 
-model = BarPhaseVAE(frontend.num_channels, emission="triangle", drift_bound=0.01,
+model = VBPM(frontend.num_channels, emission="triangle", drift_bound=0.01,
                     bar_rate=True, kappa_physical=2000.0)
 sd = torch.load("checkpoints/excerpt_base45/seed0.pt", map_location="cpu")
 model.load_state_dict(sd, strict=False)

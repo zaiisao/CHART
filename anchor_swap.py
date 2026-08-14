@@ -16,11 +16,11 @@ import types
 
 import torch
 
-from phasevae.data.dataset import split_songs
-from phasevae.data.excerpts import ExcerptDataset
-from phasevae.model import BarPhaseVAE, TWO_PI
-from phasevae.scoring.evaluation import evaluate
-from phasevae.variants.anchor_k import AnchorKVAE
+from vbpm.data.dataset import split_songs
+from vbpm.data.excerpts import ExcerptDataset
+from vbpm.model import VBPM, TWO_PI
+from vbpm.scoring.evaluation import evaluate
+from vbpm.variants.anchor_k import AnchorKVAE
 
 
 def circular_anchor(mu, act, mask=None, center=True, eps=1e-12):
@@ -45,7 +45,7 @@ CKPT = {"baseline": "checkpoints/excerpt_base45/seed0.pt",
         "v2_k_folded": "checkpoints/excerpt_anchor_k_v2/seed0.pt"}
 
 
-class V1AnchorK(BarPhaseVAE):
+class V1AnchorK(VBPM):
     """anchor_k v1 as banked: a single Linear on the TIME-MEAN trunk -> 64 slot logits.
 
     Reconstructed from the checkpoint's own shapes (k_head.weight [64, 256], no hidden
@@ -72,7 +72,7 @@ def build(kind, input_dim):
     common = dict(emission="triangle", drift_bound=0.01, bar_rate=True,
                   kappa_physical=2000.0)
     if kind == "baseline":
-        return BarPhaseVAE(input_dim, **common)
+        return VBPM(input_dim, **common)
     if kind == "v1_k_trunk":
         return V1AnchorK(input_dim, anchor_slots=64, **common)
     return AnchorKVAE(input_dim, anchor_slots=64, **common)
@@ -103,7 +103,7 @@ def main():
     args = ap.parse_args()
     device = torch.device(f"cuda:{args.gpu}")
 
-    frontend_mod = __import__("phasevae.data.frontends.beat_this", fromlist=["FRONTEND"])
+    frontend_mod = __import__("vbpm.data.frontends.beat_this", fromlist=["FRONTEND"])
     frontend = frontend_mod.FRONTEND(checkpoint="final0", device=f"cuda:{args.gpu}",
                                      output="features+activations")
     _, _, test_songs = split_songs(None)

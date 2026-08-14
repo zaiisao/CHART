@@ -15,9 +15,9 @@ import collections
 import numpy as np
 import torch
 
-from phasevae.data.dataset import split_songs
-from phasevae.data.excerpts import ExcerptDataset, collate_excerpts
-from phasevae.data.tempo import (ALPHA, P_MAX_S, P_MIN_S, SMOOTH,
+from vbpm.data.dataset import split_songs
+from vbpm.data.excerpts import ExcerptDataset, collate_excerpts
+from vbpm.data.tempo import (ALPHA, P_MAX_S, P_MIN_S, SMOOTH,
                                  harmonic_score, pick_period)
 
 RATIOS = [(1 / 3, "1/3"), (0.5, "1/2"), (2 / 3, "2/3"), (1.0, "1"),
@@ -51,7 +51,7 @@ def main():
 
     import importlib
     device = f"cuda:{args.gpu}"
-    frontend = importlib.import_module("phasevae.data.frontends.beat_this").FRONTEND(
+    frontend = importlib.import_module("vbpm.data.frontends.beat_this").FRONTEND(
         checkpoint="final0", device=device, output="features+activations")
 
     _, val_songs, test_songs = split_songs(args.limit_per_fold)

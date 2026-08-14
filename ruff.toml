@@ -28,4 +28,4 @@ convention = "google"
 
 [lint.per-file-ignores]
 # the blind suite documents contracts in test names, not docstrings
-"phasevae/tests/*" = ["D", "N"]
+"vbpm/tests/*" = ["D", "N"]
