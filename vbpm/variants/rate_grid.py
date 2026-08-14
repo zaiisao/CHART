@@ -34,11 +34,11 @@ class RateGridEncoder(Encoder):
     def heads(self, trunk, mask=None, h=None):
         channels = self.output_channels(trunk)
         kappa = bounded_kappa(
-            torch.exp(channels["log_phi_kappa"] + self.log_phi_kappa_bias) + 1e-3)
+            torch.exp(channels["phase_log_kappa"] + self.log_phi_kappa_bias) + 1e-3)
 
         w = torch.ones(trunk.shape[:2], device=trunk.device, dtype=trunk.dtype) \
             if mask is None else mask
-        a = torch.sigmoid(channels["downbeat_logit"]) * w
+        a = torch.sigmoid(channels["rotation_weight_logit"]) * w
 
         t = torch.arange(trunk.shape[1], device=trunk.device, dtype=trunk.dtype)
         phase0 = torch.exp(self.log_rates)[:, None] * t[None, :]

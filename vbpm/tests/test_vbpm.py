@@ -199,14 +199,12 @@ def test_vonmises_entropy_uniform_limit_and_scipy():
 
 
 def test_encoder_trajectory_rotates_monotonically_by_construction():
-    """mu = offset + cumsum(exp(pooled log-dotphi)): rotation is STRUCTURAL, not learned."""
+    """mu = offset + cumsum(exp(log-dotphi)): rotation is STRUCTURAL, not learned."""
     _seed()
-    enc = Encoder(input_dim=4, d_model=8, pool_span=50)
+    enc = Encoder(input_dim=4, d_model=8)
     h = torch.randn(2, 300, 4)
     post = enc(h, torch.ones(2, 300))
-    mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
-
-    inc = mu[:, 1:] - mu[:, :-1]
+    inc = post["tempo"]["mu"][:, :-1]
 
     # 1. strictly increasing: the tempo is exp(...) so every step is positive. A frozen or
     #    sign-balanced trajectory -- the measured collapse -- is unrepresentable.
@@ -542,7 +540,9 @@ def test_deployed_net_reads_no_target_in_any_shipped_config():
         # two-value heads() signature; they raise rather than silently mis-score. They
         # are BCE models, so running them would compare two different objectives under
         # one elbo column. Delete a name here when the variant is ported, not before.
-        if cfg.variant in {"psi", "ladder", "anchor_time"}:
+        if cfg.variant in {"psi", "ladder", "anchor_time",
+                           "interval_exact_norm", "interval_exact_rotation",
+                           "interval_exact_tempo"}:
             continue
         model = hooks.build_model(cfg, input_dim=4)
         controls_mod.assert_encoder_is_target_blind(
@@ -655,51 +655,38 @@ def test_rate_bound_is_identity_in_the_interior():
     assert float(x.grad) > 0.0, "the tempo bound is an absorbing rail again"
 
 
-def test_learned_sigma_one_draw_per_bar_and_entropy_formula():
-    """tempo_sigma_learned: the noise is constant within a bar, and tempo_entropy
-    equals sum over bars of 0.5*log(2*pi*e*sigma_k^2) computed by hand."""
+def test_tempo_entropy_is_charged_per_frame_not_per_bar():
+    """The 2026-08-13 repair: tempo_entropy is sum over FRAMES of 0.5*log(2*pi*e*sigma^2),
+    so the latent's dimension stops being a function of the tempo. A per-bar charge let a
+    fast rate harvest ~1.7 nats per extra bar."""
     torch.manual_seed(0)
-    enc = Encoder(input_dim=4, d_model=8).double().train()
+    model = VBPM(input_dim=4, d_model=8, emission="triangle").double().train()
     h = torch.randn(1, 700, 4).double()
     w = torch.ones(1, 700).double()
-    torch.manual_seed(1)
-    mu, _k, aux = enc(h, w)
+    y = torch.zeros(1, 700).double()
+    y[:, ::100] = 1.0
 
-    trunk = enc.features(h, w)
-    out = enc.output_channels(trunk)
-    log_dotphi, seg_full = enc._bar_seg(out["log_dotphi"], w)
+    sigma = model.encoder(h, w)["tempo"]["sigma"]
+    expected = float(((0.5 * math.log(2 * math.pi * math.e)
+                       + torch.log(sigma)) * w).sum(1)[0])
 
-    inc = mu[0, 1:] - mu[0, :-1]
-    same_bar = (seg_full[0, 1:] == seg_full[0, :-1])[1:]
-    inc_pair = (inc[1:] - inc[:-1]).abs()
-    assert float(inc_pair[same_bar].max()) < 1e-9, \
-        "dotphi varies inside a bar: the draw is not one-per-bar"
-    bias = math.log(TEMPO_SIGMA_INIT / (TEMPO_SIGMA_CEIL - TEMPO_SIGMA_INIT))
-    sig_pooled = enc._pool_by_bar(out["log_sigma_dotphi"], seg_full, w)
-    sigma = TEMPO_SIGMA_CEIL * torch.sigmoid(sig_pooled + bias)
-    expected = 0.0
-    for b in range(int(seg_full.max()) + 1):
-        m = seg_full[0] == b
-        if int(m.sum()) == 0:
-            continue
-        expected += 0.5 * math.log(2 * math.pi * math.e) + math.log(float(sigma[0, m][0]))
-    torch.manual_seed(0)
-    _mu2, _k2, aux2 = enc(h, w)
-    assert float(aux2["tempo"]["entropy"][0]) == pytest.approx(expected, rel=1e-6)
+    out = model(h, w, y, samples=1)
+
+    assert float(out["tempo_entropy"][0]) == pytest.approx(expected, rel=1e-9)
+    assert sigma.shape == (1, 700), "sigma is per frame, not per bar"
 
 
 def test_learned_sigma_starts_at_init_and_gets_gradient():
-    """A fresh sigma head reads ~TEMPO_SIGMA_INIT everywhere, and the ELBO trains it."""
+    """A fresh sigma head reads the softplus init everywhere, and the ELBO trains it."""
     _seed()
     model = VBPM(input_dim=4, d_model=8, emission="triangle").train()
     h, mask = torch.randn(2, 300, 4), torch.ones(2, 300)
     y = torch.zeros(2, 300); y[:, ::100] = 1.0
 
     trunk = model.encoder.features(h, mask)
-    raw = model.encoder.output_channels(trunk)["log_sigma_dotphi"]
-    bias = math.log(TEMPO_SIGMA_INIT / (TEMPO_SIGMA_CEIL - TEMPO_SIGMA_INIT))
-    sigma = TEMPO_SIGMA_CEIL * torch.sigmoid(raw + bias)
-    assert float((sigma - TEMPO_SIGMA_INIT).abs().max()) < 0.01
+    raw = model.encoder.output_channels(trunk)["tempo_sigma_logit"]
+    sigma = torch.nn.functional.softplus(raw)
+    assert float((sigma - 0.0005).abs().max()) < 1e-4
 
     out = model(h, mask, y, samples=1)
     model.zero_grad()

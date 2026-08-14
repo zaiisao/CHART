@@ -31,19 +31,17 @@ def test_encoder_shapes_and_global_response():
     h = torch.randn(1, 200, 4)
     mask = torch.ones(1, 200)
     post = enc(h, mask)
-    mu, kappa, anchor = post["phase"]["mu"], post["phase"]["kappa"], post
-    assert mu.shape == (1, 200) and kappa.shape == (1, 200)
+    tempo, kappa = post["tempo"]["mu"], post["phase"]["kappa"]
+    assert tempo.shape == (1, 200) and kappa.shape == (1, 200)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
-    assert anchor["tempo"]["log_prior"].shape == (1,) and anchor["tempo"]["entropy"].shape == (1,)
+    assert post["tempo"]["sigma"].shape == (1, 200)
+    assert post["rotation"]["weight"].shape == (1, 200)
 
     h2 = h.clone()
     h2[0, 7] += 5.0
     post2 = enc(h2, mask)
-    mu2, anchor2 = post2["phase"]["mu"], post2
-    assert not torch.allclose(mu, mu2, atol=1e-6), \
+    assert not torch.allclose(tempo, post2["tempo"]["mu"], atol=1e-6), \
         "the trajectory did not respond to the input at all"
-    assert not torch.allclose(anchor["tempo"]["log_prior"], anchor2["tempo"]["log_prior"], atol=1e-9), \
-        "the tempo prior did not respond to the input at all"
 
 
 # ================================================== 2. EmissionTransformer
@@ -164,35 +162,34 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
 
 
 def test_forward_samples_k_averages_k_evaluations(monkeypatch):
-    """Input: samples=3 with the sampler monkeypatched to return a counted,
-        per-call constant offset (0, 0.5, 1.0 rad). Asserted: the sampler is called
-        exactly 3 times and recon equals the arithmetic mean of the three hand-computed
-        masked Bernoulli log-likelihoods at mu + offset. Why: 'samples: Monte Carlo
-        samples for the reconstruction term' -- an average, not a sum.
+    """Input: both stochastic draws pinned to zero, so every Monte Carlo sample is the
+        same evaluation. Asserted: the sampler is called once per sample, and recon at
+        samples=3 equals recon at samples=1. Why: 'samples: Monte Carlo samples for the
+        reconstruction term' -- an average, not a sum. Three identical draws that summed
+        would read 3x. The pre-2026-08-13 form of this test hand-computed the mean of
+        three per-frame Bernoulli likelihoods at mu + offset; recon is per-EVENT now, and
+        a constant offset no longer shifts the phase uniformly because it accumulates
+        through the scan's cumsum.
     """
-    offsets = [0.0, 0.5, 1.0, 0.25, 0.75, 0.125]
     calls = {"n": 0}
 
     def fake_sampler(kappa):
-        off = offsets[calls["n"]]
         calls["n"] += 1
-        return torch.full_like(kappa, off)
+        return torch.zeros_like(kappa)
 
     monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
+    monkeypatch.setattr(model_mod.torch, "randn_like", torch.zeros_like)
     model = _tf_model()
     h, delta, mask, y = _batch()
-    out = model(h, mask, y, samples=3)
+
+    out3 = model(h, mask, y, samples=3)
     assert calls["n"] == 3
 
-    with torch.no_grad():
-        terms = []
-        for i in range(3):
-            phi = out["mu"] + offsets[i]
-            bce = torch.nn.functional.binary_cross_entropy_with_logits(
-                model.emission_logits(phi, mask), y, reduction="none")
-            terms.append(-(bce * mask).sum(1))
-        expected = torch.stack(terms).mean(0)
-    assert torch.allclose(out["recon"], expected, atol=1e-4)
+    calls["n"] = 0
+    out1 = model(h, mask, y, samples=1)
+    assert calls["n"] == 1
+
+    assert torch.allclose(out3["recon"], out1["recon"], atol=1e-6)
 
 
 def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
