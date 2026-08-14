@@ -21,7 +21,8 @@ class PosteriorEncoder(Encoder):
         """ELBO plus the psi terms; q trains against the PHYSICAL prior only."""
         assert y is not None, "posterior encoder requires the target input y"
         x = torch.cat([h, y.unsqueeze(-1).to(h.dtype)], dim=-1)
-        mu, kappa, _anchor = self.heads(self.features(x, mask), mask, x)
+        post = self.heads(self.features(x, mask), mask, x)
+        mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
         return mu, kappa
 
 
@@ -37,7 +38,8 @@ class RotationPrior(Encoder):
     def forward(self, h, mask=None):
         """ELBO plus the psi terms; q trains against the PHYSICAL prior only."""
         trunk = self.features(h, mask)
-        mu, kappa, _anchor = self.heads(trunk, mask, h)
+        post = self.heads(trunk, mask, h)
+        mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
         if self.rot_head is None:
             return mu, kappa
         return mu, kappa, self.rot_head(trunk).mean(dim=1)

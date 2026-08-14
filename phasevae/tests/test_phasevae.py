@@ -202,7 +202,8 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
     _seed()
     enc = Encoder(input_dim=4, d_model=8, pool_span=50)
     h = torch.randn(2, 300, 4)
-    mu, kappa, _anchor = enc(h, torch.ones(2, 300))
+    post = enc(h, torch.ones(2, 300))
+    mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
 
     inc = mu[:, 1:] - mu[:, :-1]
 
@@ -683,7 +684,7 @@ def test_learned_sigma_one_draw_per_bar_and_entropy_formula():
         expected += 0.5 * math.log(2 * math.pi * math.e) + math.log(float(sigma[0, m][0]))
     torch.manual_seed(0)
     _mu2, _k2, aux2 = enc(h, w)
-    assert float(aux2["tempo_entropy"][0]) == pytest.approx(expected, rel=1e-6)
+    assert float(aux2["tempo"]["entropy"][0]) == pytest.approx(expected, rel=1e-6)
 
 
 def test_learned_sigma_starts_at_init_and_gets_gradient():

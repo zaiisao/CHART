@@ -20,10 +20,11 @@ TEMPO_BOUND_MARGIN = 0.35
 
 TEMPO_LO, TEMPO_HI = math.log(0.01), math.log(0.2)
 
-TEMPO_PRIOR_MU = math.log(TWO_PI / (1.83 * 50.0))
-TEMPO_PRIOR_SIGMA = 0.381
-TEMPO_PRIOR_EPS = 0.08
+TEMPO_PRIOR_MU = math.log(TWO_PI / (1.91 * 50.0))
+TEMPO_PRIOR_SIGMA = 0.370
+TEMPO_PRIOR_EPS = 0.02
 TEMPO_WALK_B = 0.04
+TEMPO_WALK_MIX = (0.618, 0.00016, 0.00193)
 
 TEMPO_SIGMA_CEIL = 0.25
 TEMPO_SIGMA_INIT = 0.15
@@ -59,11 +60,8 @@ def vonmises_entropy(kappa):
 class Encoder(nn.Module):
     """q_phi(phi_t | x) = vM(mu_t(x), kappa_t(x)), per frame, reading AUDIO ONLY."""
     def __init__(self, input_dim: int, d_model: int = 128, heads: int = 4, layers: int = 2,
-                 kappa_physical: float = KAPPA_PHYSICAL, pool_span: int = 150,
-                 max_len: int = 4096):
+                 kappa_physical: float = KAPPA_PHYSICAL, max_len: int = 4096):
         super().__init__()
-        self.pool_span = pool_span
-
         self.proj = nn.Linear(input_dim, d_model)
         layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
                                         dropout=0.0, activation="gelu",
@@ -73,6 +71,9 @@ class Encoder(nn.Module):
 
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.zeros_(self.out.bias)
+        with torch.no_grad():
+            self.out.bias[2] = TEMPO_PRIOR_MU
+            self.out.bias[3] = inverse_softplus(0.0005)
 
         self.register_buffer("pe", EmissionTransformer._sinusoidal(max_len, d_model))
         self.register_buffer("log_phi_kappa_bias",
@@ -81,9 +82,8 @@ class Encoder(nn.Module):
     def output_channels(self, trunk):
         """[B, T, d_model] -> {channel: [B, T]}, one named single-row head each."""
         out = self.out(trunk)
-        result = {"downbeat_logit": out[..., 0], "log_phi_kappa": out[..., 1],
-                  "log_dotphi": out[..., 2], "log_sigma_dotphi": out[..., 3]}
-
+        result = {"rotation_weight_logit": out[..., 0], "phase_log_kappa": out[..., 1],
+                    "tempo_log_mu": out[..., 2], "tempo_sigma_logit": out[..., 3]}
         return result
 
     def features(self, h, mask=None):
@@ -94,95 +94,35 @@ class Encoder(nn.Module):
 
     @staticmethod
     def _ramp(log_dotphi):
-        """log-dotphi -> (tempo, anchor-free phase ramp). mu0[0] = 0 by construction."""
-        lo, hi = TEMPO_LO, TEMPO_HI
-        m = TEMPO_BOUND_MARGIN
-        mid, half = 0.5 * (lo + hi), 0.5 * (hi - lo)
-        d = log_dotphi
-        flat = half - m
-        over = (d.abs() - flat).clamp(min=0.0)
-        squashed = flat + m * torch.tanh(over / m)
-        bounded = mid + torch.sign(d) * torch.minimum(d.abs(), squashed)
-        dotphi = torch.exp(bounded)
+        dotphi = torch.exp(log_dotphi)
         return dotphi, torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
 
     def _anchor(self, mu0, a):
-        """The window's single rotation: circular mean of the evidence folded on mu0."""
+        """The window's single phase OFFSET theta: circular mean of the evidence folded on
+        mu0. One scalar per window -- where bar 1 begins -- as against the phase, which is
+        a per-frame trajectory. mu = mu0 + theta."""
         R = torch.complex(a * torch.cos(mu0), a * torch.sin(mu0)).sum(1)
         return -torch.angle(R), R.abs() / a.sum(1).clamp(min=1e-6)
 
-    def _bar_seg(self, log_dotphi_raw, w):
-        _d, mu0_i = self._ramp(log_dotphi_raw)
-        seg = self._bar_index(mu0_i, w)
-        log_dotphi = self._pool_by_bar(log_dotphi_raw, seg, w)
-        _d, mu0_i = self._ramp(log_dotphi)
-        seg = self._bar_index(mu0_i, w)
-        log_dotphi = self._pool_by_bar(log_dotphi_raw, seg, w)
-        return log_dotphi, seg
-
-    def heads(self, trunk, mask=None, h=None):
-        """Trunk -> (mu [B, T], kappa [B, T], anchor): the parameters of q, not a sample."""
+    def heads(self, trunk, mask=None):
         channels = self.output_channels(trunk)
+        w = torch.ones(trunk.shape[:2], device=trunk.device, dtype=trunk.dtype) \
+            if mask is None else mask
 
         # JA: log_phi_kappa_bias is a constant that is added to the encoder's log_kappa output.
         # As kappa initializes to a small value (around 1), it would otherwise take a long
         # time before reaching a reasonable value.
-        kappa = bounded_kappa(torch.exp(channels["log_phi_kappa"] + self.log_phi_kappa_bias) + 1e-3)
+        phase_kappa = bounded_kappa(
+            torch.exp(channels["phase_log_kappa"] + self.log_phi_kappa_bias) + 1e-3)
+        tempo_mu = torch.exp(channels["tempo_log_mu"])
+        tempo_sigma = nn.functional.softplus(channels["tempo_sigma_logit"])
+        rotation_weight = torch.sigmoid(channels["rotation_weight_logit"]) * w
 
-        log_dotphi_raw = channels["log_dotphi"]
-        w = torch.ones(trunk.shape[:2], device=trunk.device, dtype=trunk.dtype) \
-            if mask is None else mask
-
-        log_dotphi, seg = self._bar_seg(log_dotphi_raw, w)
-
-        log_dotphi, tempo_entropy = self._sample_learned_sigma(
-            channels["log_sigma_dotphi"], log_dotphi, seg, w)
-
-        dotphi, mu0 = self._ramp(log_dotphi)
-        a = torch.sigmoid(channels["downbeat_logit"]) * w
-        offset, _ = self._anchor(mu0.detach(), a)
-        mu = mu0 + offset[:, None]
-
-        tempo_prior = self._tempo_log_prior(log_dotphi, seg, w)
-
-        return mu, kappa, {"tempo_prior": tempo_prior,
-                           "tempo_entropy": tempo_entropy}
-
-    def _sample_learned_sigma(self, sigma_raw, log_dotphi, seg, w):
-        """(noised log_dotphi, q's tempo entropy [B]): one draw and one H term per bar."""
-        bias = math.log(TEMPO_SIGMA_INIT / (TEMPO_SIGMA_CEIL - TEMPO_SIGMA_INIT))
-        if seg is not None:
-            sigma_raw = self._pool_by_bar(sigma_raw, seg, w)
-        sigma = TEMPO_SIGMA_CEIL * torch.sigmoid(sigma_raw + bias)
-
-        if seg is not None:
-            n_seg = int(seg.max().item()) + 1
-            eps = torch.gather(torch.randn(sigma.shape[0], n_seg, device=sigma.device,
-                                           dtype=sigma.dtype), 1, seg)
-        else:
-            eps = torch.randn_like(sigma)
-
-        if self.training:
-            log_dotphi = log_dotphi + sigma * eps
-        entropy = ((0.5 * math.log(2.0 * math.pi * math.e) + torch.log(sigma))
-                   * w).sum(1)
-        return log_dotphi, entropy
-
-    def _tempo_log_prior(self, log_dotphi, seg, w):
-        """log p(dotphi_1) + sum_k log p(dotphi_k | dotphi_{k-1}) per window. [B]."""
-        z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
-        log_gauss = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
-        log_unif = -math.log(TEMPO_HI - TEMPO_LO)
-        floor = torch.full_like(log_gauss, math.log(TEMPO_PRIOR_EPS) + log_unif)
-        init = torch.logaddexp(math.log(1.0 - TEMPO_PRIOR_EPS) + log_gauss, floor)
-
-        if seg is None or TEMPO_WALK_B <= 0.0:
-            return init
-
-        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
-        pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        walk = -(step.abs() / TEMPO_WALK_B + math.log(2.0 * TEMPO_WALK_B)) * pair
-        return init + walk.sum(1)
+        return {
+            "phase": {"kappa": phase_kappa},
+            "tempo": {"mu": tempo_mu, "sigma": tempo_sigma},
+            "rotation": {"weight": rotation_weight},
+        }
 
     @staticmethod
     def _pool(x, span):
@@ -196,17 +136,6 @@ class Encoder(nn.Module):
         xp = torch.nn.functional.pad(x, (0, pad))
         means = xp.reshape(b, -1, span).mean(-1, keepdim=True)
         return means.expand(-1, -1, span).reshape(b, -1)[:, :t]
-
-    @staticmethod
-    @torch.no_grad()
-    def _bar_index(mu, w):
-        """[B, T] long: which bar each frame is in, from mu's own 2pi wraps, 0-based."""
-        real = w > 0
-        seg = torch.floor(mu / TWO_PI).long()
-        lo = seg.masked_fill(~real, torch.iinfo(torch.long).max).min(dim=1, keepdim=True)
-        hi = seg.masked_fill(~real, torch.iinfo(torch.long).min).max(dim=1, keepdim=True)
-        seg = (seg - lo.values).clamp(min=0, max=None)
-        return torch.minimum(seg, (hi.values - lo.values).clamp(min=0))
 
     @staticmethod
     def _resolve_cycle(seg_a, seg_b):
@@ -234,7 +163,7 @@ class Encoder(nn.Module):
     def forward(self, h, mask=None):
         """[B, T, D] -> (mu, kappa). Per-frame and free: see kl_jitter."""
         features = self.features(h, mask)
-        heads = self.heads(features, mask, h)
+        heads = self.heads(features)
 
         return heads
 
@@ -245,10 +174,11 @@ class EmissionTransformer(nn.Module):
     def __init__(self, d_model: int = 64, layers: int = 2, heads: int = 4,
                  use_positional: bool = False, max_len: int = 4096):
         super().__init__()
-        self.proj = nn.Linear(2, d_model)            # (cos phi, sin phi) -- latent ONLY
+        self.proj = nn.Linear(2, d_model)
         self.use_positional = use_positional
         if use_positional:
             self.register_buffer("pe", self._sinusoidal(max_len, d_model))
+
         layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
                                            dropout=0.0, activation="gelu",
                                            batch_first=True, norm_first=True)
@@ -256,9 +186,7 @@ class EmissionTransformer(nn.Module):
         self.out = nn.Linear(d_model, 1)
 
         nn.init.normal_(self.out.weight, std=1e-2)
-        nn.init.constant_(self.out.bias, -3.4)       # ~= the 3.2% base tempo, so training
-                                                     # starts calibrated instead of spending
-                                                     # its first epochs finding the prior
+        nn.init.constant_(self.out.bias, -3.4)
 
     @staticmethod
     def _sinusoidal(length, dim):
@@ -285,8 +213,8 @@ class BarPhaseVAE(nn.Module):
 
     def __init__(self, input_dim: int, d_model: int = 128, emission: str = "cosine",
                  emission_layers: int = 2, emission_dim: int = 64,
-                 emission_positional: bool = False, kappa_physical: float = KAPPA_PHYSICAL,
-                 detector_layers: int = 0):
+                 emission_positional: bool = False,
+                 kappa_physical: float = KAPPA_PHYSICAL):
         super().__init__()
         self.kappa_physical = float(kappa_physical)
         self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical)
@@ -335,36 +263,69 @@ class BarPhaseVAE(nn.Module):
         kp = torch.as_tensor(self.kappa_physical, device=mu.device, dtype=kappa.dtype)
         return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
 
+    def tempo_log_prior(self, dotphi, w):
+        log_dotphi = torch.log(dotphi)
+
+        z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
+        init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
+
+        step = (log_dotphi[:, 1:] - log_dotphi[:, :-1]).abs()
+        pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        weight, coast, change = TEMPO_WALK_MIX
+        stay = math.log(weight) - step / coast - math.log(2.0 * coast)
+        move = math.log(1.0 - weight) - step / change - math.log(2.0 * change)
+
+        return init + (torch.logaddexp(stay, move) * pair).sum(1)
+
+    def phase_log_prior(self, phi, dotphi, w, kappa_p):
+        pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        predicted = phi[:, :-1] + dotphi[:, :-1]
+
+        return (vonmises_log_density(phi[:, 1:], predicted, kappa_p) * pair).sum(1)
+
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
-        """One ELBO evaluation on a padded batch (tutorial 7.7)."""
-        mu, kappa, aux = self.encoder(h, mask)
-        kl = (self.kl_jitter(mu, kappa, mask) - aux["tempo_prior"]
-              - aux["tempo_entropy"])
+        post = self.encoder(h, mask)
+        phase, tempo, rotation = post["phase"], post["tempo"], post["rotation"]
+        
+        phase_kappa = phase["kappa"]
+        tempo_mu, tempo_sigma = tempo["mu"], tempo["sigma"]
+        rotation_weight = rotation["weight"]
+
+        w = torch.ones_like(phase_kappa) if mask is None else mask
+        pair_mask = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        pair_w = pair_mask.to(w.dtype)
+
+        h_tempo = ((0.5 * math.log(2.0 * math.pi * math.e)
+                    + torch.log(tempo_sigma)) * w).sum(1)
 
         recon = 0.0
+        logp_tempo = 0.0
+        kl_phase = 0.0
+        phi = None
+
         for _ in range(samples):
-            phi = mu + sample_vonmises(kappa)
-            w = torch.ones_like(y) if mask is None else mask
-            logits = self.emission_logits(phi, mask)
-            pos = (y > 0.5) & (w > 0)
-            log_miss = -torch.nn.functional.softplus(logits)
-            start = pos & ~torch.nn.functional.pad(pos, (1, 0))[:, :-1]
-            run_id = torch.cumsum(start.long(), dim=1) * pos.long()
-            n_run = int(run_id.max().item()) + 1
-            miss_sum = logits.new_zeros(logits.shape[0], n_run).scatter_add(
-                1, run_id, log_miss * pos.to(log_miss.dtype))
-            counts = logits.new_zeros(logits.shape[0], n_run).scatter_add(
-                1, run_id, pos.to(log_miss.dtype))
-            hit = torch.log1p(-torch.exp(miss_sum).clamp(max=1.0 - 1e-6))
-            event_ll = (hit[:, 1:] * (counts[:, 1:] > 0)).sum(1)
-            neg_ll = (log_miss * (~pos).to(log_miss.dtype) * w).sum(1)
-            recon = recon + pos_weight * event_ll + neg_ll
+            dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
+            step = dotphi[:, :-1] + sample_vonmises(phase_kappa[:, 1:])
+            ramp = torch.cat([torch.zeros_like(dotphi[:, :1]),
+                              torch.cumsum(step * pair_mask, dim=1)], dim=1)
+
+            theta, _ = self.encoder._anchor(ramp.detach(), rotation_weight)
+            phi = ramp + theta[:, None]
+
+
+            logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w)
+            kl_phase = kl_phase + self.kl_jitter(ramp[:, 1:], phase_kappa[:, 1:], pair_w)
+            recon = recon + event_recon(self.emission_logits(phi, mask), y, w, pos_weight)
 
         recon = recon / samples
+        logp_tempo = logp_tempo / samples
+        kl_phase = kl_phase / samples
+        kl = kl_phase - h_tempo - logp_tempo
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa,
-                "tempo_prior": aux["tempo_prior"],
-                "tempo_entropy": aux["tempo_entropy"]}
+        return {"elbo": recon - kl, "recon": recon, "kl": kl,
+                "mu": phi, "kappa": phase_kappa,
+                "tempo_prior": logp_tempo, "tempo_entropy": h_tempo,
+                "kl_phase": kl_phase}
 
     @property
     def deployed_net(self):
@@ -373,14 +334,33 @@ class BarPhaseVAE(nn.Module):
 
     @torch.no_grad()
     def infer_phase(self, h, mask=None):
-        """Deployment (8.1.2): zhat = mu_phi(x). Reads audio only; returns [B, T]."""
         assert not self.training, "deployment path must run in eval mode"
-        return self.encoder(h, mask)[0]
+        post = self.encoder(h, mask)
+        dotphi = post["tempo"]["mu"]
+        ramp = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
+        theta, _ = self.encoder._anchor(ramp, post["rotation"]["weight"])
+        return ramp + theta[:, None]
 
     @torch.no_grad()
     def emission_probs(self, h, mask=None):
         """Alternative D (8.3.4): the emission evaluated at the deployed mean path."""
         return torch.sigmoid(self.emission_logits(self.infer_phase(h, mask), mask))
+
+
+def event_recon(logits, y, w, pos_weight: float = 1.0):
+    pos = (y > 0.5) & (w > 0)
+    log_miss = -torch.nn.functional.softplus(logits)
+    start = pos & ~torch.nn.functional.pad(pos, (1, 0))[:, :-1]
+    run_id = torch.cumsum(start.long(), dim=1) * pos.long()
+    n_run = int(run_id.max().item()) + 1
+    miss_sum = logits.new_zeros(logits.shape[0], n_run).scatter_add(
+        1, run_id, log_miss * pos.to(log_miss.dtype))
+    counts = logits.new_zeros(logits.shape[0], n_run).scatter_add(
+        1, run_id, pos.to(log_miss.dtype))
+    hit = torch.log1p(-torch.exp(miss_sum).clamp(max=1.0 - 1e-6))
+    event_ll = (hit[:, 1:] * (counts[:, 1:] > 0)).sum(1)
+    neg_ll = (log_miss * (~pos).to(log_miss.dtype) * w).sum(1)
+    return pos_weight * event_ll + neg_ll
 
 
 def downbeat_frames(mu, mask=None):

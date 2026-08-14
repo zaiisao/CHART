@@ -53,7 +53,8 @@ class AnchorKVAE(BarPhaseVAE):
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """ELBO with k marginalised exactly; same contract as the base forward."""
         trunk = self.encoder.features(h, mask)
-        mu, kappa, _anchor = self.encoder.heads(trunk, mask, h)
+        post = self.encoder.heads(trunk, mask, h)
+        mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
         kl = self.kl_jitter(mu, kappa, mask)
 
         C = self.anchor_slots
@@ -99,7 +100,7 @@ class AnchorKVAE(BarPhaseVAE):
         """Deployment: mu shifted by the argmax slot. Reads audio (+ length mask) only."""
         assert not self.training, "deployment path must run in eval mode"
         trunk = self.encoder.features(h, mask)
-        mu, _kappa, _anchor = self.encoder.heads(trunk, mask, h)
+        mu = self.encoder.heads(trunk, mask, h)["phase"]["mu"]
         w_mask = torch.ones_like(mu) if mask is None else mask
         a_t = self.encoder.downbeat_scores(trunk, self.encoder.read_out(trunk), w_mask, h)
         k = self.slot_logits(a_t, mu, mask).argmax(-1)

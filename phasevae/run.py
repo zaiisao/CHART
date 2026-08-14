@@ -68,7 +68,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
             mask = raw["mask"].to(device, non_blocking=True)
             y = raw["y"].to(device, non_blocking=True)
 
-            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
+            extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
+            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
+                        **extra)
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
             # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.

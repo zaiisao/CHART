@@ -28,6 +28,7 @@ def parse_args():
     p.add_argument("--kl-only", action="store_true")
     p.add_argument("--pin-tempo", action="store_true")
     p.add_argument("--pin-gain", action="store_true")
+    p.add_argument("--lr-drop", type=int, default=0)
     p.add_argument("--lr-anneal", type=float, default=0.0)
     p.add_argument("--plot", default="/tmp/overfit_emission.png",
                    help='PNG of emission vs ground truth at each snapshot; "" disables')
@@ -75,14 +76,13 @@ def main() -> None:
         model.emission_b_raw.requires_grad_(False)
     if args.oracle_tempo:
         with torch.no_grad():
-            model.encoder.out.bias[2] = (math.log(true_dotphi)
-                - 0.5 * (math.log(0.01) + math.log(0.2)))
+            model.encoder.out.bias[2] = math.log(true_dotphi)
     if args.pin_tempo:
-        raw_value = math.log(true_dotphi) - 0.5 * (math.log(0.01) + math.log(0.2))
+        raw_value = math.log(true_dotphi)
         orig_channels = model.encoder.output_channels
         def pinned_channels(trunk):
             r = orig_channels(trunk)
-            r["log_dotphi"] = torch.full_like(r["log_dotphi"], raw_value)
+            r["tempo_log_mu"] = torch.full_like(r["tempo_log_mu"], raw_value)
             return r
         model.encoder.output_channels = pinned_channels
 
@@ -98,12 +98,17 @@ def main() -> None:
     for epoch in range(args.epochs):
         model.train()
         hooks.on_epoch(model, cfg, epoch)
+        if args.lr_drop and epoch == args.lr_drop:
+            for g in opt.param_groups:
+                g["lr"] *= 0.1
         if args.lr_anneal and epoch == cfg.sharpness_warmup:
             for g in opt.param_groups:
                 g["lr"] *= args.lr_anneal
         if args.pin_gain:
             model.emission_a.data.fill_(2.2 - float(model.emission_b))
-        out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
+        extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
+        out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
+                    **extra)
         if args.kl_only:
             loss = (out["kl"] / frames).mean()
         else:
@@ -126,7 +131,9 @@ def main() -> None:
             wraps = np.flatnonzero(downbeat_frames(mu_t, mask)[0].cpu().numpy())
         errs = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
                          for w in wraps]) if len(wraps) else np.array([1e9])
-        tempo = float((out["mu"][0, 1:] - out["mu"][0, :-1]).mean())
+        inc = out["mu"][0, 1:] - out["mu"][0, :-1]
+        step_ok = ((mask[0, 1:] > 0) & (mask[0, :-1] > 0)).to(inc.dtype)
+        tempo = float((inc * step_ok).sum() / step_ok.sum().clamp(min=1.0))
         # res = the normalised resultant of the phase-folded evidence, in [0, 1]: how
         # much the bars agree about where the downbeat is. On ONE song there is no
         # generalisation to fail, so if this does not grow the anchor mechanism itself

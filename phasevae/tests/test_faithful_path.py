@@ -30,17 +30,19 @@ def test_encoder_shapes_and_global_response():
     enc = Encoder(input_dim=4)
     h = torch.randn(1, 200, 4)
     mask = torch.ones(1, 200)
-    mu, kappa, anchor = enc(h, mask)
+    post = enc(h, mask)
+    mu, kappa, anchor = post["phase"]["mu"], post["phase"]["kappa"], post
     assert mu.shape == (1, 200) and kappa.shape == (1, 200)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
-    assert anchor["tempo_prior"].shape == (1,) and anchor["tempo_entropy"].shape == (1,)
+    assert anchor["tempo"]["log_prior"].shape == (1,) and anchor["tempo"]["entropy"].shape == (1,)
 
     h2 = h.clone()
     h2[0, 7] += 5.0
-    mu2, _k2, anchor2 = enc(h2, mask)
+    post2 = enc(h2, mask)
+    mu2, anchor2 = post2["phase"]["mu"], post2
     assert not torch.allclose(mu, mu2, atol=1e-6), \
         "the trajectory did not respond to the input at all"
-    assert not torch.allclose(anchor["tempo_prior"], anchor2["tempo_prior"], atol=1e-9), \
+    assert not torch.allclose(anchor["tempo"]["log_prior"], anchor2["tempo"]["log_prior"], atol=1e-9), \
         "the tempo prior did not respond to the input at all"
 
 

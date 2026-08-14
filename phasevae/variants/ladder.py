@@ -73,7 +73,8 @@ class LadderVAE(BarPhaseVAE):
     def base_path(self, h, mask=None):
         """(trunk, mu, kappa) from the encoder. mu still carries its own offset head."""
         trunk = self.encoder.features(h, mask)
-        mu, kappa, _anchor = self.encoder.heads(trunk, mask, h)
+        post = self.encoder.heads(trunk, mask, h)
+        mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
         return trunk, mu, kappa
 
     def scalar_offset(self, h, trunk, mu, mask):
