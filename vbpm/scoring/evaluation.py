@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from ..data.excerpts import collate_excerpts
-from ..model import TWO_PI, downbeat_frames
+from ..model import TWO_PI, downbeat_times
 
 TOLERANCE_S = 0.070
 
@@ -122,8 +122,8 @@ def null_times(crop, kind: str, rng):
 
 def rule_g_times(mu, mask, raw):
     """Rule-g downbeat TIMES per crop: wrap frames of ``mu`` -> seconds from t0."""
-    wraps = downbeat_frames(mu, mask).cpu().numpy()
-    return [(np.flatnonzero(wraps[i, :len(c["y"]) - 1]) + 1) / c["fps"] + c["t0"]
+    wraps = [w.cpu().numpy() for w in downbeat_times(mu, mask)]
+    return [wraps[i][wraps[i] < len(c["y"]) - 1] / c["fps"] + c["t0"]
             for i, c in enumerate(raw)]
 
 
