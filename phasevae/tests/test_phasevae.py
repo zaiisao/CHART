@@ -154,7 +154,8 @@ def test_bounded_kappa_identity_and_bound():
     small = torch.tensor([1.0, 100.0, 2000.0], dtype=torch.float64)
     assert torch.allclose(bounded_kappa(small), small, rtol=1e-3)
 
-    big = bounded_kappa(torch.tensor([1e6, 1e7], dtype=torch.float64))
+    big = bounded_kappa(torch.tensor([10 * MAX_KAPPA, 1000 * MAX_KAPPA],
+                                     dtype=torch.float64))
     # mathematically tanh < 1 always; in floats tanh saturates to exactly 1.0 once
     # 1 - tanh underflows (raw >~ 19*MAX), so assert strictness where representable
     # and never-exceeds everywhere

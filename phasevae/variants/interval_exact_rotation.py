@@ -52,7 +52,7 @@ from .interval import interp_phase, smooth_phase
 from ..model import (TWO_PI, Encoder, bounded_kappa, log_i0, mean_resultant,
                      sample_vonmises, vonmises_entropy)
 
-DEFAULTS = dict(INTERVAL_DEFAULTS, kappa_theta="fold", kappa_theta_scale=1.0,
+DEFAULTS = dict(INTERVAL_DEFAULTS, sigma_ceil=0.01, kappa_theta="fold", kappa_theta_scale=1.0,
                 place_expect=True, place_index="first")
 
 FOLD_EPS = 1e-12

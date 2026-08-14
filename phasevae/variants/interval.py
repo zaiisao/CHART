@@ -35,7 +35,7 @@ from .base import optimizer  # noqa: F401
 from ..model import TWO_PI, BarPhaseVAE, log_i0, sample_vonmises
 
 DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
-            "sigma_ceil": 0.01, "phase_half": 0, "interval_kind": "laplace"}
+            "phase_half": 0, "interval_kind": "laplace"}
 
 
 def interp_phase(phi, frames_f):

@@ -11,30 +11,17 @@ from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises
 
 TWO_PI = 2.0 * math.pi
 
-# The physical prior's concentration: how much per-frame phase drift the dynamics allow.
-# 1/sqrt(kappa) is the per-frame sd, so 2000 gives 0.022 rad at 50 fps against a bar
-# advance of roughly 0.06 rad. A much softer prior (kappa ~ 20, sd 0.22 rad) is a random
-# walk whose phase is uniform within two seconds and regularises nothing.
 KAPPA_PHYSICAL = 383.0
 TEMPO_BOUND_MARGIN = 0.35
-
 TEMPO_LO, TEMPO_HI = math.log(0.01), math.log(0.2)
-
 TEMPO_PRIOR_MU = math.log(TWO_PI / (1.91 * 50.0))
 TEMPO_PRIOR_SIGMA = 0.370
 TEMPO_PRIOR_EPS = 0.02
-TEMPO_WALK_B = 0.04
-TEMPO_WALK_MIX = (0.618, 0.00016, 0.00193)
-
+TEMPO_WALK_SIGMA = 0.00104
 TEMPO_SIGMA_CEIL = 0.25
 TEMPO_SIGMA_INIT = 0.15
-
 BAR_POOL_ITERS = 8
-
-MAX_KAPPA = 1.0e5     # smooth ceiling on the encoder's concentration; an unbounded
-                      # softplus inside a KL term can and did run away. Bounded via
-                      # MAX * tanh(x / MAX), which is the identity for x << MAX and never
-                      # passes exactly zero gradient -- unlike a hard clamp.
+MAX_KAPPA = 1.0e7
 
 
 def bounded_kappa(raw):
@@ -269,13 +256,13 @@ class BarPhaseVAE(nn.Module):
         z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
         init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
 
-        step = (log_dotphi[:, 1:] - log_dotphi[:, :-1]).abs()
+        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        weight, coast, change = TEMPO_WALK_MIX
-        stay = math.log(weight) - step / coast - math.log(2.0 * coast)
-        move = math.log(1.0 - weight) - step / change - math.log(2.0 * change)
 
-        return init + (torch.logaddexp(stay, move) * pair).sum(1)
+        lp = -0.5 * (step / TEMPO_WALK_SIGMA) ** 2 - math.log(TEMPO_WALK_SIGMA) \
+            - 0.5 * math.log(TWO_PI)
+
+        return init + (lp * pair).sum(1)
 
     def phase_log_prior(self, phi, dotphi, w, kappa_p):
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
