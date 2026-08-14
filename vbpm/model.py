@@ -55,9 +55,9 @@ class Encoder(nn.Module):
         self.proj = nn.Linear(input_dim, d_model)
         self.d_model = d_model
         self.use_pe = use_pe
-        self.in_drop = nn.Dropout(0.1)
+        self.in_drop = nn.Dropout1d(0.1)
         layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
-                                        dropout=0.1, activation="relu",
+                                        dropout=0.0, activation="relu",
                                         batch_first=True, norm_first=False)
         self.blocks = nn.TransformerEncoder(layer, layers)
         self.out = nn.Linear(d_model, 4)
@@ -85,7 +85,7 @@ class Encoder(nn.Module):
         h = self.proj(h) * math.sqrt(self.d_model)
         if self.use_pe:
             h = h + self.pe[:h.shape[1]]
-        h = self.in_drop(h)
+        h = self.in_drop(h.transpose(1, 2)).transpose(1, 2)
         return self.blocks(h, src_key_padding_mask=pad)
 
     @staticmethod
@@ -642,6 +642,24 @@ def event_recon(logits, y, w, pos_weight: float = 1.0):
     event_ll = (hit[:, 1:] * (counts[:, 1:] > 0)).sum(1)
     neg_ll = (log_miss * (~pos).to(log_miss.dtype) * w).sum(1)
     return pos_weight * event_ll + neg_ll
+
+
+def downbeat_times(mu, mask=None):
+    """Fractional frame times where the phase crosses multiples of 2 pi, per item.
+    Linear interpolation between frames removes downbeat_frames' up-to-one-frame
+    early bias."""
+    r = torch.remainder(mu, 2.0 * math.pi)
+    drop = torch.diff(r, dim=-1) < -math.pi
+    if mask is not None:
+        drop = drop & (mask[:, 1:] > 0)
+    out = []
+    for b in range(mu.shape[0]):
+        idx = torch.nonzero(drop[b], as_tuple=False)[:, 0]
+        r0 = r[b, idx]
+        r1 = r[b, idx + 1] + 2.0 * math.pi
+        frac = (2.0 * math.pi - r0) / (r1 - r0).clamp(min=1e-9)
+        out.append(idx.to(mu.dtype) + frac)
+    return out
 
 
 def downbeat_frames(mu, mask=None):

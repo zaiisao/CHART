@@ -12,7 +12,7 @@ from .. import run as run_mod
 from ..config import load_config
 from ..data.dataset import load_catalog
 from ..data.excerpts import ExcerptDataset, collate_excerpts
-from ..model import downbeat_frames
+from ..model import downbeat_frames, downbeat_times
 
 
 def parse_args():
@@ -31,6 +31,7 @@ def parse_args():
     p.add_argument("--pin-gain", action="store_true")
     p.add_argument("--lr-drop", type=int, default=0)
     p.add_argument("--lr-anneal", type=float, default=0.0)
+    p.add_argument("--acf-init", action="store_true")
     p.add_argument("--plot", default="/tmp/overfit_emission.png",
                    help='PNG of emission vs ground truth at each snapshot; "" disables')
     return p.parse_args()
@@ -39,7 +40,14 @@ def parse_args():
 def main() -> None:
     args = parse_args()
     cfg, hooks = load_config(args.config, args.set)
+    assert not getattr(cfg, "clip_per_group", False), \
+        "overfit_one clips pooled only; clip_per_group configs are not mirrored here"
+    assert getattr(cfg, "frontend_lr_scale", 0.0) == 0.0, \
+        "overfit_one freezes the frontend; frontend_lr_scale configs are not mirrored here"
+    shipped_epochs = cfg.epochs
     cfg.epochs = args.epochs
+    if hasattr(cfg, "dec_warmup") and args.epochs != shipped_epochs:
+        cfg.dec_warmup = round(cfg.dec_warmup * args.epochs / shipped_epochs)
     device = torch.device(f"cuda:{args.gpu}")
 
     catalog = sorted(sum(load_catalog([args.dataset]).values(), []),
@@ -69,6 +77,9 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
+    assert not (args.pin_gain and getattr(model, "wants_raw", False)), \
+        "--pin-gain pins the Bernoulli emission gain, which the interval recipe never reads"
+
     opt, clip_params = hooks.optimizer(model, cfg)
     if args.pin_gain:
         with torch.no_grad():
@@ -92,6 +103,15 @@ def main() -> None:
     with torch.no_grad():
         h = frontend.forward_features(raw["input"])
     mask = raw["mask"].to(device)
+    if args.acf_init:
+        from ..data.tempo import estimate_bar_period
+        with torch.no_grad():
+            acts = frontend._audio2frames.model.task_heads(h)
+            act = torch.sigmoid(acts["downbeat"])
+            period_est = float(estimate_bar_period(act, mask, fps)[0])
+            model.encoder.out.bias[2] = math.log(2.0 * math.pi / (period_est * fps))
+        print(f"acf-init: bar period {period_est:.3f}s "
+              f"(birth ratio {period_s / period_est:.2f})", flush=True)
     y = raw["y"].to(device)
     frames = mask.sum(1).clamp(min=1.0)
     snapshots = []
@@ -126,13 +146,13 @@ def main() -> None:
         model.eval()          # infer_phase asserts eval mode; it is the deployed path
         with torch.no_grad():
             mu_t = model.infer_phase(h, mask)
-            # THE conversion (model.downbeat_frames): a downbeat is where phase crosses
-            # ZERO. Hand-rolling this from the +-pi DISPLAY discontinuity puts every
-            # wrap half a bar out -- the markers then land in the emission's troughs.
-            wraps = np.flatnonzero(downbeat_frames(mu_t, mask)[0].cpu().numpy())
+            # THE conversion (model.downbeat_times): a downbeat is where phase crosses
+            # ZERO, at the interpolated sub-frame instant. Hand-rolling this from the
+            # +-pi DISPLAY discontinuity puts every wrap half a bar out.
+            wraps = downbeat_times(mu_t, mask)[0].cpu().numpy()
         errs = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
                          for w in wraps]) if len(wraps) else np.array([1e9])
-        inc = out["phi"][0, 1:] - out["phi"][0, :-1]
+        inc = mu_t[0, 1:] - mu_t[0, :-1]
         step_ok = ((mask[0, 1:] > 0) & (mask[0, :-1] > 0)).to(inc.dtype)
         tempo = float((inc * step_ok).sum() / step_ok.sum().clamp(min=1.0))
         # res = the normalised resultant of the phase-folded evidence, in [0, 1]: how
