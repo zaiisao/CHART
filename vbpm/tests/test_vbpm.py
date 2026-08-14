@@ -203,7 +203,7 @@ def test_encoder_trajectory_rotates_monotonically_by_construction():
     _seed()
     enc = Encoder(input_dim=4, d_model=8)
     h = torch.randn(2, 300, 4)
-    post = enc(h, torch.ones(2, 300))
+    post, _ = enc(h, torch.ones(2, 300))
     inc = post["tempo"]["mu"][:, :-1]
 
     # 1. strictly increasing: the tempo is exp(...) so every step is positive. A frozen or
@@ -416,7 +416,7 @@ def test_forward_elbo_identity_and_bernoulli_recon(monkeypatch):
 
     with torch.no_grad():
         bce = torch.nn.functional.binary_cross_entropy_with_logits(
-            model.emission_logits(out["mu"], mask), y, reduction="none")
+            model.emission_logits(out["phi"], mask), y, reduction="none")
         expected = -(bce * mask).sum(1)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 
@@ -666,7 +666,8 @@ def test_tempo_entropy_is_charged_per_frame_not_per_bar():
     y = torch.zeros(1, 700).double()
     y[:, ::100] = 1.0
 
-    sigma = model.encoder(h, w)["tempo"]["sigma"]
+    model.eval()
+    sigma = model.encoder(h, w)[0]["tempo"]["sigma"]
     expected = float(((0.5 * math.log(2 * math.pi * math.e)
                        + torch.log(sigma)) * w).sum(1)[0])
 

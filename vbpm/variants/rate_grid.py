@@ -68,7 +68,7 @@ class RateGridVAE(VBPM):
                                        kappa_physical=self.kappa_physical)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
-        post = self.encoder(h, mask)
+        post, _ = self.encoder(h, mask)
         mu, kappa, aux = post["phase"]["mu"], post["phase"]["kappa"], post
         b, r, t = mu.shape
         w = torch.ones_like(y) if mask is None else mask
@@ -92,14 +92,14 @@ class RateGridVAE(VBPM):
         mu_best = mu.gather(1, idx[:, None, None].expand(b, 1, t)).squeeze(1)
         res_best = aux["resultant"].gather(1, idx[:, None]).squeeze(1)
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu_best,
+        return {"elbo": recon - kl, "recon": recon, "kl": kl, "phi": mu_best,
                 "kappa": kappa, "resultant": res_best, "log_q": log_q,
                 "kl_rate": kl_rate, "kl_offset": kl_rate}
 
     @torch.no_grad()
     def infer_phase(self, h, mask=None):
         assert not self.training, "deployment path must run in eval mode"
-        post = self.encoder(h, mask)
+        post, _ = self.encoder(h, mask)
         mu, aux = post["phase"]["mu"], post
         idx = aux["log_q"].argmax(1)
         return mu.gather(1, idx[:, None, None].expand(mu.shape[0], 1, mu.shape[2])).squeeze(1)

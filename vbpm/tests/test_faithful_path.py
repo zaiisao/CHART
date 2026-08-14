@@ -30,7 +30,7 @@ def test_encoder_shapes_and_global_response():
     enc = Encoder(input_dim=4)
     h = torch.randn(1, 200, 4)
     mask = torch.ones(1, 200)
-    post = enc(h, mask)
+    post, _ = enc(h, mask)
     tempo, kappa = post["tempo"]["mu"], post["phase"]["kappa"]
     assert tempo.shape == (1, 200) and kappa.shape == (1, 200)
     assert torch.all(kappa > 0) and torch.all(kappa < MAX_KAPPA)
@@ -39,7 +39,7 @@ def test_encoder_shapes_and_global_response():
 
     h2 = h.clone()
     h2[0, 7] += 5.0
-    post2 = enc(h2, mask)
+    post2, _ = enc(h2, mask)
     assert not torch.allclose(tempo, post2["tempo"]["mu"], atol=1e-6), \
         "the trajectory did not respond to the input at all"
 
@@ -180,6 +180,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
     monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
     monkeypatch.setattr(model_mod.torch, "randn_like", torch.zeros_like)
     model = _tf_model()
+    model.eval()
     h, delta, mask, y = _batch()
 
     out3 = model(h, mask, y, samples=3)
@@ -202,7 +203,7 @@ def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
 
     with torch.no_grad():
         bce = torch.nn.functional.binary_cross_entropy_with_logits(
-            model.emission_logits(out["mu"], mask), y, reduction="none")
+            model.emission_logits(out["phi"], mask), y, reduction="none")
         expected = -(bce * mask).sum(1)
     assert torch.allclose(out["recon"], expected, atol=1e-4)
 

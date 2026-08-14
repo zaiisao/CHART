@@ -92,7 +92,7 @@ class AnchorKVAE(VBPM):
         kl_k = math.log(C) + (q_k * log_q).sum(-1)                   # KL(q(k) || U)
 
         return {"elbo": recon - kl - kl_k, "recon": recon, "kl": kl + kl_k,
-                "mu": mu, "kappa": kappa,
+                "phi": mu, "kappa": kappa,
                 "recon_k": recon_k.detach(), "log_q": log_q.detach()}
 
     @torch.no_grad()

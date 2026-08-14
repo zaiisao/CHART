@@ -132,7 +132,7 @@ def main() -> None:
             wraps = np.flatnonzero(downbeat_frames(mu_t, mask)[0].cpu().numpy())
         errs = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
                          for w in wraps]) if len(wraps) else np.array([1e9])
-        inc = out["mu"][0, 1:] - out["mu"][0, :-1]
+        inc = out["phi"][0, 1:] - out["phi"][0, :-1]
         step_ok = ((mask[0, 1:] > 0) & (mask[0, :-1] > 0)).to(inc.dtype)
         tempo = float((inc * step_ok).sum() / step_ok.sum().clamp(min=1.0))
         # res = the normalised resultant of the phase-folded evidence, in [0, 1]: how

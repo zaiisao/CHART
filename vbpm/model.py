@@ -13,6 +13,7 @@ from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises
 TWO_PI = 2.0 * math.pi
 
 KAPPA_PHYSICAL = 383.0
+KAPPA_INTER = 17.0
 TEMPO_BOUND_MARGIN = 0.35
 TEMPO_LO, TEMPO_HI = math.log(0.01), math.log(0.2)
 TEMPO_PRIOR_MU = -2.5028
@@ -48,12 +49,16 @@ def vonmises_entropy(kappa):
 class Encoder(nn.Module):
     """q_phi(phi_t | x) = vM(mu_t(x), kappa_t(x)), per frame, reading AUDIO ONLY."""
     def __init__(self, input_dim: int, d_model: int = 128, heads: int = 4, layers: int = 2,
-                 kappa_physical: float = KAPPA_PHYSICAL, max_len: int = 4096):
+                 kappa_physical: float = KAPPA_PHYSICAL, max_len: int = 4096,
+                 use_pe: bool = False):
         super().__init__()
         self.proj = nn.Linear(input_dim, d_model)
+        self.d_model = d_model
+        self.use_pe = use_pe
+        self.in_drop = nn.Dropout(0.1)
         layer = nn.TransformerEncoderLayer(d_model, heads, dim_feedforward=4 * d_model,
-                                        dropout=0.0, activation="gelu",
-                                        batch_first=True, norm_first=True)
+                                        dropout=0.1, activation="relu",
+                                        batch_first=True, norm_first=False)
         self.blocks = nn.TransformerEncoder(layer, layers)
         self.out = nn.Linear(d_model, 4)
 
@@ -77,7 +82,10 @@ class Encoder(nn.Module):
     def features(self, h, mask=None):
         """[B, T, D] -> [B, T, d_model]: the trunk shared by every head (tutorial 9.2)."""
         pad = None if mask is None else (mask <= 0)
-        h = self.proj(h) #+ self.pe[:h.shape[1]]
+        h = self.proj(h) * math.sqrt(self.d_model)
+        if self.use_pe:
+            h = h + self.pe[:h.shape[1]]
+        h = self.in_drop(h)
         return self.blocks(h, src_key_padding_mask=pad)
 
     @staticmethod
@@ -85,11 +93,8 @@ class Encoder(nn.Module):
         dotphi = torch.exp(log_dotphi)
         return dotphi, torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
 
-    def _anchor(self, mu0, a):
-        """The window's single phase OFFSET theta: circular mean of the evidence folded on
-        mu0. One scalar per window -- where bar 1 begins -- as against the phase, which is
-        a per-frame trajectory. mu = mu0 + theta."""
-        R = torch.complex(a * torch.cos(mu0), a * torch.sin(mu0)).sum(1)
+    def _anchor(self, ramp, a):
+        R = torch.complex(a * torch.cos(ramp), a * torch.sin(ramp)).sum(1)
         return -torch.angle(R), R.abs() / a.sum(1).clamp(min=1e-6)
 
     def heads(self, trunk, mask=None):
@@ -149,11 +154,11 @@ class Encoder(nn.Module):
         return torch.where(empty, log_dotphi, pooled)
 
     def forward(self, h, mask=None):
-        """[B, T, D] -> (mu, kappa). Per-frame and free: see kl_jitter."""
+        """[B, T, D] -> (posterior param dict, trunk memory [B, T, d_model])."""
         features = self.features(h, mask)
         heads = self.heads(features)
 
-        return heads
+        return heads, features
 
 
 class EmissionTransformer(nn.Module):
@@ -199,6 +204,9 @@ class EmissionTransformer(nn.Module):
 
 WALK_MIX_W = (0.687, 0.313)
 WALK_MIX_SIGMA = (0.00029, 0.00377)
+WALK_INTRA_SIGMA = 0.00029
+WALK_INTER_W = (0.646, 0.354)
+WALK_INTER_SIGMA = (0.0247, 0.198)
 
 
 
@@ -291,6 +299,26 @@ def interval_loglik(phi, ann_f, ann_valid, kappa_place: float, b_ratio: float,
 
 
 
+class ZDecoder(nn.Module):
+
+    def __init__(self, feat_dim: int, d: int = 64, layers: int = 2, heads: int = 4,
+                 max_knots: int = 512):
+        super().__init__()
+        self.proj = nn.Linear(feat_dim + 2, d)
+        self.register_buffer("pe", EmissionTransformer._sinusoidal(max_knots, d))
+        layer = nn.TransformerEncoderLayer(d, heads, dim_feedforward=4 * d,
+                                           dropout=0.0, activation="gelu",
+                                           batch_first=True, norm_first=True)
+        self.blocks = nn.TransformerEncoder(layer, layers)
+        self.out = nn.Linear(d, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def next_correction(self, tokens):
+        x = self.proj(tokens) + self.pe[:tokens.shape[1]]
+        return self.out(self.blocks(x)[:, -1])[:, 0]
+
+
 class VBPM(nn.Module):
     """Encoder + physical prior + latent-only emission. Learnable: theta and phi only."""
 
@@ -298,12 +326,14 @@ class VBPM(nn.Module):
                  emission_layers: int = 2, emission_dim: int = 64,
                  emission_positional: bool = False,
                  kappa_physical: float = KAPPA_PHYSICAL,
-                 cell_dim: int = 32, cell_stride: int = 25, walk_kind: str = "gauss"):
+                 dec_dim: int = 32, knot_stride: int = 25, walk_kind: str = "gauss",
+                 encoder_pe: bool = False):
         super().__init__()
         self.kappa_physical = float(kappa_physical)
-        self.cell_stride = int(cell_stride)
+        self.knot_stride = int(knot_stride)
         self.walk_kind = walk_kind
-        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical)
+        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical,
+                               use_pe=encoder_pe)
 
         self.emission_kind = emission
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
@@ -322,10 +352,7 @@ class VBPM(nn.Module):
 
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
-        self.cell_in = nn.Linear(d_model + 2, cell_dim)
-        self.cell_out = nn.Linear(cell_dim, 1)
-        nn.init.zeros_(self.cell_out.weight)
-        nn.init.zeros_(self.cell_out.bias)
+        self.zdec = ZDecoder(d_model, d=dec_dim)
 
     @property
     def emission_b(self):
@@ -349,51 +376,77 @@ class VBPM(nn.Module):
         weight = torch.ones_like(live) if mask is None else mask
         return float(((live - frozen).abs() * weight).sum() / weight.sum())
 
-    def _corrections(self, feats, x):
-        inp = torch.cat([feats, torch.cos(x)[:, None], torch.sin(x)[:, None]], dim=-1)
-        return self.cell_out(torch.tanh(self.cell_in(inp)))[:, 0]
+    def _token(self, memory_frame, phase):
+        return torch.cat([memory_frame, torch.cos(phase)[:, None],
+                          torch.sin(phase)[:, None]], dim=-1)
 
-    def walk_log_prior(self, dot_eff, w):
+    def walk_log_prior(self, dot_eff, w, crossing=None):
         if self.walk_kind == "gauss":
             return self.tempo_log_prior(dot_eff, w)
+
         log_dotphi = torch.log(dot_eff)
         z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
         init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        comps = [math.log(wt) - 0.5 * (step / sg) ** 2 - math.log(sg)
-                 - 0.5 * math.log(2.0 * math.pi)
-                 for wt, sg in zip(WALK_MIX_W, WALK_MIX_SIGMA)]
-        lp = torch.logsumexp(torch.stack(comps), dim=0)
+        if self.walk_kind == "gated":
+            intra = -0.5 * (step / WALK_INTRA_SIGMA) ** 2 - math.log(WALK_INTRA_SIGMA) \
+                - 0.5 * math.log(2.0 * math.pi)
+            comps = [math.log(wt) - 0.5 * (step / sg) ** 2 - math.log(sg)
+                     - 0.5 * math.log(2.0 * math.pi)
+                     for wt, sg in zip(WALK_INTER_W, WALK_INTER_SIGMA)]
+            calibration = -math.log(WALK_INTRA_SIGMA) \
+                - math.log(sum(wt / sg for wt, sg in zip(WALK_INTER_W, WALK_INTER_SIGMA)))
+            inter = torch.logsumexp(torch.stack(comps), dim=0) + calibration
+            lp = torch.where(crossing, inter, intra)
+        else:
+            comps = [math.log(wt) - 0.5 * (step / sg) ** 2 - math.log(sg)
+                     - 0.5 * math.log(2.0 * math.pi)
+                     for wt, sg in zip(WALK_MIX_W, WALK_MIX_SIGMA)]
+            lp = torch.logsumexp(torch.stack(comps), dim=0)
         return init + (lp * pair).sum(1)
 
-    def _scan(self, dotphi, vm, feats, theta, pair_w, sample_noise=True):
+    def _scan(self, dotphi, jitter, memory, theta, pair_w, sample_noise=True):
         T = dotphi.shape[1]
-        K = self.cell_stride
-        x = theta
-        phis = [x[:, None]]
-        corrs = []
+        stride = self.knot_stride
+        phase = theta
+        segments = [phase[:, None]]
+        corr_frames = []
         knots = []
-        t = 1
-        while t < T:
-            e = min(t + K, T)
-            c = self._corrections(feats[:, t - 1], x)
-            knots.append(c)
-            steps = dotphi[:, t - 1:e - 1] * torch.exp(c)[:, None]
-            if sample_noise:
-                steps = steps + vm[:, t - 1:e - 1]
-            block = x[:, None] + torch.cumsum(steps * pair_w[:, t - 1:e - 1], dim=1)
-            phis.append(block)
-            corrs.append(c[:, None].expand(-1, e - t))
-            x = block[:, -1]
-            t = e
-        corr = torch.cat(corrs, dim=1)
-        corr_full = torch.cat([corr, corr[:, -1:]], dim=1)
-        return torch.cat(phis, dim=1), corr_full, knots
+        tokens = []
+        start = 1
+        while start < T:
+            stop = min(start + stride, T)
 
-    def kl_jitter(self, mu, kappa, mask):
-        """Per-frame KL( vM(mu,kappa) || vM(mu,kappa_physical) ): prices concentration only."""
-        kp = torch.as_tensor(self.kappa_physical, device=mu.device, dtype=kappa.dtype)
+            token = self._token(memory[:, start - 1], phase)
+            tokens.append(token)
+            correction = self.zdec.next_correction(torch.stack(tokens, dim=1))
+            knots.append(correction)
+
+            steps = dotphi[:, start - 1:stop - 1] * torch.exp(correction)[:, None]
+            if sample_noise:
+                steps = steps + jitter[:, start - 1:stop - 1]
+
+            segment = phase[:, None] + torch.cumsum(
+                steps * pair_w[:, start - 1:stop - 1], dim=1)
+            segments.append(segment)
+            corr_frames.append(correction[:, None].expand(-1, stop - start))
+
+            phase = segment[:, -1]
+            start = stop
+
+        corr = torch.cat(corr_frames, dim=1)
+        corr_full = torch.cat([corr, corr[:, -1:]], dim=1)
+
+        return torch.cat(segments, dim=1), corr_full, knots
+
+    def kl_jitter(self, mu, kappa, mask, crossing=None):
+        """Per-frame KL( vM(mu,kappa) || vM(mu,kappa_p) ): prices concentration only.
+        crossing (currently never passed: kappa-gate deferred to the ablation ladder)
+        would price crossing steps against KAPPA_INTER instead."""
+        kp = torch.full_like(kappa, self.kappa_physical)
+        if crossing is not None:
+            kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
         return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
 
     def tempo_log_prior(self, dotphi, w):
@@ -417,7 +470,7 @@ class VBPM(nn.Module):
         return (vonmises_log_density(phi[:, 1:], predicted, kappa_p) * pair).sum(1)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
-        post = self.encoder(h, mask)
+        post, memory = self.encoder(h, mask)
         phase, tempo, rotation = post["phase"], post["tempo"], post["rotation"]
         
         phase_kappa = phase["kappa"]
@@ -425,38 +478,43 @@ class VBPM(nn.Module):
         rotation_weight = rotation["weight"]
 
         w = torch.ones_like(phase_kappa) if mask is None else mask
-        pair_mask = (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        pair_w = pair_mask.to(w.dtype)
+        pair_w = ((w[:, 1:] > 0) & (w[:, :-1] > 0)).to(w.dtype)
 
-        h_tempo = ((0.5 * math.log(2.0 * math.pi * math.e)
-                    + torch.log(tempo_sigma)) * w).sum(1)
+        entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
+        h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
+
+        mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
+        theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
+        crossing = None
+        if self.walk_kind == "gated":
+            mean_phi = (mean_ramp + theta[:, None]).detach()
+            crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
+                != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
 
         recon = 0.0
         logp_tempo = 0.0
         kl_phase = 0.0
         phi = None
 
-        feats = self.encoder.features(h, mask)
-        mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
-        theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
-
         for _ in range(samples):
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
-            vm = sample_vonmises(phase_kappa[:, 1:])
-            phi, corr_full, _knots = self._scan(dotphi, vm, feats, theta, pair_w)
+            jitter = sample_vonmises(phase_kappa[:, 1:])
+            phi, corr_full, _knots = self._scan(dotphi, jitter, memory, theta, pair_w)
             dot_eff = dotphi * torch.exp(corr_full)
 
-            logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w)
+            logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
             kl_phase = kl_phase + self.kl_jitter(phi[:, 1:], phase_kappa[:, 1:], pair_w)
             recon = recon + event_recon(self.emission_logits(phi, mask), y, w, pos_weight)
 
         recon = recon / samples
         logp_tempo = logp_tempo / samples
+
         kl_phase = kl_phase / samples
-        kl = kl_phase - h_tempo - logp_tempo
+        kl_tempo = h_tempo + logp_tempo
+        kl = kl_phase - kl_tempo
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl,
-                "mu": phi, "kappa": phase_kappa,
+                "phi": phi, "kappa": phase_kappa,
                 "tempo_prior": logp_tempo, "tempo_entropy": h_tempo,
                 "kl_phase": kl_phase}
 
@@ -468,24 +526,26 @@ class VBPM(nn.Module):
     @torch.no_grad()
     def infer_phase(self, h, mask=None):
         assert not self.training, "deployment path must run in eval mode"
-        post = self.encoder(h, mask)
+        post, memory = self.encoder(h, mask)
         dotphi = post["tempo"]["mu"]
         mean_ramp = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp, post["rotation"]["weight"])
-        feats = self.encoder.features(h, mask)
         T = dotphi.shape[1]
-        K = self.cell_stride
-        x = theta
-        phis = [x[:, None]]
-        t = 1
-        while t < T:
-            e = min(t + K, T)
-            c = self._corrections(feats[:, t - 1], x)
-            block = x[:, None] + torch.cumsum(dotphi[:, t:e] * torch.exp(c)[:, None], dim=1)
-            phis.append(block)
-            x = block[:, -1]
-            t = e
-        return torch.cat(phis, dim=1)
+        stride = self.knot_stride
+        phase = theta
+        segments = [phase[:, None]]
+        tokens = []
+        start = 1
+        while start < T:
+            stop = min(start + stride, T)
+            tokens.append(self._token(memory[:, start - 1], phase))
+            correction = self.zdec.next_correction(torch.stack(tokens, dim=1))
+            segment = phase[:, None] + torch.cumsum(
+                dotphi[:, start - 1:stop - 1] * torch.exp(correction)[:, None], dim=1)
+            segments.append(segment)
+            phase = segment[:, -1]
+            start = stop
+        return torch.cat(segments, dim=1)
 
     @torch.no_grad()
     def emission_probs(self, h, mask=None):
@@ -510,7 +570,7 @@ class IntervalVAE(VBPM):
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
         assert raw is not None, "the interval emission needs the batch's downbeat_times"
-        post = self.encoder(h, mask)
+        post, memory = self.encoder(h, mask)
         phase_kappa = post["phase"]["kappa"]
         tempo_mu, tempo_sigma = post["tempo"]["mu"], post["tempo"]["sigma"]
         rotation_weight = post["rotation"]["weight"]
@@ -529,21 +589,25 @@ class IntervalVAE(VBPM):
         resultant = 0.0
         phi = None
 
-        feats = self.encoder.features(h, mask)
         mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
+        crossing = None
+        if self.walk_kind == "gated":
+            mean_phi = (mean_ramp + theta[:, None]).detach()
+            crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
+                != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
         corr_full = None
         knots = None
         corr_abs = 0.0
 
         for _ in range(samples):
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
-            vm = sample_vonmises(phase_kappa[:, 1:])
-            phi, corr_full, knots = self._scan(dotphi, vm, feats, theta, pair_w)
+            jitter = sample_vonmises(phase_kappa[:, 1:])
+            phi, corr_full, knots = self._scan(dotphi, jitter, memory, theta, pair_w)
             dot_eff = dotphi * torch.exp(corr_full)
             phi_place = phi.detach() + (theta - theta.detach())[:, None]
 
-            logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w)
+            logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
             kl_phase = kl_phase + self.kl_jitter(phi[:, 1:], phase_kappa[:, 1:], pair_w)
             em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place,
                                  self.b_ratio, self.phase_half,
@@ -558,7 +622,7 @@ class IntervalVAE(VBPM):
         kl = kl_phase - h_tempo - logp_tempo
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl,
-                "mu": phi, "kappa": phase_kappa,
+                "phi": phi, "kappa": phase_kappa,
                 "tempo_prior": logp_tempo, "tempo_entropy": h_tempo,
                 "kl_phase": kl_phase, "resultant": resultant / samples,
                 "corr": corr_full, "corr_nodes": tuple(knots),

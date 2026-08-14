@@ -40,14 +40,16 @@ from ..model import (TWO_PI, VBPM, IntervalVAE, WALK_MIX_SIGMA, WALK_MIX_W,  # n
 
 DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "phase_half": 0, "interval_kind": "laplace", "disp_weight": 0.0,
-            "cell_dim": 32, "cell_stride": 25, "cell_warmup": 15,
+            "dec_dim": 32, "knot_stride": 25, "dec_warmup": 15,
+            "encoder_pe": False,
             "walk_kind": "gauss"}
 
 def build_model(cfg, input_dim: int) -> IntervalVAE:
     return IntervalVAE(input_dim, b_ratio=cfg.b_ratio, kappa_place=cfg.kappa_place,
                        phase_half=cfg.phase_half, interval_kind=cfg.interval_kind,
-                       disp_weight=cfg.disp_weight, cell_dim=cfg.cell_dim,
-                       cell_stride=cfg.cell_stride, walk_kind=cfg.walk_kind,
+                       disp_weight=cfg.disp_weight, dec_dim=cfg.dec_dim,
+                       knot_stride=cfg.knot_stride, walk_kind=cfg.walk_kind,
+                       encoder_pe=cfg.encoder_pe,
                        **common_kwargs(cfg))
 
 
@@ -59,6 +61,6 @@ def on_epoch(model, cfg, epoch: int) -> None:
     lo, hi, frac = (float(v) for v in cfg.kappa_anneal.split(","))
     ramp = min(1.0, epoch / max(1.0, frac * cfg.epochs))
     model.kappa_place = math.exp(math.log(lo) + ramp * (math.log(hi) - math.log(lo)))
-    live = epoch >= cfg.cell_warmup
-    for p in list(model.cell_in.parameters()) + list(model.cell_out.parameters()):
+    live = epoch >= cfg.dec_warmup
+    for p in model.zdec.parameters():
         p.requires_grad_(live)

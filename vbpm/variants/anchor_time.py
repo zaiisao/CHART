@@ -148,7 +148,7 @@ class AnchorTimeVAE(VBPM):
         rows = torch.arange(len(best), device=cum.device)
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl,
-                "mu": mu_k[rows, best], "kappa": kappa,
+                "phi": mu_k[rows, best], "kappa": kappa,
                 "logq": logq, "R": reward, "n_i": n_i, "ok": ok}
 
     # ------------------------------------------------------------------ deployment

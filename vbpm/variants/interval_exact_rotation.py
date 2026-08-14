@@ -219,7 +219,7 @@ class RotationIntervalVAE(IntervalVAE):
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
         assert raw is not None, "the interval emission needs the batch's downbeat_times"
-        post = self.encoder(h, mask)
+        post, _ = self.encoder(h, mask)
         mu, kappa, aux = post["phase"]["mu"], post["phase"]["kappa"], post
         kappa_theta, a_theta, kl_theta = self.rotation_posterior(aux["resultant"])
         kl = (self.kl_jitter(mu, kappa, mask) + kl_theta
@@ -242,7 +242,7 @@ class RotationIntervalVAE(IntervalVAE):
                                             select)["loglik"]
         recon = recon / samples
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa,
+        return {"elbo": recon - kl, "recon": recon, "kl": kl, "phi": mu, "kappa": kappa,
                 "tempo_prior": aux["tempo"]["log_prior"],
                 "tempo_entropy": aux["tempo"]["entropy"],
                 "resultant": aux["resultant"], "kappa_theta": kappa_theta,

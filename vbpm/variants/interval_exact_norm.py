@@ -186,7 +186,7 @@ class IntervalExactNormVAE(IntervalVAE):
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
         assert raw is not None, "the interval emission needs the batch's downbeat_times"
-        post = self.encoder(h, mask)
+        post, _ = self.encoder(h, mask)
         mu, kappa = post["phase"]["mu"], post["phase"]["kappa"]
         tempo = post["tempo"]
         kl = (self.kl_jitter(mu, kappa, mask) - tempo["log_prior"]
@@ -208,7 +208,7 @@ class IntervalExactNormVAE(IntervalVAE):
             log_z = log_z + scored["log_z"]
         recon = recon / samples
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu, "kappa": kappa,
+        return {"elbo": recon - kl, "recon": recon, "kl": kl, "phi": mu, "kappa": kappa,
                 "log_z": log_z / samples,
                 "tempo_prior": tempo["log_prior"], "tempo_entropy": tempo["entropy"]}
 

@@ -117,7 +117,7 @@ class PsiVBPM(VBPM):
             recon = recon - (per_frame * weight).sum(1)
         recon = recon / samples
 
-        return {"elbo": recon - kl, "recon": recon, "kl": kl, "mu": mu,
+        return {"elbo": recon - kl, "recon": recon, "kl": kl, "phi": mu,
                 "kappa": kappa, "distill": distill, "prior_anchor": anchor,
                 "tempo_distill": tempo_distill}
 

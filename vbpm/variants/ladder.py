@@ -134,7 +134,7 @@ class LadderVAE(VBPM):
         recon = (q_k * recon_k).sum(-1)
         kl_k = math.log(C) + (q_k * log_q).sum(-1)
         return {"elbo": recon - kl - kl_k, "recon": recon, "kl": kl + kl_k,
-                "mu": mu, "kappa": kappa,
+                "phi": mu, "kappa": kappa,
                 "recon_k": recon_k.detach(), "log_q": log_q.detach()}
 
 

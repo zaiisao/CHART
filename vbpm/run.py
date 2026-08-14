@@ -97,11 +97,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
                        float(out["recon"].mean()),
                        float(out["kl"].mean())]
             if "resultant" in out:
-                anchor += [float(out["resultant"].mean())]
-                if "kl_offset" in out:
-                    anchor += [float(out["kl_offset"].mean())]
+                anchor[0] += float(out["resultant"].mean())
                 if "corr_abs" in out:
-                    anchor += [float(out["corr_abs"])]
+                    anchor[1] += float(out["corr_abs"])
             # What the ELBO cannot tell you: whether mu is a bar pointer or an arbitrary
             # path that crosses zero in the right places. Read off the batch already
             # computed -- no extra forward. See trajectory_health for the thresholds.
@@ -110,7 +108,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
                 if records:
                     keep = [i for i, c in enumerate(scoring_records(raw))
                             if c is not None]
-                    health += trajectory_health(out["mu"][keep].detach(),
+                    health += trajectory_health(out["phi"][keep].detach(),
                                                 out["kappa"][keep].detach(),
                                                 mask[keep], records)
             steps += 1
