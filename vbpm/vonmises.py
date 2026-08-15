@@ -14,9 +14,34 @@ def log_i0(kappa: torch.Tensor) -> torch.Tensor:
     return torch.log(torch.special.i0e(kappa)) + kappa
 
 
+ASYMPTOTIC_KAPPA = 50.0   # above this A'(kappa) is taken from the series: the exact form
+                          # 1 - A/k - A^2 cancels two float32 quantities agreeing to ~5e-6
+                          # at kappa 1e5, which flips the sign of every phase-kappa gradient
+
+
+class _MeanResultant(torch.autograd.Function):
+    """A(kappa) with a derivative that survives float32 at the operating concentration."""
+
+    @staticmethod
+    def forward(ctx, kappa):
+        a = torch.special.i1e(kappa) / torch.special.i0e(kappa)
+        ctx.save_for_backward(kappa, a)
+        return a
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        kappa, a = ctx.saved_tensors
+        k = kappa.double().clamp_min(1e-12)
+        ad = a.double()
+        exact = 1.0 - ad / k - ad * ad
+        asym = 0.5 / k ** 2 + 0.25 / k ** 3 + 0.375 / k ** 4
+        deriv = torch.where(k > ASYMPTOTIC_KAPPA, asym, exact)
+        return grad_out * deriv.to(grad_out.dtype)
+
+
 def mean_resultant(kappa: torch.Tensor) -> torch.Tensor:
     """A(kappa) = I1(kappa) / I0(kappa) = E[cos x] under vM(0, kappa)."""
-    return torch.special.i1e(kappa) / torch.special.i0e(kappa)
+    return _MeanResultant.apply(kappa)
 
 
 def kl_vonmises(mu1, kappa1, mu2, kappa2):

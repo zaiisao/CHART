@@ -202,5 +202,7 @@ def print_table(results):
                   for split, per_dataset in results.items()
                   for dataset, modes in per_dataset.items()
                   for mode, (value, count) in modes.items())
+    units = {"est/ref": "ratio", "rule-g CMLt": "CMLt", "rule-g AMLt": "AMLt"}
     for split, dataset, mode, value, count in rows:
-        print(f"  {split:6s} {mode:15s} {dataset:11s} F {value:.3f}  (n={count})")
+        print(f"  {split:6s} {mode:15s} {dataset:11s} "
+              f"{units.get(mode, 'F'):5s} {value:.3f}  (n={count})")

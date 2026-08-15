@@ -42,14 +42,19 @@ DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "phase_half": 0, "interval_kind": "laplace", "disp_weight": 0.0,
             "dec_dim": 32, "knot_stride": 25, "dec_warmup": 15,
             "encoder_pe": False,
-            "walk_kind": "gauss"}
+            "walk_kind": "gauss", "kappa_gate": False,
+            "place_coord": "first", "place_lift": 0.0, "place_attach": False,
+            "delta_on": False, "gate_cond": True}
 
 def build_model(cfg, input_dim: int) -> IntervalVAE:
     return IntervalVAE(input_dim, b_ratio=cfg.b_ratio, kappa_place=cfg.kappa_place,
                        phase_half=cfg.phase_half, interval_kind=cfg.interval_kind,
                        disp_weight=cfg.disp_weight, dec_dim=cfg.dec_dim,
                        knot_stride=cfg.knot_stride, walk_kind=cfg.walk_kind,
+                       kappa_gate=cfg.kappa_gate, place_coord=cfg.place_coord,
+                       place_lift=cfg.place_lift, place_attach=cfg.place_attach,
                        encoder_pe=cfg.encoder_pe,
+                       delta_on=cfg.delta_on, gate_cond=cfg.gate_cond,
                        **common_kwargs(cfg))
 
 

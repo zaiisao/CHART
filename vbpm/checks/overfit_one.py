@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import pathlib
 
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from ..config import load_config
 from ..data.dataset import load_catalog
 from ..data.excerpts import ExcerptDataset, collate_excerpts
 from ..model import downbeat_frames, downbeat_times
+from ..scoring.evaluation import continuity_scores, f_measure
 
 
 def parse_args():
@@ -25,6 +27,8 @@ def parse_args():
     p.add_argument("--every", type=int, default=25)
     p.add_argument("--gpu", type=int, default=1, choices=(0, 1, 2, 3))
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--delta-on", type=int, default=None)
+    p.add_argument("--grad-log", default="")
     p.add_argument("--oracle-tempo", action="store_true")
     p.add_argument("--kl-only", action="store_true")
     p.add_argument("--pin-tempo", action="store_true")
@@ -32,13 +36,29 @@ def parse_args():
     p.add_argument("--lr-drop", type=int, default=0)
     p.add_argument("--lr-anneal", type=float, default=0.0)
     p.add_argument("--acf-init", action="store_true")
-    p.add_argument("--plot", default="/tmp/overfit_emission.png",
-                   help='PNG of emission vs ground truth at each snapshot; "" disables')
+    p.add_argument("--save", default="", help="path to write the trained state_dict")
+    p.add_argument("--plot", default=None,
+                   help="PNG of phase vs ground truth at each snapshot. A plot is "
+                        "ALWAYS written -- pass a path to choose where, or omit for an "
+                        "auto-named one under logs/. It cannot be disabled: the numbers "
+                        "alone have repeatedly hidden what the panels make obvious "
+                        "(rate-vs-offset failures look identical in med|err|).")
     return p.parse_args()
+
+
+def resolve_plot_path(args) -> str:
+    """A plot is mandatory. Empty/none resolves to an auto-named path under logs/."""
+    if args.plot:
+        return args.plot
+    stamp = f"{args.dataset}{args.song}_s{args.seed}"
+    out = pathlib.Path("logs/overfit") / f"{stamp}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return str(out)
 
 
 def main() -> None:
     args = parse_args()
+    args.plot = resolve_plot_path(args)
     cfg, hooks = load_config(args.config, args.set)
     assert not getattr(cfg, "clip_per_group", False), \
         "overfit_one clips pooled only; clip_per_group configs are not mirrored here"
@@ -46,6 +66,8 @@ def main() -> None:
         "overfit_one freezes the frontend; frontend_lr_scale configs are not mirrored here"
     shipped_epochs = cfg.epochs
     cfg.epochs = args.epochs
+    if args.delta_on is not None:
+        cfg.delta_on = bool(args.delta_on)
     if hasattr(cfg, "dec_warmup") and args.epochs != shipped_epochs:
         cfg.dec_warmup = round(cfg.dec_warmup * args.epochs / shipped_epochs)
     device = torch.device(f"cuda:{args.gpu}")
@@ -137,6 +159,27 @@ def main() -> None:
 
         opt.zero_grad()
         loss.backward()
+
+        if args.grad_log:
+            groups = {"enc_out": "encoder.out", "zdec": "zdec",
+                      "delta_head": "delta_head", "enc_trunk": "encoder.blocks"}
+            norms = {}
+            for tag, prefix in groups.items():
+                tot = 0.0
+                for name, prm in model.named_parameters():
+                    if prm.grad is not None and name.startswith(prefix):
+                        tot += float(prm.grad.pow(2).sum())
+                norms[tag] = tot ** 0.5
+            with open(args.grad_log, "a") as fh:
+                if epoch == 0:
+                    fh.write("epoch,loss,recon,kl,d_absmean,d_sd,"
+                             + ",".join(f"g_{k}" for k in groups) + "\n")
+                fh.write(f"{epoch},{float(loss):.6f},"
+                         f"{float(out['recon'].mean()):.4f},{float(out['kl'].mean()):.4f},"
+                         f"{float(out.get('delta', torch.zeros(1)).abs().mean()):.6f},"
+                         f"{float(out.get('delta', torch.zeros(1)).std()):.6f},"
+                         + ",".join(f"{norms[k]:.6e}" for k in groups) + "\n")
+
         torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip)
         opt.step()
 
@@ -152,6 +195,20 @@ def main() -> None:
             wraps = downbeat_times(mu_t, mask)[0].cpu().numpy()
         errs = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
                          for w in wraps]) if len(wraps) else np.array([1e9])
+        fsc = f_measure(wraps / fps, targets / fps)[0] if len(wraps) else 0.0
+        cmlt, amlt = continuity_scores(targets / fps, wraps / fps)
+        off = ""
+        if hasattr(model, "zdec"):
+            saved = [q.detach().clone() for q in model.zdec.parameters()]
+            with torch.no_grad():
+                for q in model.zdec.parameters():
+                    q.zero_()
+                w_off = downbeat_times(model.infer_phase(h, mask), mask)[0].cpu().numpy()
+                for q, v in zip(model.zdec.parameters(), saved):
+                    q.copy_(v)
+            e_off = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
+                              for w in w_off]) if len(w_off) else np.array([1e9])
+            off = (f"  [zdec off {np.median(e_off):5.0f}ms {np.mean(e_off < 70.0):4.0%}]")
         inc = mu_t[0, 1:] - mu_t[0, :-1]
         step_ok = ((mask[0, 1:] > 0) & (mask[0, :-1] > 0)).to(inc.dtype)
         tempo = float((inc * step_ok).sum() / step_ok.sum().clamp(min=1.0))
@@ -160,7 +217,7 @@ def main() -> None:
         # generalisation to fail, so if this does not grow the anchor mechanism itself
         # is broken rather than merely untrained.
         res = f"  res {float(out['resultant'].mean()):5.3f}" if "resultant" in out else ""
-        if args.plot:
+        if True:
             phi_w = torch.atan2(torch.sin(mu_t[0]), torch.cos(mu_t[0]))
             prox = (1.0 - phi_w.abs() / math.pi).float().cpu().numpy()
             snapshots.append((epoch, prox, wraps, tempo / true_dotphi))
@@ -169,11 +226,14 @@ def main() -> None:
               f"kl {float(out['kl'].mean()):9.2f}  b {float(model.emission_b):5.2f}  "
               f"tempo {tempo:.4f} (ratio {tempo / true_dotphi:5.2f})  "
               f"med|err| {np.median(errs):6.0f}ms  in-tol {np.mean(errs < 70.0):4.0%}"
-              f"{res}",
+              f"  F {fsc:.3f} CMLt {cmlt:.3f} AMLt {amlt:.3f}  n{len(wraps)}/{len(targets)}"
+              f"{res}{off}",
               flush=True)
 
-    if args.plot:
-        _render(args.plot, snapshots, y[0].cpu().numpy(), targets, song.song_id)
+    if args.save:
+        torch.save(model.state_dict(), args.save)
+        print(f"wrote {args.save}", flush=True)
+    _render(args.plot, snapshots, y[0].cpu().numpy(), targets, song.song_id)
 
 
 def _render(path, snapshots, y, targets, song_id):

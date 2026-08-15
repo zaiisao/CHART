@@ -112,7 +112,20 @@ class ExcerptDataset(torch.utils.data.Dataset):
 
 
 def collate_excerpts(batch: list) -> dict:
-    """Fixed-size fields stack to tensors; variable/scoring fields stay python lists."""
+    """Fixed-size fields stack to tensors; variable/scoring fields stay python lists.
+
+    Items with no live frames or no annotations are DROPPED. They carry no information,
+    and they are not merely useless: an all-masked item still runs the anchor's circular
+    mean and the interval terms, whose 0/0 backward writes nan into the SHARED encoder
+    parameters while the forward loss stays finite (frames.clamp(min=1) guards the
+    division only). Measured: one such window at epoch 9 of a 1661-song run killed the
+    whole model -- rare because the crop is redrawn per epoch, so it never fired in
+    700-song smokes.
+    """
+    batch = [item for item in batch
+             if float(item["mask"].sum()) > 0 and len(item["downbeat_times"]) > 0]
+    if not batch:
+        raise ValueError("collate_excerpts: every item in the batch was empty")
     out = {}
     for key in ("input", "y", "mask"):
         out[key] = torch.from_numpy(np.stack([item[key] for item in batch]))
