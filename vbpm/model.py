@@ -36,7 +36,6 @@ class VBPM(nn.Module):
                                kappa_physical=self.walk.kappa_physical, use_pe=encoder_pe)
 
         self.emission_kind = emission.kind
-        self.emission_bump_kappa = float(emission.bump_kappa)
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
         # no gradient, which the audit correctly refused -- and an audit that has to be
         # weakened to accommodate dead parameters stops being an audit.
@@ -69,12 +68,14 @@ class VBPM(nn.Module):
         """Downbeat logits from the LATENT alone (Point 1) -- never from h."""
         if self.emission_net is not None:
             return self.emission_net(phi, mask)
+
         if self.emission_kind == "triangle":
             wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))   # (-pi, pi]
             return self.emission_a + self.emission_b * (1.0 - 2.0 * wrapped.abs() / math.pi)
         if self.emission_kind == "bump":
-            peak = torch.exp(self.emission_bump_kappa * (torch.cos(phi) - 1.0))
+            peak = torch.exp(float(self.emission.bump_kappa) * (torch.cos(phi) - 1.0))
             return self.emission_a + self.emission_b * (2.0 * peak - 1.0)
+
         return self.emission_a + self.emission_b * torch.cos(phi)
 
     @torch.no_grad()

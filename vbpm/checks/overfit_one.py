@@ -99,6 +99,8 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
+    assert not (args.pin_gain and model.emission_net is not None), \
+        "--pin-gain pins the two-scalar gain; the transformer emission has none"
     assert not (args.pin_gain and getattr(model, "wants_raw", False)), \
         "--pin-gain pins the Bernoulli emission gain, which the interval recipe never reads"
 
@@ -223,7 +225,8 @@ def main() -> None:
             snapshots.append((epoch, prox, wraps, tempo / true_dotphi))
 
         print(f"  ep {epoch:4d}  recon {float(out['recon'].mean()):9.2f}  "
-              f"kl {float(out['kl'].mean()):9.2f}  b {float(model.emission_b):5.2f}  "
+              f"kl {float(out['kl'].mean()):9.2f}  "
+              f"b {'  n/a' if model.emission_net is not None else f'{float(model.emission_b):5.2f}'}  "
               f"tempo {tempo:.4f} (ratio {tempo / true_dotphi:5.2f})  "
               f"med|err| {np.median(errs):6.0f}ms  in-tol {np.mean(errs < 70.0):4.0%}"
               f"  F {fsc:.3f} CMLt {cmlt:.3f} AMLt {amlt:.3f}  n{len(wraps)}/{len(targets)}"
