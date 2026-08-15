@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 
-from ..model import VBPM
+from ..model import VBPM, EmissionSpec, WalkSpec
 
 
 COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "kappa_physical")
@@ -13,7 +13,11 @@ DEFAULTS_IF_UNSUPPORTED = {}
 
 def common_kwargs(cfg) -> dict:
     """The kwargs every VBPM subclass should be built with."""
-    return {k: getattr(cfg, k) for k in COMMON_KEYS}
+    return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
+                                     positional=cfg.emission_positional),
+            "walk": WalkSpec(kind=getattr(cfg, "walk_kind", "gauss"),
+                             kappa_physical=cfg.kappa_physical,
+                             kappa_gate=getattr(cfg, "kappa_gate", False))}
 
 
 def refuse_unsupported(cfg, variant: str, supported=()) -> None:

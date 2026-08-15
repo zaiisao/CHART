@@ -1,34 +1,70 @@
 """The bar-pointer CVAE of the tutorial's section 7, with a periodic latent (section 9.9)."""
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
 import torch
 from torch import nn
 
+from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, KAPPA_PHYSICAL, MAX_KAPPA,
+                        TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA, TEMPO_WALK_SIGMA, TWO_PI,
+                        WALK_INTER_SIGMA, WALK_INTER_W, WALK_INTRA_SIGMA, WALK_MIX_SIGMA,
+                        WALK_MIX_W)
+from .constants import (BAR_POOL_ITERS, TEMPO_BOUND_MARGIN, TEMPO_HI,  # noqa: F401
+                        TEMPO_LO,  # noqa: F401
+                        TEMPO_PRIOR_EPS, TEMPO_SIGMA_CEIL, TEMPO_SIGMA_INIT)  # noqa: F401
 from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises
 
 
-TWO_PI = 2.0 * math.pi
+@dataclasses.dataclass
+class EmissionSpec:
+    """p(y_t | phi_t): which shape reads the latent, and how big it is."""
 
-KAPPA_PHYSICAL = 383.0
-KAPPA_INTER = 17.0
-DELTA_MAX = 0.35
-CORRECTION_MAX = 0.5   # soft bound on the knot decoder's log-rate correction:
-                       # exp(+-0.5) = rate x[0.61, 1.65], far outside any real tempo
-                       # move, while keeping dotphi*exp(c) away from the underflow that
-                       # sends log(dot_eff) in walk_log_prior to -inf (corpus NaN, ep 9)
-TEMPO_BOUND_MARGIN = 0.35
-TEMPO_LO, TEMPO_HI = math.log(0.01), math.log(0.2)
-TEMPO_PRIOR_MU = -2.5028
-TEMPO_PRIOR_SIGMA = 0.5005
-TEMPO_PRIOR_EPS = 0.02
-TEMPO_WALK_SIGMA = 0.00212
-TEMPO_SIGMA_CEIL = 0.25
-TEMPO_SIGMA_INIT = 0.15
-BAR_POOL_ITERS = 8
-MAX_KAPPA = 1.0e7
+    kind: str = "cosine"
+    layers: int = 2
+    dim: int = 64
+    positional: bool = False
+
+    @classmethod
+    def coerce(cls, value):
+        """Accept either a spec or the bare kind string the configs still pass."""
+        return value if isinstance(value, cls) else cls(kind=value)
+
+
+@dataclasses.dataclass
+class WalkSpec:
+    """p(phi_t | phi_t-1): the tempo walk's law and the phase prior's tightness."""
+
+    kind: str = "gauss"
+    kappa_physical: float = KAPPA_PHYSICAL
+    kappa_gate: bool = False
+
+
+@dataclasses.dataclass
+class PlacementSpec:
+    """How the placement factor reads phase, and which paths reach it."""
+
+    coord: str = "first"
+    lift: float = 0.0
+    attach: bool = False
+
+
+@dataclasses.dataclass
+class UpdateSpec:
+    """q(phi_t)'s free mean: the update half of the filter."""
+
+    delta_on: bool = False
+    gate_cond: bool = True
+
+
+@dataclasses.dataclass
+class DecoderSpec:
+    """The knot decoder that emits the rate correction and delta."""
+
+    dim: int = 32
+    knot_stride: int = 25
 
 
 def bounded_kappa(raw):
@@ -207,11 +243,6 @@ class EmissionTransformer(nn.Module):
 
 
 
-WALK_MIX_W = (0.687, 0.313)
-WALK_MIX_SIGMA = (0.00029, 0.00377)
-WALK_INTRA_SIGMA = 0.00029
-WALK_INTER_W = (0.646, 0.354)
-WALK_INTER_SIGMA = (0.0247, 0.198)
 
 
 
@@ -334,36 +365,41 @@ class ZDecoder(nn.Module):
 class VBPM(nn.Module):
     """Encoder + physical prior + latent-only emission. Learnable: theta and phi only."""
 
-    def __init__(self, input_dim: int, d_model: int = 128, emission: str = "cosine",
-                 emission_layers: int = 2, emission_dim: int = 64,
-                 emission_positional: bool = False,
-                 kappa_physical: float = KAPPA_PHYSICAL,
-                 dec_dim: int = 32, knot_stride: int = 25, walk_kind: str = "gauss",
-                 kappa_gate: bool = False, place_coord: str = "first",
-                 place_lift: float = 0.0, place_attach: bool = False,
-                 encoder_pe: bool = False, delta_on: bool = False,
-                 gate_cond: bool = True):
+    def __init__(self, input_dim: int, d_model: int = 128,
+                 emission: EmissionSpec | str = "cosine",
+                 walk: WalkSpec | None = None,
+                 placement: PlacementSpec | None = None,
+                 update: UpdateSpec | None = None,
+                 decoder: DecoderSpec | None = None,
+                 encoder_pe: bool = False):
         super().__init__()
-        self.delta_on = bool(delta_on)
-        self.gate_cond = bool(gate_cond)
-        self.kappa_physical = float(kappa_physical)
-        self.knot_stride = int(knot_stride)
-        self.walk_kind = walk_kind
-        self.kappa_gate = bool(kappa_gate)
-        self.place_coord = place_coord
-        self.place_lift = float(place_lift)
-        self.place_attach = bool(place_attach)
-        self.encoder = Encoder(input_dim, d_model, kappa_physical=kappa_physical,
-                               use_pe=encoder_pe)
+        emission = EmissionSpec.coerce(emission)
+        self.walk = walk or WalkSpec()
+        self.placement = placement or PlacementSpec()
+        self.update = update or UpdateSpec()
+        self.decoder_spec = decoder or DecoderSpec()
 
-        self.emission_kind = emission
+        self.kappa_physical = float(self.walk.kappa_physical)
+        self.walk_kind = self.walk.kind
+        self.kappa_gate = bool(self.walk.kappa_gate)
+        self.place_coord = self.placement.coord
+        self.place_lift = float(self.placement.lift)
+        self.place_attach = bool(self.placement.attach)
+        self.delta_on = bool(self.update.delta_on)
+        self.gate_cond = bool(self.update.gate_cond)
+        self.knot_stride = int(self.decoder_spec.knot_stride)
+
+        self.encoder = Encoder(input_dim, d_model,
+                               kappa_physical=self.kappa_physical, use_pe=encoder_pe)
+
+        self.emission_kind = emission.kind
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
         # no gradient, which the audit correctly refused -- and an audit that has to be
         # weakened to accommodate dead parameters stops being an audit.
         self.emission_net = None
-        if emission == "transformer":
-            self.emission_net = EmissionTransformer(emission_dim, emission_layers,
-                                                    use_positional=emission_positional)
+        if emission.kind == "transformer":
+            self.emission_net = EmissionTransformer(emission.dim, emission.layers,
+                                                    use_positional=emission.positional)
         else:
             # the two-scalar cosine: the BASELINE arm, not the default story. It is my
             # invention rather than the spec's, and every number before 2026-08-04 was
@@ -373,7 +409,7 @@ class VBPM(nn.Module):
 
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
-        self.zdec = ZDecoder(d_model, d=dec_dim)
+        self.zdec = ZDecoder(d_model, d=self.decoder_spec.dim)
         if self.delta_on:
             self.delta_head = nn.Linear(
                 self.zdec.out.in_features + (1 if self.gate_cond else 0), 1)

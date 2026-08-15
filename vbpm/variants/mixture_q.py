@@ -29,7 +29,8 @@ import torch
 from .base import common_kwargs, epoch_note, objective, optimizer  # noqa: F401
 from .interval import DEFAULTS as INTERVAL_DEFAULTS
 from .interval import on_epoch  # noqa: F401
-from ..model import (KAPPA_INTER, TWO_PI, IntervalVAE, annotation_frames,
+from ..model import (KAPPA_INTER, TWO_PI, DecoderSpec, IntervalVAE,
+                     PlacementSpec, annotation_frames,
                      interval_loglik, log_i0, sample_vonmises)
 
 DEFAULTS = {**INTERVAL_DEFAULTS, "mix_eps": 0.3, "mix_kappa": 17.0}
@@ -144,8 +145,10 @@ def build_model(cfg, input_dim: int) -> MixtureQVAE:
     return MixtureQVAE(input_dim, mix_eps=cfg.mix_eps, mix_kappa=cfg.mix_kappa, b_ratio=cfg.b_ratio,
                        kappa_place=cfg.kappa_place, phase_half=cfg.phase_half,
                        interval_kind=cfg.interval_kind, disp_weight=cfg.disp_weight,
-                       dec_dim=cfg.dec_dim, knot_stride=cfg.knot_stride,
-                       walk_kind=cfg.walk_kind, kappa_gate=cfg.kappa_gate,
-                       encoder_pe=cfg.encoder_pe, place_coord=cfg.place_coord,
-                       place_lift=cfg.place_lift, place_attach=cfg.place_attach,
+                       decoder=DecoderSpec(dim=cfg.dec_dim,
+                                           knot_stride=cfg.knot_stride),
+                       placement=PlacementSpec(coord=cfg.place_coord,
+                                               lift=cfg.place_lift,
+                                               attach=cfg.place_attach),
+                       encoder_pe=cfg.encoder_pe,
                        **common_kwargs(cfg))

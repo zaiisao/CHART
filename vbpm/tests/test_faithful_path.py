@@ -11,7 +11,8 @@ import torch
 
 import vbpm.model as model_mod
 from vbpm import run as run_mod
-from vbpm.model import (VBPM, EmissionTransformer, Encoder,
+from vbpm.model import (VBPM, EmissionSpec, EmissionTransformer, Encoder,
+                        WalkSpec,
                             MAX_KAPPA, TWO_PI)
 from vbpm.vonmises import sample_vonmises
 
@@ -113,8 +114,8 @@ def test_emission_transformer_masked_frames_do_not_influence_unmasked():
 
 def _tf_model():
     _seed()
-    return VBPM(input_dim=4, d_model=8, emission="transformer",
-                       emission_layers=1, emission_dim=16)
+    return VBPM(input_dim=4, d_model=8,
+                emission=EmissionSpec(kind="transformer", layers=1, dim=16))
 
 
 def _batch(B=2, T=12):
@@ -279,7 +280,7 @@ def test_kl_free_posterior_matches_monte_carlo_three_frames():
     checked without ever forming the closed-form resultant terms.
     """
     scipy_special = pytest.importorskip("scipy.special")
-    model = VBPM(input_dim=4, d_model=8, kappa_physical=40.0)
+    model = VBPM(input_dim=4, d_model=8, walk=WalkSpec(kappa_physical=40.0))
     mus, kappas = (0.30, 0.36, 0.43), (50.0, 80.0, 65.0)
     got = model.kl_jitter(torch.tensor([list(mus)], dtype=torch.float64),
                           torch.tensor([list(kappas)], dtype=torch.float64),
