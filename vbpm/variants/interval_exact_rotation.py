@@ -207,7 +207,7 @@ class RotationIntervalVAE(IntervalVAE):
                  place_index: str = "first", sigma_ceil: float = 0.0, **kw):
         super().__init__(input_dim, d_model=d_model, **kw)
         self.encoder = RotationEncoder(input_dim, d_model,
-                                       kappa_physical=self.kappa_physical)
+                                       kappa_physical=self.walk.kappa_physical)
         self.kappa_theta_kind = kappa_theta
         self.kappa_theta_scale = float(kappa_theta_scale)
         self.place_expect = bool(place_expect)

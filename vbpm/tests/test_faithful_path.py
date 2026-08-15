@@ -308,7 +308,7 @@ def test_kl_free_posterior_uniform_prior_is_entropy_to_uniform():
     """
     scipy_stats = pytest.importorskip("scipy.stats")
     model = VBPM(input_dim=4, d_model=8)
-    model.kappa_physical = 0.0
+    model.walk.kappa_physical = 0.0
     kappas = (7.0, 11.0)
     got = model.kl_jitter(
         torch.tensor([[0.4, 0.9]], dtype=torch.float64),

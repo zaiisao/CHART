@@ -53,7 +53,7 @@ class Phi0DiffusionVAE(IntervalVAE):
     def denoise_scan(self, dotphi, jitter, memory, theta, pair_w, sample_noise=True):
         """The AR loop, but the decoder's output is an additive phase shift."""
         T = dotphi.shape[1]
-        stride = self.knot_stride
+        stride = self.decoder.knot_stride
         phase = theta
         segments = [phase[:, None]]
         shift_frames = []
@@ -85,8 +85,8 @@ class Phi0DiffusionVAE(IntervalVAE):
     def shift_log_prior(self, knots, crossing_at_knot):
         """Each shift is a phase innovation: cheap at a bar line, dear inside a bar."""
         d = torch.stack(knots, dim=1)
-        kp = torch.full_like(d, self.kappa_physical)
-        if crossing_at_knot is not None and self.kappa_gate:
+        kp = torch.full_like(d, self.walk.kappa_physical)
+        if crossing_at_knot is not None and self.walk.kappa_gate:
             kp = torch.where(crossing_at_knot[:, :d.shape[1]],
                              torch.full_like(d, self.mix_kappa_or_inter()), kp)
         return (kp * torch.cos(d) - math.log(TWO_PI) - log_i0(kp)).sum(1)
@@ -110,13 +110,13 @@ class Phi0DiffusionVAE(IntervalVAE):
         mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
         anchor, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
         crossing = None
-        if self.walk_kind == "gated" or self.kappa_gate:
+        if self.walk.kind == "gated" or self.walk.kappa_gate:
             mean_phi = (mean_ramp + anchor[:, None]).detach()
             crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
                 != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
         cross_knot = None
         if crossing is not None:
-            s = self.knot_stride
+            s = self.decoder.knot_stride
             cross_knot = torch.stack(
                 [crossing[:, i:i + s].any(1) for i in range(0, crossing.shape[1], s)], dim=1)
 
@@ -132,10 +132,10 @@ class Phi0DiffusionVAE(IntervalVAE):
                 + self.shift_log_prior(knots, cross_knot)
             kl_phase = kl_phase + self.kl_jitter(
                 phi[:, 1:], phase_kappa[:, 1:], pair_w,
-                crossing if self.kappa_gate else None)
+                crossing if self.walk.kappa_gate else None)
             em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place, self.b_ratio,
                                  self.phase_half, self.interval_kind, None,
-                                 self.disp_weight, self.place_coord)
+                                 self.disp_weight, self.placement.coord)
             recon = recon + em["loglik"]
             resultant = resultant + em["resultant"]
             shift_abs = shift_abs + torch.stack(knots, 1).abs().mean()

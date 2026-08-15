@@ -29,6 +29,10 @@ class WalkSpec:
     kappa_physical: float = KAPPA_PHYSICAL
     kappa_gate: bool = False
 
+    def __post_init__(self):
+        self.kappa_physical = float(self.kappa_physical)
+        self.kappa_gate = bool(self.kappa_gate)
+
 
 @dataclasses.dataclass
 class PlacementSpec:
@@ -38,6 +42,10 @@ class PlacementSpec:
     lift: float = 0.0
     attach: bool = False
 
+    def __post_init__(self):
+        self.lift = float(self.lift)
+        self.attach = bool(self.attach)
+
 
 @dataclasses.dataclass
 class UpdateSpec:
@@ -46,6 +54,10 @@ class UpdateSpec:
     delta_on: bool = False
     gate_cond: bool = True
 
+    def __post_init__(self):
+        self.delta_on = bool(self.delta_on)
+        self.gate_cond = bool(self.gate_cond)
+
 
 @dataclasses.dataclass
 class DecoderSpec:
@@ -53,3 +65,7 @@ class DecoderSpec:
 
     dim: int = 32
     knot_stride: int = 25
+
+    def __post_init__(self):
+        self.dim = int(self.dim)
+        self.knot_stride = int(self.knot_stride)

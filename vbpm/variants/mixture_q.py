@@ -68,8 +68,8 @@ class MixtureQVAE(IntervalVAE):
         return z, lq
 
     def phase_kl_sampled(self, z, lq, kappa_q, mask, crossing):
-        kappa_p = torch.full_like(kappa_q, self.kappa_physical)
-        if crossing is not None and self.kappa_gate:
+        kappa_p = torch.full_like(kappa_q, self.walk.kappa_physical)
+        if crossing is not None and self.walk.kappa_gate:
             kappa_p = torch.where(crossing,
                                   torch.full_like(kappa_q, self.mix_kappa), kappa_p)
         return ((lq - vonmises_logpdf(z, kappa_p)) * mask).sum(1)
@@ -91,7 +91,7 @@ class MixtureQVAE(IntervalVAE):
         mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
         crossing = None
-        if self.walk_kind == "gated" or self.kappa_gate or self.mix_eps > 0.0:
+        if self.walk.kind == "gated" or self.walk.kappa_gate or self.mix_eps > 0.0:
             mean_phi = (mean_ramp + theta[:, None]).detach()
             crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
                 != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
@@ -112,9 +112,9 @@ class MixtureQVAE(IntervalVAE):
             phi, corr_full, knots, lift, _d, _kd = self._scan(dotphi, jitter, memory,
                                                      theta, pair_w)
             dot_eff = dotphi * torch.exp(corr_full)
-            phi_place = None if self.place_attach else (
+            phi_place = None if self.placement.attach else (
                 phi.detach() + (theta - theta.detach())[:, None]
-                + (lift - lift.detach()) * self.place_lift)
+                + (lift - lift.detach()) * self.placement.lift)
 
             logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
             kl_phase = kl_phase + self.phase_kl_sampled(
@@ -122,7 +122,7 @@ class MixtureQVAE(IntervalVAE):
             em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place,
                                  self.b_ratio, self.phase_half,
                                  self.interval_kind, phi_place, self.disp_weight,
-                                 self.place_coord)
+                                 self.placement.coord)
             recon = recon + em["loglik"]
             resultant = resultant + em["resultant"]
             corr_abs = corr_abs + corr_full.abs().mean()

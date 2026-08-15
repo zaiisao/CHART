@@ -30,20 +30,10 @@ class VBPM(nn.Module):
         self.walk = walk or WalkSpec()
         self.placement = placement or PlacementSpec()
         self.update = update or UpdateSpec()
-        self.decoder_spec = decoder or DecoderSpec()
-
-        self.kappa_physical = float(self.walk.kappa_physical)
-        self.walk_kind = self.walk.kind
-        self.kappa_gate = bool(self.walk.kappa_gate)
-        self.place_coord = self.placement.coord
-        self.place_lift = float(self.placement.lift)
-        self.place_attach = bool(self.placement.attach)
-        self.delta_on = bool(self.update.delta_on)
-        self.gate_cond = bool(self.update.gate_cond)
-        self.knot_stride = int(self.decoder_spec.knot_stride)
+        self.decoder = decoder or DecoderSpec()
 
         self.encoder = Encoder(input_dim, d_model,
-                               kappa_physical=self.kappa_physical, use_pe=encoder_pe)
+                               kappa_physical=self.walk.kappa_physical, use_pe=encoder_pe)
 
         self.emission_kind = emission.kind
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
@@ -62,10 +52,10 @@ class VBPM(nn.Module):
 
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
-        self.zdec = ZDecoder(d_model, d=self.decoder_spec.dim)
-        if self.delta_on:
+        self.zdec = ZDecoder(d_model, d=self.decoder.dim)
+        if self.update.delta_on:
             self.delta_head = nn.Linear(
-                self.zdec.out.in_features + (1 if self.gate_cond else 0), 1)
+                self.zdec.out.in_features + (1 if self.update.gate_cond else 0), 1)
             nn.init.zeros_(self.delta_head.weight)
             nn.init.zeros_(self.delta_head.bias)
 
@@ -96,7 +86,7 @@ class VBPM(nn.Module):
                           torch.sin(phase)[:, None]], dim=-1)
 
     def walk_log_prior(self, dot_eff, w, crossing=None):
-        if self.walk_kind == "gauss":
+        if self.walk.kind == "gauss":
             return self.tempo_log_prior(dot_eff, w)
 
         log_dotphi = torch.log(dot_eff)
@@ -104,7 +94,7 @@ class VBPM(nn.Module):
         init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
-        if self.walk_kind == "gated":
+        if self.walk.kind == "gated":
             intra = -0.5 * (step / WALK_INTRA_SIGMA) ** 2 - math.log(WALK_INTRA_SIGMA) \
                 - 0.5 * math.log(2.0 * math.pi)
             comps = [math.log(wt) - 0.5 * (step / sg) ** 2 - math.log(sg)
@@ -124,7 +114,7 @@ class VBPM(nn.Module):
     def _knot_delta(self, tokens, on=None):
         x = self.zdec.proj(tokens) + self.zdec.pe[:tokens.shape[1]]
         head_in = self.zdec.blocks(x)[:, -1]
-        if self.gate_cond:
+        if self.update.gate_cond:
             g = (torch.zeros_like(head_in[:, :1]) if on is None
                  else on.to(head_in.dtype)[:, None])
             head_in = torch.cat([head_in, g], dim=1)
@@ -134,7 +124,7 @@ class VBPM(nn.Module):
     def _scan(self, dotphi, jitter, memory, theta, pair_w, sample_noise=True,
               crossing=None, kappa_q=None):
         T = dotphi.shape[1]
-        stride = self.knot_stride
+        stride = self.decoder.knot_stride
         phase = theta
         segments = [phase[:, None]]
         corr_frames = []
@@ -156,13 +146,13 @@ class VBPM(nn.Module):
             knots.append(correction)
 
             on = None
-            if crossing is not None and self.kappa_gate:
+            if crossing is not None and self.walk.kappa_gate:
                 on = crossing[:, start - 1:stop - 1].any(1)
-            d_k = (self._knot_delta(stack, on) if self.delta_on
+            d_k = (self._knot_delta(stack, on) if self.update.delta_on
                    else torch.zeros_like(correction))
             deltas.append(d_k)
-            if self.delta_on and kappa_q is not None:
-                kp = torch.full_like(d_k, self.kappa_physical)
+            if self.update.delta_on and kappa_q is not None:
+                kp = torch.full_like(d_k, self.walk.kappa_physical)
                 if on is not None:
                     kp = torch.where(on, torch.full_like(d_k, KAPPA_INTER), kp)
                 kl_terms.append(mean_resultant(kappa_q[:, start - 1]) * kp
@@ -171,7 +161,7 @@ class VBPM(nn.Module):
             steps = dotphi[:, start - 1:stop - 1] * torch.exp(correction)[:, None]
             if sample_noise:
                 steps = steps + jitter[:, start - 1:stop - 1]
-            if self.delta_on:
+            if self.update.delta_on:
                 steps = torch.cat([steps[:, :1] + d_k[:, None], steps[:, 1:]], dim=1)
 
             segment = phase[:, None] + torch.cumsum(
@@ -201,7 +191,7 @@ class VBPM(nn.Module):
         """Per-frame KL( vM(mu,kappa) || vM(mu,kappa_p) ): prices concentration only.
         crossing prices those steps against KAPPA_INTER instead (the kappa-gate:
         one cheap phase jump per bar line, the phase-side twin of the walk gate)."""
-        kp = torch.full_like(kappa, self.kappa_physical)
+        kp = torch.full_like(kappa, self.walk.kappa_physical)
         if crossing is not None:
             kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
         return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
@@ -243,7 +233,7 @@ class VBPM(nn.Module):
         mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
         crossing = None
-        if self.walk_kind == "gated" or self.kappa_gate:
+        if self.walk.kind == "gated" or self.walk.kappa_gate:
             mean_phi = (mean_ramp + theta[:, None]).detach()
             crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
                 != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
@@ -263,7 +253,7 @@ class VBPM(nn.Module):
             logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
             kl_phase = kl_phase + self.kl_jitter(
                 phi[:, 1:], phase_kappa[:, 1:], pair_w,
-                crossing if self.kappa_gate else None)
+                crossing if self.walk.kappa_gate else None)
             recon = recon + event_recon(self.emission_logits(phi, mask), y, w, pos_weight)
 
         recon = recon / samples
@@ -291,7 +281,7 @@ class VBPM(nn.Module):
         mean_ramp = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp, post["rotation"]["weight"])
         T = dotphi.shape[1]
-        stride = self.knot_stride
+        stride = self.decoder.knot_stride
         phase = theta
         segments = [phase[:, None]]
         tokens = []
@@ -353,7 +343,7 @@ class IntervalVAE(VBPM):
         mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
         theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
         crossing = None
-        if self.walk_kind == "gated" or self.kappa_gate:
+        if self.walk.kind == "gated" or self.walk.kappa_gate:
             mean_phi = (mean_ramp + theta[:, None]).detach()
             crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
                 != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
@@ -368,18 +358,18 @@ class IntervalVAE(VBPM):
                 dotphi, jitter, memory, theta, pair_w, crossing=crossing,
                 kappa_q=phase_kappa)
             dot_eff = dotphi * torch.exp(corr_full)
-            phi_place = None if self.place_attach else (
+            phi_place = None if self.placement.attach else (
                 phi.detach() + (theta - theta.detach())[:, None]
-                + (lift - lift.detach()) * self.place_lift)
+                + (lift - lift.detach()) * self.placement.lift)
 
             logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
             kl_phase = kl_phase + self.kl_jitter(
                 phi[:, 1:], phase_kappa[:, 1:], pair_w,
-                crossing if self.kappa_gate else None) + kl_delta
+                crossing if self.walk.kappa_gate else None) + kl_delta
             em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place,
                                  self.b_ratio, self.phase_half,
                                  self.interval_kind, phi_place, self.disp_weight,
-                                 self.place_coord)
+                                 self.placement.coord)
             recon = recon + em["loglik"]
             resultant = resultant + em["resultant"]
             corr_abs = corr_abs + corr_full.abs().mean()

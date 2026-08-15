@@ -166,7 +166,7 @@ class BlockIntervalVAE(IntervalVAE):
                  block_interp: bool = True, sigma_ceil: float = 0.0, **kw):
         super().__init__(input_dim, d_model=d_model, **kw)
         self.encoder = BlockEncoder(input_dim, d_model,
-                                    kappa_physical=self.kappa_physical,
+                                    kappa_physical=self.walk.kappa_physical,
                                     block_frames=block_frames,
                                     block_interp=block_interp)
 

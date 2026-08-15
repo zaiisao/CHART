@@ -52,7 +52,7 @@ class AnchorTimeVAE(VBPM):
                  harmonics: int = HARMONICS, d_model: int = 128, **kw):
         super().__init__(input_dim, d_model=d_model, **kw)
         self.encoder = AnchorEncoder(input_dim, d_model,
-                                     kappa_physical=self.kappa_physical)
+                                     kappa_physical=self.walk.kappa_physical)
         self.stride = int(stride)
         self.harmonics = int(harmonics)
 

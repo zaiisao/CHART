@@ -68,7 +68,7 @@ class RateGridVAE(VBPM):
         super().__init__(input_dim, d_model=d_model, **kw)
         self.encoder = RateGridEncoder(input_dim, d_model, grid_size=grid_size,
                                        score_scale=score_scale,
-                                       kappa_physical=self.kappa_physical)
+                                       kappa_physical=self.walk.kappa_physical)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         post, _ = self.encoder(h, mask)
