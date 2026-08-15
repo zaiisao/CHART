@@ -15,7 +15,8 @@ DEFAULTS_IF_UNSUPPORTED = {}
 def common_kwargs(cfg) -> dict:
     """The kwargs every VBPM subclass should be built with."""
     return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
-                                     positional=cfg.emission_positional),
+                                     positional=cfg.emission_positional,
+                                     bump_kappa=cfg.emission_bump_kappa),
             "walk": WalkSpec(kind=getattr(cfg, "walk_kind", "gauss"),
                              kappa_physical=cfg.kappa_physical,
                              kappa_gate=getattr(cfg, "kappa_gate", False))}

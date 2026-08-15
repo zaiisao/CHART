@@ -14,6 +14,7 @@ class EmissionSpec:
     layers: int = 2
     dim: int = 64
     positional: bool = False
+    bump_kappa: float = 20.0
 
     @classmethod
     def coerce(cls, value):

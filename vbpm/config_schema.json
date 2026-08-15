@@ -10,9 +10,10 @@
     "enum": [
       "cosine",
       "triangle",
+      "bump",
       "transformer"
     ],
-    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the champion deviation; transformer is the learned emission (seed lottery, see vbpm-family-verdict)."
+    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the champion deviation; bump is the von Mises-shaped narrow peak whose width is emission_bump_kappa; transformer is the learned emission (seed lottery, see vbpm-family-verdict)."
   },
   "emission_layers": {
     "type": "integer",
@@ -24,6 +25,12 @@
     "type": "boolean",
     "default": false,
     "description": "transformer emission only: add positional encoding, letting the emission read FRAME INDEX as well as phase."
+  },
+  "emission_bump_kappa": {
+    "type": "number",
+    "default": 20.0,
+    "minimum": 0.001,
+    "description": "bump emission only: concentration of the peak. The bump is exp(kappa (cos phi - 1)), so its half-width is about sqrt(2/kappa) radians of bar phase."
   },
   "epochs": {
     "type": "integer",
