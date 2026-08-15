@@ -13,10 +13,10 @@ from vbpm import run as run_mod
 from vbpm.config import load_config
 from vbpm.scoring import controls as controls_mod
 from vbpm.scoring.evaluation import f_measure, null_times, peak_times
-from vbpm.model import (VBPM, Encoder, KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI,
-                            bounded_kappa, downbeat_frames, inverse_softplus,
-                            vonmises_entropy,
-                            TEMPO_SIGMA_CEIL, TEMPO_SIGMA_INIT)
+from vbpm.constants import (KAPPA_PHYSICAL, MAX_KAPPA, TEMPO_SIGMA_CEIL, TEMPO_SIGMA_INIT,
+                            TWO_PI)
+from vbpm.model import VBPM, downbeat_frames
+from vbpm.nets import Encoder, bounded_kappa, inverse_softplus, vonmises_entropy
 from vbpm.vonmises import log_i0, mean_resultant, sample_vonmises
 
 from vbpm.data.features import FPS, atomic_save_npy

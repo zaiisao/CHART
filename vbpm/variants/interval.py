@@ -27,17 +27,11 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
-import torch
-from torch import nn
 
 from .base import common_kwargs, epoch_note, objective, on_epoch as _base_on_epoch  # noqa: F401
 from .base import optimizer  # noqa: F401
-from ..model import (TWO_PI, VBPM, DecoderSpec, IntervalVAE, PlacementSpec,  # noqa: F401
-                     UpdateSpec, WALK_MIX_SIGMA, WALK_MIX_W,
-                     annotation_frames, interp_phase, interval_loglik,  # noqa: F401
-                     interval_penalty, log_i0, path_dotphi, sample_vonmises,  # noqa: F401
-                     smooth_phase)  # noqa: F401
+from ..model import IntervalVAE
+from ..specs import DecoderSpec, PlacementSpec, UpdateSpec
 
 DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "phase_half": 0, "interval_kind": "laplace", "disp_weight": 0.0,

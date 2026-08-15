@@ -6,7 +6,9 @@ import math
 import torch
 from torch import nn
 
-from ..model import TWO_PI, VBPM, sample_vonmises
+from ..constants import TWO_PI
+from ..model import VBPM
+from ..vonmises import sample_vonmises
 from .base import objective, on_epoch  # noqa: F401  -- re-exported hooks
 from .base import refuse_unsupported
 

@@ -8,7 +8,8 @@ import numpy as np
 import torch
 
 from ..data.excerpts import collate_excerpts
-from ..model import TWO_PI, downbeat_times
+from ..constants import TWO_PI
+from ..model import downbeat_times
 
 TOLERANCE_S = 0.070
 

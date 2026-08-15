@@ -47,10 +47,13 @@ import torch
 
 from .base import common_kwargs, epoch_note, objective, optimizer  # noqa: F401
 from .interval import DEFAULTS as INTERVAL_DEFAULTS
-from .interval import IntervalVAE, annotation_frames, interval_loglik, on_epoch  # noqa: F401
-from .interval import interp_phase, smooth_phase
-from ..model import (TWO_PI, Encoder, bounded_kappa, log_i0, mean_resultant,
-                     sample_vonmises, vonmises_entropy)
+from .interval import on_epoch  # noqa: F401
+from ..model import IntervalVAE
+from ..observation import (annotation_frames, interp_phase, interval_loglik,
+                           smooth_phase)
+from ..constants import TWO_PI
+from ..nets import Encoder, bounded_kappa, vonmises_entropy
+from ..vonmises import log_i0, mean_resultant, sample_vonmises
 
 DEFAULTS = dict(INTERVAL_DEFAULTS, sigma_ceil=0.01, kappa_theta="fold", kappa_theta_scale=1.0,
                 place_expect=True, place_index="first")

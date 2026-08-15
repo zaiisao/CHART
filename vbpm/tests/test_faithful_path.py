@@ -11,9 +11,10 @@ import torch
 
 import vbpm.model as model_mod
 from vbpm import run as run_mod
-from vbpm.model import (VBPM, EmissionSpec, EmissionTransformer, Encoder,
-                        WalkSpec,
-                            MAX_KAPPA, TWO_PI)
+from vbpm.constants import MAX_KAPPA, TWO_PI
+from vbpm.model import VBPM
+from vbpm.nets import EmissionTransformer, Encoder
+from vbpm.specs import EmissionSpec, WalkSpec
 from vbpm.vonmises import sample_vonmises
 
 

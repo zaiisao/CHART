@@ -7,7 +7,9 @@ import torch
 from torch import nn
 
 from .base import refuse_unsupported
-from ..model import (VBPM, Encoder, bounded_kappa, sample_vonmises)
+from ..model import VBPM
+from ..nets import Encoder, bounded_kappa
+from ..vonmises import sample_vonmises
 
 
 # 4 frames at 50 fps = 80 ms; see the module docstring on why this is an integer.

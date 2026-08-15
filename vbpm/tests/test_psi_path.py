@@ -14,7 +14,8 @@ import pytest
 import torch
 
 from vbpm.scoring import controls as controls_mod
-from vbpm.model import TWO_PI, Encoder, vonmises_log_density
+from vbpm.constants import TWO_PI
+from vbpm.nets import Encoder, vonmises_log_density
 from vbpm.variants.psi import PosteriorEncoder, PsiVBPM, RotationPrior
 
 

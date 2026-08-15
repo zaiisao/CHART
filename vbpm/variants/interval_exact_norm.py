@@ -47,9 +47,11 @@ import torch
 
 from .base import common_kwargs, epoch_note, objective, on_epoch as _base_on_epoch  # noqa: F401
 from .base import optimizer  # noqa: F401
-from .interval import (IntervalVAE, annotation_frames, interp_phase, interval_penalty,
+from ..model import IntervalVAE
+from ..observation import (annotation_frames, interp_phase, interval_penalty,
                        smooth_phase)
-from ..model import TWO_PI, log_i0, sample_vonmises
+from ..constants import TWO_PI
+from ..vonmises import log_i0, sample_vonmises
 
 DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "sigma_ceil": 0.01, "phase_half": 0, "interval_kind": "laplace",

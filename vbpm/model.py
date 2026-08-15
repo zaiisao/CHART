@@ -6,22 +6,13 @@ import math
 import torch
 from torch import nn
 
-from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER,
-                        TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA, TEMPO_WALK_SIGMA, TWO_PI,
-                        WALK_INTER_SIGMA, WALK_INTER_W, WALK_INTRA_SIGMA,
-                        WALK_MIX_SIGMA, WALK_MIX_W)
-from .constants import (BAR_POOL_ITERS, KAPPA_PHYSICAL, MAX_KAPPA,  # noqa: F401
-                        TEMPO_BOUND_MARGIN,  # noqa: F401
-                        TEMPO_HI, TEMPO_LO, TEMPO_PRIOR_EPS,  # noqa: F401
-                        TEMPO_SIGMA_CEIL, TEMPO_SIGMA_INIT)  # noqa: F401
-from .nets import (Encoder, EmissionTransformer, ZDecoder, bounded_kappa,  # noqa: F401
-                   inverse_softplus, vonmises_entropy, vonmises_log_density)
-from .observation import (annotation_frames, event_recon, interp_phase,  # noqa: F401
-                          interval_loglik, interval_penalty, path_dotphi,
-                          smooth_phase)
-from .specs import (DecoderSpec, EmissionSpec, PlacementSpec,  # noqa: F401
-                    UpdateSpec, WalkSpec)
-from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises  # noqa: F401
+from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, TEMPO_PRIOR_MU,
+                        TEMPO_PRIOR_SIGMA, TEMPO_WALK_SIGMA, TWO_PI, WALK_INTER_SIGMA,
+                        WALK_INTER_W, WALK_INTRA_SIGMA, WALK_MIX_SIGMA, WALK_MIX_W)
+from .nets import Encoder, EmissionTransformer, ZDecoder, vonmises_log_density
+from .observation import annotation_frames, interval_loglik, event_recon
+from .specs import DecoderSpec, EmissionSpec, PlacementSpec, UpdateSpec, WalkSpec
+from .vonmises import kl_vonmises, mean_resultant, sample_vonmises
 
 
 class VBPM(nn.Module):

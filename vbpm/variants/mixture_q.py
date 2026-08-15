@@ -29,9 +29,11 @@ import torch
 from .base import common_kwargs, epoch_note, objective, optimizer  # noqa: F401
 from .interval import DEFAULTS as INTERVAL_DEFAULTS
 from .interval import on_epoch  # noqa: F401
-from ..model import (KAPPA_INTER, TWO_PI, DecoderSpec, IntervalVAE,
-                     PlacementSpec, annotation_frames,
-                     interval_loglik, log_i0, sample_vonmises)
+from ..constants import KAPPA_INTER, TWO_PI
+from ..model import IntervalVAE
+from ..observation import annotation_frames, interval_loglik
+from ..specs import DecoderSpec, PlacementSpec
+from ..vonmises import log_i0, sample_vonmises
 
 DEFAULTS = {**INTERVAL_DEFAULTS, "mix_eps": 0.3, "mix_kappa": 17.0}
 

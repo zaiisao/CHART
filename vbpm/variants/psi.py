@@ -5,8 +5,10 @@ import torch
 from torch import nn
 
 from .base import refuse_unsupported
-from ..model import (TWO_PI, VBPM, Encoder, sample_vonmises,
-                     vonmises_log_density)
+from ..constants import TWO_PI
+from ..model import VBPM
+from ..nets import Encoder, vonmises_log_density
+from ..vonmises import sample_vonmises
 
 
 class PosteriorEncoder(Encoder):

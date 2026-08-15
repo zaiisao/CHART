@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import torch
 
-from ..model import VBPM, EmissionSpec, WalkSpec
+from ..model import VBPM
+from ..specs import EmissionSpec, WalkSpec
 
 
 COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "kappa_physical")

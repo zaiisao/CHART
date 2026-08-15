@@ -41,9 +41,11 @@ import torch
 
 from .base import common_kwargs, objective  # noqa: F401
 from .base import optimizer  # noqa: F401
-from .interval import DEFAULTS as INTERVAL_DEFAULTS, IntervalVAE, on_epoch  # noqa: F401
-from ..model import (Encoder, TEMPO_PRIOR_EPS, TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA,
-                     TEMPO_HI, TEMPO_LO, TWO_PI, bounded_kappa)
+from .interval import DEFAULTS as INTERVAL_DEFAULTS, on_epoch  # noqa: F401
+from ..model import IntervalVAE
+from ..constants import (TEMPO_HI, TEMPO_LO, TEMPO_PRIOR_EPS, TEMPO_PRIOR_MU,
+                         TEMPO_PRIOR_SIGMA, TWO_PI)
+from ..nets import Encoder, bounded_kappa
 
 DEFAULTS = dict(INTERVAL_DEFAULTS, block_frames=50, block_interp=True, sigma_ceil=0.25)
 

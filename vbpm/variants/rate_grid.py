@@ -7,9 +7,12 @@ import torch
 from torch import nn
 
 from .base import common_kwargs, epoch_note, objective, on_epoch, optimizer  # noqa: F401
-from ..model import (TEMPO_HI, TEMPO_LO, TEMPO_PRIOR_EPS, TEMPO_PRIOR_MU,
-                     TEMPO_PRIOR_SIGMA, VBPM, Encoder, bounded_kappa,
-                     event_recon, sample_vonmises)
+from ..constants import (TEMPO_HI, TEMPO_LO, TEMPO_PRIOR_EPS, TEMPO_PRIOR_MU,
+                         TEMPO_PRIOR_SIGMA)
+from ..model import VBPM
+from ..nets import Encoder, bounded_kappa
+from ..observation import event_recon
+from ..vonmises import sample_vonmises
 
 
 DEFAULTS = {"rate_grid_size": 1024, "rate_score_scale": 20.0}
