@@ -141,7 +141,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 def parse_args():
     """Run mechanics ONLY -- the recipe is the config's business."""
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="vbpm/configs/tempo_init_clip.yaml",
+    p.add_argument("--config", default="vbpm/configs/baseline.yaml",
                    help="YAML recipe; its variant: key names the hooks module")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a config key for this run (repeatable)")
