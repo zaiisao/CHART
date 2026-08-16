@@ -60,8 +60,8 @@ class Encoder(nn.Module):
     def output_channels(self, trunk):
         """[B, T, d_model] -> {channel: [B, T]}, one named single-row head each."""
         out = self.out(trunk)
-        result = {"rotation_weight_logit": out[..., 0], "phase_log_kappa": out[..., 1],
-                    "tempo_log_mu": out[..., 2], "tempo_sigma_logit": out[..., 3]}
+        result = {"phase_log_kappa": out[..., 0], "tempo_log_mu": out[..., 1],
+                  "tempo_sigma_logit": out[..., 2], "phase_mu_offset": out[..., 3]}
         return result
 
     def features(self, h, mask=None):
@@ -84,9 +84,8 @@ class Encoder(nn.Module):
 
     def heads(self, trunk, mask=None):
         channels = self.output_channels(trunk)
-        w = torch.ones(trunk.shape[:2], device=trunk.device, dtype=trunk.dtype) \
-            if mask is None else mask
 
+        phase_mu_offset = math.pi * torch.tanh(channels["phase_mu_offset"])
         # JA: log_phi_kappa_bias is a constant that is added to the encoder's log_kappa output.
         # As kappa initializes to a small value (around 1), it would otherwise take a long
         # time before reaching a reasonable value.
@@ -94,12 +93,9 @@ class Encoder(nn.Module):
             torch.exp(channels["phase_log_kappa"] + self.log_phi_kappa_bias) + 1e-3)
         tempo_mu = torch.exp(channels["tempo_log_mu"])
         tempo_sigma = nn.functional.softplus(channels["tempo_sigma_logit"])
-        rotation_weight = torch.sigmoid(channels["rotation_weight_logit"]) * w
-
         return {
-            "phase": {"kappa": phase_kappa},
+            "phase": {"kappa": phase_kappa, "mu_offset": phase_mu_offset},
             "tempo": {"mu": tempo_mu, "sigma": tempo_sigma},
-            "rotation": {"weight": rotation_weight},
         }
 
     @staticmethod

@@ -44,9 +44,7 @@ class VBPM(nn.Module):
             self.emission_net = EmissionTransformer(emission.dim, emission.layers,
                                                     use_positional=emission.positional)
         else:
-            # the two-scalar cosine: the BASELINE arm, not the default story. It is my
-            # invention rather than the spec's, and every number before 2026-08-04 was
-            # measured with it.
+            # JA: emission_a and emission_b_raw are scalars used by the Bernoulli distribution
             self.emission_a = nn.Parameter(torch.tensor(-3.0))
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
 
@@ -192,14 +190,9 @@ class VBPM(nn.Module):
         return (torch.cat(segments, dim=1), corr_full, knots,
                 torch.cat(shifts, dim=1), torch.stack(deltas, dim=1), kl_delta)
 
-    def kl_jitter(self, mu, kappa, mask, crossing=None):
-        """Per-frame KL( vM(mu,kappa) || vM(mu,kappa_p) ): prices concentration only.
-        crossing prices those steps against KAPPA_INTER instead (the kappa-gate:
-        one cheap phase jump per bar line, the phase-side twin of the walk gate)."""
-        kp = torch.full_like(kappa, self.walk.kappa_physical)
-        if crossing is not None:
-            kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
-        return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
+    def kl_phase_step(self, delta, kappa_q, mask):
+        kp = torch.full_like(kappa_q, self.walk.kappa_physical)
+        return (kl_vonmises(delta, kappa_q, torch.zeros_like(delta), kp) * mask).sum(1)
 
     def tempo_log_prior(self, dotphi, w):
         log_dotphi = torch.log(dotphi)
@@ -223,11 +216,10 @@ class VBPM(nn.Module):
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         post, memory = self.encoder(h, mask)
-        phase, tempo, rotation = post["phase"], post["tempo"], post["rotation"]
-        
-        phase_kappa = phase["kappa"]
+        phase, tempo = post["phase"], post["tempo"]
+
+        phase_mu_offset, phase_kappa = phase["mu_offset"], phase["kappa"]
         tempo_mu, tempo_sigma = tempo["mu"], tempo["sigma"]
-        rotation_weight = rotation["weight"]
 
         w = torch.ones_like(phase_kappa) if mask is None else mask
         pair_w = ((w[:, 1:] > 0) & (w[:, :-1] > 0)).to(w.dtype)
@@ -235,30 +227,24 @@ class VBPM(nn.Module):
         entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
-        mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
-        theta, _ = self.encoder._anchor(mean_ramp.detach(), rotation_weight)
-        crossing = None
-        if self.walk.kind == "gated" or self.walk.kappa_gate:
-            mean_phi = (mean_ramp + theta[:, None]).detach()
-            crossing = torch.div(mean_phi[:, 1:], TWO_PI, rounding_mode="floor") \
-                != torch.div(mean_phi[:, :-1], TWO_PI, rounding_mode="floor")
-
         recon = 0.0
         logp_tempo = 0.0
         kl_phase = 0.0
         phi = None
 
         for _ in range(samples):
+            phi_1 = torch.rand_like(tempo_mu[:, 0]) * TWO_PI
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
-            jitter = sample_vonmises(phase_kappa[:, 1:])
-            phi, corr_full, _knots, _lift, _d, _kd = self._scan(
-                dotphi, jitter, memory, theta, pair_w)
-            dot_eff = dotphi * torch.exp(corr_full)
+            eps = sample_vonmises(phase_kappa[:, 1:])
 
-            logp_tempo = logp_tempo + self.walk_log_prior(dot_eff, w, crossing)
-            kl_phase = kl_phase + self.kl_jitter(
-                phi[:, 1:], phase_kappa[:, 1:], pair_w,
-                crossing if self.walk.kappa_gate else None)
+            steps = torch.cumsum(
+                (dotphi[:, :-1] + phase_mu_offset[:, 1:] + eps) * pair_w, dim=1)
+            phi = phi_1[:, None] + torch.cat([torch.zeros_like(steps[:, :1]), steps], dim=1)
+
+            logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w)
+            kl_phase = kl_phase + self.kl_phase_step(
+                phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w)
+
             recon = recon + event_recon(self.emission_logits(phi, mask), y, w, pos_weight)
 
         recon = recon / samples
