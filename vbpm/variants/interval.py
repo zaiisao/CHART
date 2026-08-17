@@ -33,7 +33,7 @@ from .base import optimizer  # noqa: F401
 from ..model import IntervalVAE
 from ..specs import DecoderSpec, PlacementSpec, UpdateSpec
 
-DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
+DEFAULTS = {"b_ratio": 0.1, "interval_count_weight": 0.0, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "phase_half": 0, "interval_kind": "laplace", "disp_weight": 0.0,
             "dec_dim": 32, "knot_stride": 25, "dec_warmup": 15,
             "encoder_pe": False,
@@ -41,9 +41,11 @@ DEFAULTS = {"b_ratio": 0.1, "kappa_place": 100.0, "kappa_anneal": "3,300,0.7",
             "place_coord": "first", "place_lift": 0.0, "place_attach": False,
             "delta_on": False, "gate_cond": True}
 
+
 def build_model(cfg, input_dim: int) -> IntervalVAE:
     return IntervalVAE(input_dim, b_ratio=cfg.b_ratio, kappa_place=cfg.kappa_place,
                        phase_half=cfg.phase_half, interval_kind=cfg.interval_kind,
+                       count_weight=cfg.interval_count_weight,
                        disp_weight=cfg.disp_weight,
                        decoder=DecoderSpec(dim=cfg.dec_dim,
                                            knot_stride=cfg.knot_stride),

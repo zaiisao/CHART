@@ -13,11 +13,12 @@ from .. import run as run_mod
 from ..config import load_config
 from ..data.dataset import load_catalog
 from ..data.excerpts import ExcerptDataset, collate_excerpts
-from ..model import downbeat_frames, downbeat_times
+from ..model import downbeat_times
 from ..scoring.evaluation import continuity_scores, f_measure
 
 
 def parse_args():
+    """The command line for this check."""
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="vbpm/configs/baseline.yaml")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
@@ -36,6 +37,12 @@ def parse_args():
     p.add_argument("--lr-drop", type=int, default=0)
     p.add_argument("--lr-anneal", type=float, default=0.0)
     p.add_argument("--acf-init", action="store_true")
+    p.add_argument("--truncate-sec", type=float, default=0.0,
+                   help="keep only the first N seconds of the crop: mask the rest and "
+                        "drop its annotations, so a suspect passage can be excluded "
+                        "without moving the window's start")
+    p.add_argument("--thaw", type=float, default=0.0,
+                   help="lr scale for the frontend; 0 keeps it frozen (the default)")
     p.add_argument("--save", default="", help="path to write the trained state_dict")
     p.add_argument("--plot", default=None,
                    help="PNG of phase vs ground truth at each snapshot. A plot is "
@@ -62,7 +69,7 @@ def main() -> None:
     cfg, hooks = load_config(args.config, args.set)
     assert not getattr(cfg, "clip_per_group", False), \
         "overfit_one clips pooled only; clip_per_group configs are not mirrored here"
-    assert getattr(cfg, "frontend_lr_scale", 0.0) == 0.0, \
+    assert getattr(cfg, "frontend_lr_scale", 0.0) == 0.0 or args.thaw > 0.0, \
         "overfit_one freezes the frontend; frontend_lr_scale configs are not mirrored here"
     shipped_epochs = cfg.epochs
     cfg.epochs = args.epochs
@@ -81,8 +88,21 @@ def main() -> None:
                                         device=f"cuda:{args.gpu}", output="features")
 
     # deterministic: the window must be IDENTICAL every epoch or this is not overfitting.
-    dataset = ExcerptDataset([song], frontend, cfg.excerpt_seconds, deterministic=True)
+    dataset = ExcerptDataset([song], frontend, cfg.excerpt_seconds, deterministic=True,
+                             target_tol_frames=getattr(cfg, "target_tol_frames", 0))
     raw = collate_excerpts([dataset[0]])
+
+    if args.truncate_sec > 0.0:
+        fps_ = float(raw["fps"][0])
+        keep = int(round(args.truncate_sec * fps_))
+        raw["mask"][0, keep:] = 0.0
+        raw["y"][0, keep:] = 0.0
+        cut = float(raw["t0"][0]) + args.truncate_sec
+        for field in ("downbeat_times", "anchors"):
+            kept = np.asarray(raw[field][0])
+            raw[field][0] = kept[kept <= cut]
+        print(f"truncated to {args.truncate_sec:.2f}s: "
+              f"{len(raw['downbeat_times'][0])} downbeats kept", flush=True)
 
     downbeats = np.asarray(raw["downbeat_times"][0])
     fps = float(raw["fps"][0])
@@ -116,6 +136,7 @@ def main() -> None:
     if args.pin_tempo:
         raw_value = math.log(true_dotphi)
         orig_channels = model.encoder.output_channels
+
         def pinned_channels(trunk):
             r = orig_channels(trunk)
             r["tempo_log_mu"] = torch.full_like(r["tempo_log_mu"], raw_value)
@@ -123,7 +144,13 @@ def main() -> None:
         model.encoder.output_channels = pinned_channels
 
     # ONCE: the frontend is frozen, so its features never change. Recomputing them per
-    # epoch is pure waste and drags 20M parameters into the graph.
+    # epoch is pure waste and drags 20M parameters into the graph. --thaw gives that up:
+    # the features are then a function of parameters under training, so they move.
+    fe_params = list(frontend._audio2frames.model.parameters())
+    if args.thaw > 0.0:
+        opt.add_param_group({"params": fe_params, "lr": cfg.lr * args.thaw})
+        print(f"frontend THAWED: {sum(q.numel() for q in fe_params)/1e6:.1f}M params "
+              f"at lr {cfg.lr * args.thaw:.2e}", flush=True)
     with torch.no_grad():
         h = frontend.forward_features(raw["input"])
     mask = raw["mask"].to(device)
@@ -151,6 +178,8 @@ def main() -> None:
                 g["lr"] *= args.lr_anneal
         if args.pin_gain:
             model.emission_a.data.fill_(2.2 - float(model.emission_b))
+        if args.thaw > 0.0:
+            h = frontend.forward_features(raw["input"])
         extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
         out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
                     **extra)
@@ -183,6 +212,8 @@ def main() -> None:
                          + ",".join(f"{norms[k]:.6e}" for k in groups) + "\n")
 
         torch.nn.utils.clip_grad_norm_(clip_params, cfg.clip)
+        if args.thaw > 0.0:
+            torch.nn.utils.clip_grad_norm_(fe_params, cfg.clip)
         opt.step()
 
         if epoch % args.every and epoch != args.epochs - 1:

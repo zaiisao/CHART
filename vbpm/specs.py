@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import dataclasses
 
-from .constants import KAPPA_PHYSICAL
+from .constants import (KAPPA_PHYSICAL, TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA,
+                        TEMPO_WALK_SIGMA)
 
 
 @dataclasses.dataclass
@@ -15,6 +16,7 @@ class EmissionSpec:
     dim: int = 64
     positional: bool = False
     bump_kappa: float = 20.0
+    recon: str = "event"
 
     @classmethod
     def coerce(cls, value):
@@ -29,10 +31,16 @@ class WalkSpec:
     kind: str = "gauss"
     kappa_physical: float = KAPPA_PHYSICAL
     kappa_gate: bool = False
+    tempo_mu: float = TEMPO_PRIOR_MU
+    tempo_sigma: float = TEMPO_PRIOR_SIGMA
+    walk_sigma: float = TEMPO_WALK_SIGMA
 
     def __post_init__(self):
         self.kappa_physical = float(self.kappa_physical)
         self.kappa_gate = bool(self.kappa_gate)
+        self.tempo_mu = float(self.tempo_mu)
+        self.tempo_sigma = float(self.tempo_sigma)
+        self.walk_sigma = float(self.walk_sigma)
 
 
 @dataclasses.dataclass
@@ -42,6 +50,7 @@ class PlacementSpec:
     coord: str = "first"
     lift: float = 0.0
     attach: bool = False
+    offset_marginal: int = 1
 
     def __post_init__(self):
         self.lift = float(self.lift)

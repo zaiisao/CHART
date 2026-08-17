@@ -7,7 +7,8 @@ from ..model import VBPM
 from ..specs import EmissionSpec, WalkSpec
 
 
-COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "kappa_physical")
+COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "emission_recon",
+               "kappa_physical")
 
 DEFAULTS_IF_UNSUPPORTED = {}
 
@@ -16,10 +17,15 @@ def common_kwargs(cfg) -> dict:
     """The kwargs every VBPM subclass should be built with."""
     return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
                                      positional=cfg.emission_positional,
-                                     bump_kappa=cfg.emission_bump_kappa),
+                                     bump_kappa=cfg.emission_bump_kappa,
+                                     recon=getattr(cfg, "emission_recon", "event")),
             "walk": WalkSpec(kind=getattr(cfg, "walk_kind", "gauss"),
                              kappa_physical=cfg.kappa_physical,
-                             kappa_gate=getattr(cfg, "kappa_gate", False))}
+                             kappa_gate=getattr(cfg, "kappa_gate", False),
+                             tempo_mu=cfg.tempo_prior_mu,
+                             tempo_sigma=cfg.tempo_prior_sigma,
+                             walk_sigma=cfg.walk_sigma),
+            "phase_init": cfg.phase_init}
 
 
 def refuse_unsupported(cfg, variant: str, supported=()) -> None:

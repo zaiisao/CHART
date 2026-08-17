@@ -1,5 +1,6 @@
 """The three networks -- encoder, emission transformer, knot decoder -- and the
-von Mises helpers they are written in terms of."""
+von Mises helpers they are written in terms of.
+"""
 from __future__ import annotations
 
 import math
@@ -45,13 +46,13 @@ class Encoder(nn.Module):
                                         dropout=0.0, activation="relu",
                                         batch_first=True, norm_first=False)
         self.blocks = nn.TransformerEncoder(layer, layers)
-        self.out = nn.Linear(d_model, 4)
+        self.out = nn.Linear(d_model, 5)
 
         nn.init.normal_(self.out.weight, std=1e-2)
         nn.init.zeros_(self.out.bias)
         with torch.no_grad():
-            self.out.bias[2] = TEMPO_PRIOR_MU
-            self.out.bias[3] = inverse_softplus(0.0005)
+            self.out.bias[1] = TEMPO_PRIOR_MU
+            self.out.bias[2] = inverse_softplus(0.0005)
 
         self.register_buffer("pe", EmissionTransformer._sinusoidal(max_len, d_model))
         self.register_buffer("log_phi_kappa_bias",
@@ -61,7 +62,8 @@ class Encoder(nn.Module):
         """[B, T, d_model] -> {channel: [B, T]}, one named single-row head each."""
         out = self.out(trunk)
         result = {"phase_log_kappa": out[..., 0], "tempo_log_mu": out[..., 1],
-                  "tempo_sigma_logit": out[..., 2], "phase_mu_offset": out[..., 3]}
+                  "tempo_sigma_logit": out[..., 2], "phase_mu_offset": out[..., 3],
+                  "rotation_weight_logit": out[..., 4]}
         return result
 
     def features(self, h, mask=None):
@@ -93,9 +95,13 @@ class Encoder(nn.Module):
             torch.exp(channels["phase_log_kappa"] + self.log_phi_kappa_bias) + 1e-3)
         tempo_mu = torch.exp(channels["tempo_log_mu"])
         tempo_sigma = nn.functional.softplus(channels["tempo_sigma_logit"])
+        weight = torch.sigmoid(channels["rotation_weight_logit"])
+        if mask is not None:
+            weight = weight * mask
         return {
             "phase": {"kappa": phase_kappa, "mu_offset": phase_mu_offset},
             "tempo": {"mu": tempo_mu, "sigma": tempo_sigma},
+            "rotation": {"weight": weight},
         }
 
     @staticmethod

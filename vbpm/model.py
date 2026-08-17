@@ -6,11 +6,11 @@ import math
 import torch
 from torch import nn
 
-from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, TEMPO_PRIOR_MU,
-                        TEMPO_PRIOR_SIGMA, TEMPO_WALK_SIGMA, TWO_PI, WALK_INTER_SIGMA,
+from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, TWO_PI, WALK_INTER_SIGMA,
                         WALK_INTER_W, WALK_INTRA_SIGMA, WALK_MIX_SIGMA, WALK_MIX_W)
 from .nets import Encoder, EmissionTransformer, ZDecoder, vonmises_log_density
-from .observation import annotation_frames, interval_loglik, event_recon
+from .observation import (annotation_frames, count_loglik, gauss_time_loglik,
+                          interval_loglik, recon_term)
 from .specs import DecoderSpec, EmissionSpec, PlacementSpec, UpdateSpec, WalkSpec
 from .vonmises import kl_vonmises, mean_resultant, sample_vonmises
 
@@ -23,6 +23,7 @@ class VBPM(nn.Module):
                  walk: WalkSpec | None = None,
                  placement: PlacementSpec | None = None,
                  update: UpdateSpec | None = None,
+                 phase_init: str = "anchor",
                  decoder: DecoderSpec | None = None,
                  encoder_pe: bool = False):
         super().__init__()
@@ -36,6 +37,10 @@ class VBPM(nn.Module):
                                kappa_physical=self.walk.kappa_physical, use_pe=encoder_pe)
 
         self.emission_kind = emission.kind
+        self.phase_init = phase_init
+        self.bump_kappa = float(emission.bump_kappa)
+        self.recon_kind = emission.recon
+        self.recon_term = recon_term(emission.recon)
         # ONLY the arm in use gets parameters. Registering both left the unused pair with
         # no gradient, which the audit correctly refused -- and an audit that has to be
         # weakened to accommodate dead parameters stops being an audit.
@@ -71,7 +76,7 @@ class VBPM(nn.Module):
             wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))   # (-pi, pi]
             return self.emission_a + self.emission_b * (1.0 - 2.0 * wrapped.abs() / math.pi)
         if self.emission_kind == "bump":
-            peak = torch.exp(float(self.emission.bump_kappa) * (torch.cos(phi) - 1.0))
+            peak = torch.exp(self.bump_kappa * (torch.cos(phi) - 1.0))
             return self.emission_a + self.emission_b * (2.0 * peak - 1.0)
 
         return self.emission_a + self.emission_b * torch.cos(phi)
@@ -93,8 +98,9 @@ class VBPM(nn.Module):
             return self.tempo_log_prior(dot_eff, w)
 
         log_dotphi = torch.log(dot_eff)
-        z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
-        init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
+        z = (log_dotphi[:, 0] - self.walk.tempo_mu) / self.walk.tempo_sigma
+        init = -0.5 * z ** 2 - math.log(self.walk.tempo_sigma) \
+            - 0.5 * math.log(2.0 * math.pi)
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
         if self.walk.kind == "gated":
@@ -190,6 +196,13 @@ class VBPM(nn.Module):
         return (torch.cat(segments, dim=1), corr_full, knots,
                 torch.cat(shifts, dim=1), torch.stack(deltas, dim=1), kl_delta)
 
+    def kl_jitter(self, mu, kappa, mask, crossing=None):
+        """Per-frame KL( vM(mu,kappa) || vM(mu,kappa_p) ): prices concentration only."""
+        kp = torch.full_like(kappa, self.walk.kappa_physical)
+        if crossing is not None:
+            kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
+        return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
+
     def kl_phase_step(self, delta, kappa_q, mask):
         kp = torch.full_like(kappa_q, self.walk.kappa_physical)
         return (kl_vonmises(delta, kappa_q, torch.zeros_like(delta), kp) * mask).sum(1)
@@ -197,13 +210,14 @@ class VBPM(nn.Module):
     def tempo_log_prior(self, dotphi, w):
         log_dotphi = torch.log(dotphi)
 
-        z = (log_dotphi[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
-        init = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) - 0.5 * math.log(2.0 * math.pi)
+        z = (log_dotphi[:, 0] - self.walk.tempo_mu) / self.walk.tempo_sigma
+        init = -0.5 * z ** 2 - math.log(self.walk.tempo_sigma) \
+            - 0.5 * math.log(2.0 * math.pi)
 
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
 
-        lp = -0.5 * (step / TEMPO_WALK_SIGMA) ** 2 - math.log(TEMPO_WALK_SIGMA) \
+        lp = -0.5 * (step / self.walk.walk_sigma) ** 2 - math.log(self.walk.walk_sigma) \
             - 0.5 * math.log(TWO_PI)
 
         return init + (lp * pair).sum(1)
@@ -227,13 +241,20 @@ class VBPM(nn.Module):
         entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
+        theta = None
+        if self.phase_init == "anchor":
+            mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
+            theta, _ = self.encoder._anchor(mean_ramp.detach(),
+                                            post["rotation"]["weight"])
+
         recon = 0.0
         logp_tempo = 0.0
         kl_phase = 0.0
         phi = None
 
         for _ in range(samples):
-            phi_1 = torch.rand_like(tempo_mu[:, 0]) * TWO_PI
+            phi_1 = (torch.rand_like(tempo_mu[:, 0]) * TWO_PI if theta is None
+                     else theta)
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
             eps = sample_vonmises(phase_kappa[:, 1:])
 
@@ -245,7 +266,7 @@ class VBPM(nn.Module):
             kl_phase = kl_phase + self.kl_phase_step(
                 phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w)
 
-            recon = recon + event_recon(self.emission_logits(phi, mask), y, w, pos_weight)
+            recon = recon + self.recon_term(self.emission_logits(phi, mask), y, w, pos_weight)
 
         recon = recon / samples
         logp_tempo = logp_tempo / samples
@@ -302,13 +323,14 @@ class IntervalVAE(VBPM):
 
     def __init__(self, input_dim: int, b_ratio: float = 0.1, kappa_place: float = 100.0,
                  phase_half: int = 0, interval_kind: str = "laplace",
-                 disp_weight: float = 0.0, **kw):
+                 disp_weight: float = 0.0, count_weight: float = 0.0, **kw):
         super().__init__(input_dim, **kw)
         self.b_ratio = float(b_ratio)
         self.kappa_place = float(kappa_place)
         self.phase_half = int(phase_half)
         self.interval_kind = interval_kind
         self.disp_weight = float(disp_weight)
+        self.count_weight = float(count_weight)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
         assert raw is not None, "the interval emission needs the batch's downbeat_times"
@@ -357,10 +379,18 @@ class IntervalVAE(VBPM):
             kl_phase = kl_phase + self.kl_jitter(
                 phi[:, 1:], phase_kappa[:, 1:], pair_w,
                 crossing if self.walk.kappa_gate else None) + kl_delta
-            em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place,
-                                 self.b_ratio, self.phase_half,
-                                 self.interval_kind, phi_place, self.disp_weight,
-                                 self.placement.coord)
+            if self.interval_kind == "gauss_time":
+                ll = gauss_time_loglik(phi, ann_f, ann_valid, self.b_ratio,
+                                       fps=float(raw["fps"][0]),
+                                       phase_half=self.phase_half)
+                if self.count_weight > 0.0:
+                    ll = ll + self.count_weight * count_loglik(phi, ann_valid, mask)
+                em = {"loglik": ll, "resultant": torch.zeros_like(ll)}
+            else:
+                em = interval_loglik(phi, ann_f, ann_valid, self.kappa_place,
+                                     self.b_ratio, self.phase_half,
+                                     self.interval_kind, phi_place, self.disp_weight,
+                                     self.placement.coord, self.count_weight, mask)
             recon = recon + em["loglik"]
             resultant = resultant + em["resultant"]
             corr_abs = corr_abs + corr_full.abs().mean()
@@ -382,7 +412,8 @@ class IntervalVAE(VBPM):
 def downbeat_times(mu, mask=None):
     """Fractional frame times where the phase crosses multiples of 2 pi, per item.
     Linear interpolation between frames removes downbeat_frames' up-to-one-frame
-    early bias."""
+    early bias.
+    """
     r = torch.remainder(mu, 2.0 * math.pi)
     drop = torch.diff(r, dim=-1) < -math.pi
     if mask is not None:

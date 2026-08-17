@@ -11,7 +11,6 @@ from ..constants import (TEMPO_HI, TEMPO_LO, TEMPO_PRIOR_EPS, TEMPO_PRIOR_MU,
                          TEMPO_PRIOR_SIGMA)
 from ..model import VBPM
 from ..nets import Encoder, bounded_kappa
-from ..observation import event_recon
 from ..vonmises import sample_vonmises
 
 
@@ -20,14 +19,17 @@ DEFAULTS = {"rate_grid_size": 1024, "rate_score_scale": 20.0}
 
 class RateGridEncoder(Encoder):
     def __init__(self, input_dim: int, d_model: int = 128,
-                 grid_size: int = 1024, score_scale: float = 20.0, **kw):
+                 grid_size: int = 1024, score_scale: float = 20.0,
+                 tempo_mu: float = TEMPO_PRIOR_MU,
+                 tempo_sigma: float = TEMPO_PRIOR_SIGMA, **kw):
         super().__init__(input_dim, d_model, **kw)
+        self.tempo_mu, self.tempo_sigma = float(tempo_mu), float(tempo_sigma)
         self.register_buffer("log_rates", torch.linspace(TEMPO_LO, TEMPO_HI, grid_size))
         self.score_scale_raw = nn.Parameter(torch.tensor(math.log(score_scale)))
 
     def rate_log_prior(self):
-        z = (self.log_rates - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
-        log_gauss = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) \
+        z = (self.log_rates - self.tempo_mu) / self.tempo_sigma
+        log_gauss = -0.5 * z ** 2 - math.log(self.tempo_sigma) \
             - 0.5 * math.log(2.0 * math.pi)
         log_unif = -math.log(TEMPO_HI - TEMPO_LO)
         floor = torch.full_like(log_gauss, math.log(TEMPO_PRIOR_EPS) + log_unif)
@@ -68,6 +70,8 @@ class RateGridVAE(VBPM):
         super().__init__(input_dim, d_model=d_model, **kw)
         self.encoder = RateGridEncoder(input_dim, d_model, grid_size=grid_size,
                                        score_scale=score_scale,
+                                       tempo_mu=self.walk.tempo_mu,
+                                       tempo_sigma=self.walk.tempo_sigma,
                                        kappa_physical=self.walk.kappa_physical)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
@@ -87,7 +91,7 @@ class RateGridVAE(VBPM):
         for _ in range(samples):
             phi = mu + sample_vonmises(kappa)[:, None, :]
             logits = self.emission_logits(phi.reshape(b * r, t))
-            recon_r = event_recon(logits, y_r, w_r, pos_weight).reshape(b, r)
+            recon_r = self.recon_term(logits, y_r, w_r, pos_weight).reshape(b, r)
             recon = recon + (q * recon_r).sum(1)
         recon = recon / samples
 

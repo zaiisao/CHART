@@ -31,11 +31,13 @@ class ExcerptDataset(torch.utils.data.Dataset):
     """Per-epoch random windows of cached frontend input + framewise VAE targets."""
 
     def __init__(self, songs, frontend, excerpt_seconds: float = 45.0,
-                 deterministic: bool = False, cache_root: str = INPUT_CACHE_DIR):
+                 deterministic: bool = False, cache_root: str = INPUT_CACHE_DIR,
+                 target_tol_frames: int = 0):
         self.frontend_name = frontend.name
         self.fps = float(frontend.FPS)
         self.excerpt_frames = int(round(excerpt_seconds * self.fps))
         self.deterministic = deterministic
+        self.target_tol_frames = int(target_tol_frames)
         self.cache_root = cache_root
 
         self.items, self.rejects = [], []
@@ -74,7 +76,8 @@ class ExcerptDataset(torch.utils.data.Dataset):
         # Fresh random window per call (Beat This's policy); val/test take the middle
         # so every scored window is identical across runs.
         start = longer // 2 if self.deterministic else int(np.random.randint(0, longer + 1))
-        targets = self._targets(downbeat_times, start, frames, target_tol_frames=3)
+        targets = self._targets(downbeat_times, start, frames,
+                                target_tol_frames=self.target_tol_frames)
 
         window = np.array(array[start:start + frames], dtype=np.float32)
         labeled = len(targets["downbeat_times"]) > 0
@@ -93,7 +96,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
                 "dataset": song.dataset, "song_id": song.song_id}
 
     def _targets(self, downbeat_times, start: int, frames: int,
-                 target_tol_frames: int = 1):
+                 target_tol_frames: int = 0):
         """build_crop's target math on a [start, start+frames) window, or None."""
         lo_t, hi_t = start / self.fps, (start + frames) / self.fps
 

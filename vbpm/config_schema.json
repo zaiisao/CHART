@@ -32,6 +32,42 @@
     "minimum": 0.001,
     "description": "bump emission only: concentration of the peak. The bump is exp(kappa (cos phi - 1)), so its half-width is about sqrt(2/kappa) radians of bar phase."
   },
+  "emission_recon": {
+    "type": "string",
+    "default": "event",
+    "enum": [
+      "event",
+      "frame"
+    ],
+    "description": "the reconstruction term. frame is the tutorial's own eq (57), sum_k log Bernoulli(y_k; pi_k); event is the run-level 'at least one frame in the widened run fired' likelihood, which saturates once any frame of the +-3-frame target has mass and loses restoring gradient past ~300 ms of displacement."
+  },
+  "target_tol_frames": {
+    "type": "integer",
+    "default": 0,
+    "minimum": 0,
+    "description": "half-width in frames of the framewise target y. 0 is the tutorial's own b (eq 55): one frame per downbeat, at which point the two emission_recon terms are identical by construction. Widening it smears one downbeat over 2n+1 frames, which no longer is b."
+  },
+  "chain_bins": {
+    "type": "integer",
+    "default": 96,
+    "minimum": 8,
+    "description": "schain only: phase cells. Bin width is one bar / chain_bins, so it bounds placement resolution; 96 is about 21 ms on a 2 s bar."
+  },
+  "chain_rate_grid": {
+    "type": "integer",
+    "default": 24,
+    "minimum": 1,
+    "description": "schain only: enumerated rate candidates, log-spaced. Each runs its own chain, so cost is linear in this."
+  },
+  "chain_posterior": {
+    "type": "string",
+    "default": "chain",
+    "enum": [
+      "chain",
+      "frames"
+    ],
+    "description": "schain only: chain is the structured posterior; frames is the factorised control that switches the coupling off while keeping everything else identical."
+  },
   "epochs": {
     "type": "integer",
     "default": 12,
@@ -107,6 +143,32 @@
     "default": 383.0,
     "minimum": 0.0,
     "description": "concentration of the physical prior's increment law: the DRIFT TAX. Real tempo wobble is heavy-tailed, so lowering this cuts the KL price of expressing drift."
+  },
+  "tempo_prior_mu": {
+    "type": "number",
+    "default": -2.6827,
+    "description": "mean of p(log dotphi_1), the ONLY term pricing tempo LEVEL (the walk prices changes, not the level, so a random walk is indifferent to which octave it sits in). Refit on train folds: 1665 songs, mean log bar rate -2.6827 = 1.84 s per bar. The shipped -2.5028 (1.53 s) put the octave flip point at 2.17 s, so songs slower than that were pushed to 2x."
+  },
+  "tempo_prior_sigma": {
+    "type": "number",
+    "default": 0.3903,
+    "minimum": 0.01,
+    "description": "sd of p(log dotphi_1), refit on the same train folds (shipped 0.5005). Narrower makes the level prior more opinionated, which moves the octave flip point out to 2.60 s."
+  },
+  "walk_sigma": {
+    "type": "number",
+    "default": 0.00212,
+    "minimum": 1e-06,
+    "description": "per-frame sd of the tempo walk: how much log tempo may change between adjacent frames. One number for every song, which the corpus says it cannot be -- per-song variability spans 20x (hjdb 0.005 to asap 0.077 per bar) and is a stable property of a performance (split-half r 0.81). Held-out fit favours a per-song scale by +2.2 nats/step over any global value, and heavy tails by only +0.9."
+  },
+  "phase_init": {
+    "type": "string",
+    "default": "anchor",
+    "enum": [
+      "anchor",
+      "uniform"
+    ],
+    "description": "where phi_1 comes from. anchor takes the closed-form circular mean of the encoder's evidence channel folded under the mean ramp -- the read-out that carried 82% of the anchor jump. uniform draws it at random, which leaves nothing anchoring placement and was committed at 89cb1f7 as an explicit null."
   },
   "frontend": {
     "type": "string",

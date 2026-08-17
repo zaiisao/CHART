@@ -32,8 +32,16 @@ def _seed_worker(_worker_id: int) -> None:
     np.random.seed(torch.initial_seed() % 2**32)
 
 
-def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
-    """One seed: run the controls, then fit the objective the hooks define."""
+def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
+          val_set=None, select: str = "none"):
+    """One seed: run the controls, then fit the objective the hooks define.
+
+    ``select`` names a CHECKPOINT RULE, declared before the run rather than chosen
+    afterwards: the returned model is the epoch that scored best on the VALIDATION
+    split by that metric, never the last epoch and never anything read off the test
+    set. "none" keeps the final epoch, which is only defensible when the trajectory
+    is known to be monotone.
+    """
     torch.manual_seed(seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
 
@@ -51,6 +59,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
 
     probe_raw = collate_excerpts([dataset[i] for i in
                                   range(min(cfg.batch_size, len(dataset)))])
+    best = {"score": -float("inf"), "epoch": -1, "state": None}
 
     for epoch in range(cfg.epochs):
         model.train()
@@ -113,6 +122,17 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
                                                 mask[keep], records)
             steps += 1
 
+        if select != "none" and val_set is not None and len(val_set):
+            scored = evaluate(model, val_set, frontend, device, cfg.batch_size, seed=seed)
+            per = next(iter(scored.values()))
+            score = per.get(select, (float("nan"), 0))[0]
+            if score > best["score"]:
+                best = {"score": score, "epoch": epoch,
+                        "state": {k: v.detach().clone() for k, v in
+                                  model.state_dict().items()}}
+            print(f"            select[{select}] {score:.4f}  "
+                  f"best {best['score']:.4f} @ epoch {best['epoch']}", flush=True)
+
         b_note = ("" if model.emission_net is not None
                   else f"  b {float(model.emission_b):5.2f}")
         adv, kap, perr, cov = health / steps
@@ -135,6 +155,10 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int):
               f"{note}",
               flush=True)
 
+    if best["state"] is not None:
+        model.load_state_dict(best["state"])
+        print(f"  checkpoint rule [{select}] selected epoch {best['epoch']} "
+              f"(score {best['score']:.4f})", flush=True)
     return model
 
 
@@ -149,6 +173,10 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0,
                    help="one run = one seed; sweep seeds with an outer script")
     p.add_argument("--limit-per-fold", type=int, default=None)
+    p.add_argument("--select", default="none",
+                   help="checkpoint rule: a validation metric name from the scoring "
+                        "table (e.g. rule-g, rule-g CMLt). Declared before the run; "
+                        "none keeps the last epoch.")
     p.add_argument("--workers", type=int, default=4,
                    help="DataLoader workers (window draws + mmap reads)")
     p.add_argument("--save-dir", default=None,
@@ -174,16 +202,24 @@ def main() -> None:
         output="features"
     )
 
-    train_set = ExcerptDataset(train_songs, frontend, cfg.excerpt_seconds)
-    val_set = ExcerptDataset(val_songs, frontend, cfg.excerpt_seconds, deterministic=True)
-    test_set = ExcerptDataset(test_songs, frontend, cfg.excerpt_seconds, deterministic=True)
+    tol = getattr(cfg, "target_tol_frames", 0)
+    train_set = ExcerptDataset(train_songs, frontend, cfg.excerpt_seconds,
+                               target_tol_frames=tol)
+    val_set = ExcerptDataset(val_songs, frontend, cfg.excerpt_seconds, deterministic=True,
+                             target_tol_frames=tol)
+    test_set = ExcerptDataset(test_songs, frontend, cfg.excerpt_seconds, deterministic=True,
+                             target_tol_frames=tol)
 
     print(f"songs: train {len(train_songs)} / val {len(val_songs)} / "
           f"gtzan-test {len(test_songs)}")
     print(f"train: {len(train_set)} songs, fresh {cfg.excerpt_seconds:.0f}s window "
           f"per epoch, rejects {len(train_set.rejects)}")
 
-    model = train(train_set, frontend, device, cfg, hooks, args.seed, args.workers)
+    model = train(train_set, frontend, device, cfg, hooks, args.seed, args.workers,
+                  val_set=val_set, select=args.select)
+
+    if getattr(model, "_selected", None) is None and args.select != "none":
+        pass
 
     if args.save_dir:
         save_dir = pathlib.Path(args.save_dir)
