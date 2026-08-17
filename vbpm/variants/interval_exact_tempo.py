@@ -90,7 +90,7 @@ def expand_blocks(block, length: int, width: int, interp: bool):
 
 
 def walk_log_prob(step, mix):
-    """log of the two-Laplace step law, elementwise."""
+    """Log of the two-Laplace step law, elementwise."""
     weight, coast, change = mix
     size = step.abs()
     stay = math.log(weight) - size / coast - math.log(2.0 * coast)
@@ -144,7 +144,7 @@ class BlockEncoder(Encoder):
             "resultant": resultant, "log_rate": block}
 
     def _block_log_prior(self, block, weight):
-        """log p(rate_1) + sum_k log p(rate_k | rate_{k-1}) over BLOCKS. [B]."""
+        """Log p(rate_1) + sum_k log p(rate_k | rate_{k-1}) over BLOCKS. [B]."""
         z = (block[:, 0] - TEMPO_PRIOR_MU) / TEMPO_PRIOR_SIGMA
         log_gauss = -0.5 * z ** 2 - math.log(TEMPO_PRIOR_SIGMA) \
             - 0.5 * math.log(2.0 * math.pi)

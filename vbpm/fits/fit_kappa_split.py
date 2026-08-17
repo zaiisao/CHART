@@ -29,12 +29,14 @@ for ds, songs in load_catalog(TRAIN).items():
 intra = np.array(intra); intra = intra[np.abs(intra) < 1.0]
 inter = np.array(inter); inter = inter[np.abs(inter) < 4.0]
 
+
 def report(name, x):
     s_all = float(np.std(x))
     core = x[np.abs(x) < 3 * np.median(np.abs(x)) / 0.6745]
     s_core = float(np.std(core))
     print(f"{name}: n={len(x):,}  sd {s_all:.4f} rad (core {s_core:.4f})"
           f"  -> kappa ~ {1/s_core**2:,.0f}  ({s_core/TWO_PI*2454:.0f} ms on a 2.45s bar)")
+
 
 print("phase innovation, measured from 11 training corpora:")
 report("INTRA-bar (beat micro-timing)   ", intra)

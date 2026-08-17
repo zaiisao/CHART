@@ -29,4 +29,4 @@ frames_per_beat = 61.0
 sf = sb / np.sqrt(frames_per_beat)
 print(f"WITHIN-bar beat-to-beat tempo log-ratio: n={len(x):,}  core sd {sb:.4f}")
 print(f"  -> per-frame intra-bar walk sd ~ {sf:.5f}  (shipped mixture core was 0.00029)")
-print(f"  inter (bar-to-bar, already measured): mix (0.646,0.354) x (0.0247,0.198) per crossing")
+print("  inter (bar-to-bar, already measured): mix (0.646,0.354) x (0.0247,0.198) per crossing")

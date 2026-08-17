@@ -157,7 +157,7 @@ def placement_expectation(phi_place, ann_f, ann_valid, kappa_place, a_theta,
 def rotation_loglik(phi, phi_place, a_theta, ann_f, ann_valid, kappa_place: float,
                     b_ratio: float, phase_half: int = 0, kind: str = "laplace",
                     select=None):
-    """log p(annotation times | phi) [B] with the placement factor's theta integrated.
+    """Log p(annotation times | phi) [B] with the placement factor's theta integrated.
 
     The interval ratios and the Jacobian are computed on the sampled path exactly as in
     ``interval``; they are invariant to theta, which is why the rotation can be given

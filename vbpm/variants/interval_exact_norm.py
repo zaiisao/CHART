@@ -62,7 +62,7 @@ RATIO_EPS = 1e-6
 
 
 def additive_floor(x, eps: float):
-    """x + eps, the guard that keeps voting.
+    """X + eps, the guard that keeps voting.
 
     `clamp(min=eps)` is flat below eps, so d/dx is EXACTLY 0 there and a value that has
     fallen through the floor can never climb back by gradient. `x + eps` is bounded above
@@ -82,7 +82,7 @@ def path_dotphi(phi, half: int = 25):
 
 
 def log_partition(lo, hi, n_ann, kappa_place, b_ratio: float, grid: int = 2048):
-    """log Z(lo, hi, N) [B]: the truncated interval likelihood's exact normaliser.
+    """Log Z(lo, hi, N) [B]: the truncated interval likelihood's exact normaliser.
 
     The transfer-operator recursion described in the module docstring, on `grid` points
     spanning [0, hi - lo] per window. Everything runs in float64 and every step is
@@ -141,7 +141,7 @@ def log_partition(lo, hi, n_ann, kappa_place, b_ratio: float, grid: int = 2048):
 def interval_loglik(phi, ann_f, ann_valid, kappa_place: float, b_ratio: float,
                     phase_half: int = 0, kind: str = "laplace", phi_place=None,
                     last_frame=None, norm_grid: int = 2048, normalise: bool = True):
-    """log p(annotation times | phi, window) [B], normalised over the window.
+    """Log p(annotation times | phi, window) [B], normalised over the window.
 
     The unnormalised part is `interval.interval_loglik` with additive guards; the new
     term is -log Z, which prices the fact that N annotations were seen INSIDE the excerpt.

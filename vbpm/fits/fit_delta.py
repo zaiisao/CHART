@@ -4,6 +4,7 @@ from vbpm.data.dataset import load_catalog
 TRAIN = ["asap", "ballroom", "beatles", "candombe", "groove_midi", "guitarset",
          "hainsworth", "hjdb", "rwc", "simac", "tapcorrect"]
 
+
 def em_mix2(x, iters=300):
     w = np.array([0.6, 0.4]); s = np.array([np.std(x)*0.3, np.std(x)*2.0]) + 1e-12
     for _ in range(iters):
@@ -13,6 +14,7 @@ def em_mix2(x, iters=300):
         w = r.mean(0)
         s = np.sqrt((r*x[:,None]**2).sum(0)/r.sum(0).clip(min=1e-9)) + 1e-12
     return w, s
+
 
 xs = []
 for ds, songs in load_catalog(TRAIN).items():

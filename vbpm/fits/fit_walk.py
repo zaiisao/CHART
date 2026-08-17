@@ -62,9 +62,9 @@ for scale, name in ((1, "per-frame"), (25, "per-knot (stride 25)")):
     print(f"  P(|d| > 5*gauss-walk-sd at this scale) = {p5:.4f}"
           f"   (Gaussian predicts {2 * (1 - 0.9999997):.7f})")
     if scale == 1:
-        print(f"  current shipped:  sigma_w 0.00104 (single), hand mix (0.95, 0.05) x (0.00104, 0.0104)")
+        print("  current shipped:  sigma_w 0.00104 (single), hand mix (0.95, 0.05) x (0.00104, 0.0104)")
 
-print(f"\n=== initial-rate prior from bar periods")
+print("\n=== initial-rate prior from bar periods")
 _, lr = collect(1)
 print(f"  measured: mu {float(np.mean(lr)):.4f}  sigma {float(np.std(lr)):.4f}")
 import math

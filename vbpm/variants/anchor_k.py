@@ -9,8 +9,7 @@ from torch import nn
 from ..constants import TWO_PI
 from ..model import VBPM
 from ..vonmises import sample_vonmises
-from .base import (common_kwargs, objective, on_epoch,
-                   refuse_unsupported)
+from .base import (common_kwargs, refuse_unsupported)
 
 DEFAULTS = {"anchor_slots": 64}
 
