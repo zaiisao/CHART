@@ -174,7 +174,22 @@ def recon_term(kind: str):
         return frame_recon
     if kind == "event":
         return event_recon
+    if kind == "class":
+        return class_recon
     raise ValueError(f"unknown recon term {kind!r}")
+
+
+def class_recon(logits, cls, w, pos_weight: float = 1.0):
+    """sum_t log Cat(b_t ; softmax(logits_t)) over live frames [B].
+
+    The tutorial's p(b_k | z_k) over (non-beat, beat, downbeat). A beat that is not a
+    downbeat used to be scored as silence, which is the one label the bar phase is most
+    informative about after the downbeat itself. pos_weight is ignored: a weighted
+    categorical is not a likelihood, and the ELBO wants the likelihood.
+    """
+    lp = torch.log_softmax(logits, dim=-1)
+    picked = lp.gather(-1, cls.unsqueeze(-1)).squeeze(-1)
+    return (picked * w).sum(-1)
 
 
 def event_recon(logits, y, w, pos_weight: float = 1.0):

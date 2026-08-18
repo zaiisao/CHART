@@ -17,6 +17,7 @@ class EmissionSpec:
     positional: bool = False
     bump_kappa: float = 20.0
     recon: str = "event"
+    harmonics: int = 6
 
     @classmethod
     def coerce(cls, value):

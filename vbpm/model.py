@@ -12,7 +12,7 @@ from .nets import Encoder, EmissionTransformer, ZDecoder, vonmises_log_density
 from .observation import (annotation_frames, count_loglik, gauss_time_loglik,
                           interval_loglik, recon_term)
 from .specs import DecoderSpec, EmissionSpec, PlacementSpec, UpdateSpec, WalkSpec
-from .vonmises import kl_vonmises, mean_resultant, sample_vonmises
+from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises
 
 
 class VBPM(nn.Module):
@@ -55,6 +55,25 @@ class VBPM(nn.Module):
 
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
+        self.harmonics = int(emission.harmonics)
+        if self.recon_kind == "class":
+            self.wants_raw = True
+            coef = torch.zeros(3, 2 * self.harmonics)
+            coef[2, 0] = 1.0
+            self.emission_coef = nn.Parameter(coef)
+            self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
+
+        self.kappa_p_head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.kappa_p_head.weight)
+        nn.init.constant_(self.kappa_p_head.bias, math.log(self.walk.kappa_physical))
+        self.walk_sigma_head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.walk_sigma_head.weight)
+        nn.init.constant_(self.walk_sigma_head.bias, math.log(self.walk.walk_sigma))
+        self.phi0_prior_head = nn.Linear(d_model, 3)
+        nn.init.zeros_(self.phi0_prior_head.weight)
+        with torch.no_grad():
+            self.phi0_prior_head.bias.copy_(torch.tensor([1.0, 0.0, -6.0]))
+
         self.zdec = ZDecoder(d_model, d=self.decoder.dim)
         if self.update.delta_on:
             self.delta_head = nn.Linear(
@@ -66,6 +85,49 @@ class VBPM(nn.Module):
     def emission_b(self):
         """Amplitude, positive by softplus, never below the scheduled floor."""
         return self.emission_b_floor + nn.functional.softplus(self.emission_b_raw)
+
+    def class_logits(self, phi):
+        """[..., 3] logits over (non-beat, beat, downbeat) at the sampled phase.
+
+        Each class is a truncated Fourier series on the circle, so the reader stays dumb
+        and the beat class has to find its own subdivisions instead of being told the
+        meter. Only the downbeat class is seeded, with the first cosine, because phi = 0
+        is the downbeat by the coordinate's definition rather than by an assumption
+        about how many beats fill a bar.
+        """
+        j = torch.arange(1, self.harmonics + 1, device=phi.device, dtype=phi.dtype)
+        angle = phi[..., None] * j
+        basis = torch.cat([angle.cos(), angle.sin()], dim=-1)
+        return self.emission_bias + basis @ self.emission_coef.T
+
+    def prior_params(self, memory, mask):
+        """(kappa_p [B,T], walk sigma [B,T], mu0 [B], kappa0 [B]) from the audio alone.
+
+        Options T-b and I-2 of the phase note: the transition's concentration and the
+        velocity walk's width are read per frame, and the initial phase gets a direction
+        and a concentration of its own. Every head is zeroed at init with the corpus
+        constant in its bias, and the initial concentration starts at softplus(-6), so an
+        untrained model is the constant-prior model under a flat initial phase -- which
+        is Option I-1 -- and every departure from it is learned. The direction's cosine
+        starts at one rather than zero: atan2(0, 0) has the value the flat prior wants
+        and a gradient that is 0/0, which is nan on the first backward.
+        """
+        kappa_p = self.kappa_p_head(memory)[..., 0].clamp(-4.0, 12.0).exp()
+        walk_sigma = self.walk_sigma_head(memory)[..., 0].clamp(-9.0, 0.0).exp()
+        if mask is not None:
+            live = mask > 0
+            kappa_p = torch.where(live, kappa_p, torch.full_like(kappa_p,
+                                                                self.walk.kappa_physical))
+            walk_sigma = torch.where(live, walk_sigma,
+                                     torch.full_like(walk_sigma, self.walk.walk_sigma))
+        w = mask[..., None] if mask is not None else torch.ones_like(memory[..., :1])
+        pooled = (memory * w).sum(1) / w.sum(1).clamp(min=1.0)
+        a1, a2, u = self.phi0_prior_head(pooled).unbind(-1)
+        return kappa_p, walk_sigma, torch.atan2(a2, a1), nn.functional.softplus(u)
+
+    def initial_phase_log_prior(self, phi_1, mu0, kappa0):
+        """Log p_eta(phi_1 | x): the term the Dirac q used to drop on the floor."""
+        return kappa0 * torch.cos(phi_1 - mu0) - math.log(TWO_PI) - log_i0(kappa0)
 
     def emission_logits(self, phi, mask=None):
         """Downbeat logits from the LATENT alone (Point 1) -- never from h."""
@@ -101,8 +163,9 @@ class VBPM(nn.Module):
         z = (log_dotphi[:, 0] - self.walk.tempo_mu) / self.walk.tempo_sigma
         init = -0.5 * z ** 2 - math.log(self.walk.tempo_sigma) \
             - 0.5 * math.log(2.0 * math.pi)
-        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
+        step = torch.where(pair, step, torch.zeros_like(step))
         if self.walk.kind == "gated":
             intra = -0.5 * (step / WALK_INTRA_SIGMA) ** 2 - math.log(WALK_INTRA_SIGMA) \
                 - 0.5 * math.log(2.0 * math.pi)
@@ -203,22 +266,26 @@ class VBPM(nn.Module):
             kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
         return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
 
-    def kl_phase_step(self, delta, kappa_q, mask):
-        kp = torch.full_like(kappa_q, self.walk.kappa_physical)
+    def kl_phase_step(self, delta, kappa_q, mask, kappa_p=None):
+        kp = (torch.full_like(kappa_q, self.walk.kappa_physical) if kappa_p is None
+              else kappa_p)
         return (kl_vonmises(delta, kappa_q, torch.zeros_like(delta), kp) * mask).sum(1)
 
-    def tempo_log_prior(self, dotphi, w):
+    def tempo_log_prior(self, dotphi, w, walk_sigma=None):
         log_dotphi = torch.log(dotphi)
+        sigma = (torch.full_like(log_dotphi, self.walk.walk_sigma)
+                 if walk_sigma is None else walk_sigma)
 
         z = (log_dotphi[:, 0] - self.walk.tempo_mu) / self.walk.tempo_sigma
         init = -0.5 * z ** 2 - math.log(self.walk.tempo_sigma) \
             - 0.5 * math.log(2.0 * math.pi)
 
-        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
+        step = torch.where(pair, step, torch.zeros_like(step))
 
-        lp = -0.5 * (step / self.walk.walk_sigma) ** 2 - math.log(self.walk.walk_sigma) \
-            - 0.5 * math.log(TWO_PI)
+        s = sigma[:, 1:]
+        lp = -0.5 * (step / s) ** 2 - torch.log(s) - 0.5 * math.log(TWO_PI)
 
         return init + (lp * pair).sum(1)
 
@@ -228,7 +295,7 @@ class VBPM(nn.Module):
 
         return (vonmises_log_density(phi[:, 1:], predicted, kappa_p) * pair).sum(1)
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
         post, memory = self.encoder(h, mask)
         phase, tempo = post["phase"], post["tempo"]
 
@@ -241,6 +308,12 @@ class VBPM(nn.Module):
         entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
+        kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(memory, mask)
+        target = None
+        if self.recon_kind == "class":
+            assert raw is not None, "the three-way emission needs the batch's class targets"
+            target = raw["cls"].to(h.device)
+
         theta = None
         if self.phase_init == "anchor":
             mean_ramp = torch.cumsum(tempo_mu, dim=1) - tempo_mu[:, :1]
@@ -249,6 +322,7 @@ class VBPM(nn.Module):
 
         recon = 0.0
         logp_tempo = 0.0
+        logp_phi1 = 0.0
         kl_phase = 0.0
         phi = None
 
@@ -262,23 +336,31 @@ class VBPM(nn.Module):
                 (dotphi[:, :-1] + phase_mu_offset[:, 1:] + eps) * pair_w, dim=1)
             phi = phi_1[:, None] + torch.cat([torch.zeros_like(steps[:, :1]), steps], dim=1)
 
-            logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w)
+            logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w, walk_sigma)
+            logp_phi1 = logp_phi1 + self.initial_phase_log_prior(phi_1, mu0, kappa0)
             kl_phase = kl_phase + self.kl_phase_step(
-                phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w)
+                phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w, kappa_p[:, 1:])
 
-            recon = recon + self.recon_term(self.emission_logits(phi, mask), y, w, pos_weight)
+            if target is None:
+                recon = recon + self.recon_term(self.emission_logits(phi, mask),
+                                                y, w, pos_weight)
+            else:
+                recon = recon + self.recon_term(self.class_logits(phi), target, w,
+                                                pos_weight)
 
         recon = recon / samples
         logp_tempo = logp_tempo / samples
+        logp_phi1 = logp_phi1 / samples
 
         kl_phase = kl_phase / samples
         kl_tempo = h_tempo + logp_tempo
-        kl = kl_phase - kl_tempo
+        kl = kl_phase - kl_tempo - logp_phi1
 
         return {"elbo": recon - kl, "recon": recon, "kl": kl,
                 "phi": phi, "kappa": phase_kappa,
                 "tempo_prior": logp_tempo, "tempo_entropy": h_tempo,
-                "kl_phase": kl_phase}
+                "kl_phase": kl_phase, "phi1_prior": logp_phi1,
+                "kappa_p": kappa_p.mean(1), "kappa0": kappa0}
 
     @property
     def deployed_net(self):

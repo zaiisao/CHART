@@ -1,4 +1,5 @@
 emission: cosine
+emission_recon: class
 pos_weight: 1.0
 epochs: 60
 beta_warmup: 0

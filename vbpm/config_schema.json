@@ -37,9 +37,10 @@
     "default": "event",
     "enum": [
       "event",
-      "frame"
+      "frame",
+      "class"
     ],
-    "description": "the reconstruction term. frame is the tutorial's own eq (57), sum_k log Bernoulli(y_k; pi_k); event is the run-level 'at least one frame in the widened run fired' likelihood, which saturates once any frame of the +-3-frame target has mass and loses restoring gradient past ~300 ms of displacement."
+    "description": "the reconstruction term. frame is the tutorial's own eq (57), sum_k log Bernoulli(y_k; pi_k); event is the run-level 'at least one frame in the widened run fired' likelihood, which saturates once any frame of the +-3-frame target has mass and loses restoring gradient past ~300 ms of displacement. class is the tutorial's three-way p(b | phi) over (non-beat, beat, downbeat), which needs the loader's cls target."
   },
   "target_tol_frames": {
     "type": "integer",
