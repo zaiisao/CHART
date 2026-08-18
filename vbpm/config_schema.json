@@ -203,5 +203,10 @@
     "default": 0.0,
     "minimum": 0.0,
     "description": "psi only: weight on an explicit log-dotphi distillation, mean-squared (log dotphi_p - log dotphi_q). 0 reproduces the old behaviour. Motivation: in a transfer experiment against a known teacher on input where the tempo is trivially readable, the ANCHOR converged every run (0.000-0.015 of a bar) while the RATE was a lottery (0.08%-60.9%, median ~25%) at every kappa from 0.1 to 383 -- through a phase density a tempo error only arrives as accumulated phase."
+  },
+  "phi0_posterior": {
+    "type": "boolean",
+    "default": false,
+    "description": "q(phi_0) comes from its own boundary head instead of the anchor's point mass. The note's eq (7): the first latent is a von Mises like every other frame, so the initial KL is finite and closed form and the chain has something for later evidence to reweight."
   }
 }

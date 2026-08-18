@@ -6,13 +6,15 @@ import math
 import torch
 from torch import nn
 
-from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, TWO_PI, WALK_INTER_SIGMA,
+from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, KAPPA_Q_MIN,
+                        TWO_PI, WALK_INTER_SIGMA,
                         WALK_INTER_W, WALK_INTRA_SIGMA, WALK_MIX_SIGMA, WALK_MIX_W)
 from .nets import Encoder, EmissionTransformer, ZDecoder, vonmises_log_density
 from .observation import (annotation_frames, count_loglik, gauss_time_loglik,
                           interval_loglik, recon_term)
 from .specs import DecoderSpec, EmissionSpec, PlacementSpec, UpdateSpec, WalkSpec
-from .vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises
+from .vonmises import (kl_vonmises, log_i0, mean_resultant,
+                        sample_vonmises_icdf)
 
 
 class VBPM(nn.Module):
@@ -25,7 +27,7 @@ class VBPM(nn.Module):
                  update: UpdateSpec | None = None,
                  phase_init: str = "anchor",
                  decoder: DecoderSpec | None = None,
-                 encoder_pe: bool = False):
+                 encoder_pe: bool = False, phi0_posterior: bool = False):
         super().__init__()
         emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
@@ -73,6 +75,13 @@ class VBPM(nn.Module):
         nn.init.zeros_(self.phi0_prior_head.weight)
         with torch.no_grad():
             self.phi0_prior_head.bias.copy_(torch.tensor([1.0, 0.0, -6.0]))
+
+        self.phi0_posterior = bool(phi0_posterior)
+        if self.phi0_posterior:
+            self.phi0_q_head = nn.Linear(d_model, 3)
+            nn.init.zeros_(self.phi0_q_head.weight)
+            with torch.no_grad():
+                self.phi0_q_head.bias.copy_(torch.tensor([1.0, 0.0, 0.0]))
 
         self.zdec = ZDecoder(d_model, d=self.decoder.dim)
         if self.update.delta_on:
@@ -124,6 +133,17 @@ class VBPM(nn.Module):
         pooled = (memory * w).sum(1) / w.sum(1).clamp(min=1.0)
         a1, a2, u = self.phi0_prior_head(pooled).unbind(-1)
         return kappa_p, walk_sigma, torch.atan2(a2, a1), nn.functional.softplus(u)
+
+    def initial_phase_posterior(self, memory):
+        """(mu, kappa) of q(phi_0 | c_0): the note's boundary head, eq (7).
+
+        A distinct head from the recursion's, because at k = 0 there is no previous
+        phase to condition on. Its concentration floors at KAPPA_Q_MIN rather than
+        starting sharp: a point mass has nothing for later evidence to reweight, which
+        is what left a wrong initial rotation wrong for the whole window.
+        """
+        a1, a2, u = self.phi0_q_head(memory[:, 0]).unbind(-1)
+        return torch.atan2(a2, a1), nn.functional.softplus(u) + KAPPA_Q_MIN
 
     def initial_phase_log_prior(self, phi_1, mu0, kappa0):
         """Log p_eta(phi_1 | x): the term the Dirac q used to drop on the floor."""
@@ -327,17 +347,24 @@ class VBPM(nn.Module):
         phi = None
 
         for _ in range(samples):
-            phi_1 = (torch.rand_like(tempo_mu[:, 0]) * TWO_PI if theta is None
-                     else theta)
+            if self.phi0_posterior:
+                mu0_q, kappa0_q = self.initial_phase_posterior(memory)
+                phi_1 = mu0_q + sample_vonmises_icdf(kappa0_q)
+            else:
+                phi_1 = (torch.rand_like(tempo_mu[:, 0]) * TWO_PI if theta is None
+                         else theta)
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
-            eps = sample_vonmises(phase_kappa[:, 1:])
+            eps = sample_vonmises_icdf(phase_kappa[:, 1:])
 
             steps = torch.cumsum(
                 (dotphi[:, :-1] + phase_mu_offset[:, 1:] + eps) * pair_w, dim=1)
             phi = phi_1[:, None] + torch.cat([torch.zeros_like(steps[:, :1]), steps], dim=1)
 
             logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w, walk_sigma)
-            logp_phi1 = logp_phi1 + self.initial_phase_log_prior(phi_1, mu0, kappa0)
+            if self.phi0_posterior:
+                logp_phi1 = logp_phi1 - kl_vonmises(mu0_q, kappa0_q, mu0, kappa0)
+            else:
+                logp_phi1 = logp_phi1 + self.initial_phase_log_prior(phi_1, mu0, kappa0)
             kl_phase = kl_phase + self.kl_phase_step(
                 phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w, kappa_p[:, 1:])
 
@@ -448,7 +475,7 @@ class IntervalVAE(VBPM):
 
         for _ in range(samples):
             dotphi = tempo_mu * torch.exp(tempo_sigma * torch.randn_like(tempo_sigma))
-            jitter = sample_vonmises(phase_kappa[:, 1:])
+            jitter = sample_vonmises_icdf(phase_kappa[:, 1:])
             phi, corr_full, knots, lift, deltas, kl_delta = self._scan(
                 dotphi, jitter, memory, theta, pair_w, crossing=crossing,
                 kappa_q=phase_kappa)

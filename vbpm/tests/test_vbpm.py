@@ -398,7 +398,7 @@ def test_forward_elbo_identity_and_bernoulli_recon(monkeypatch):
     """elbo == recon - kl exactly, and recon must equal the masked BCE computed by hand."""
     _seed()
     import vbpm.model as model_mod
-    monkeypatch.setattr(model_mod, "sample_vonmises", lambda k: torch.zeros_like(k))
+    monkeypatch.setattr(model_mod, "sample_vonmises_icdf", lambda k: torch.zeros_like(k))
     model = VBPM(input_dim=4, d_model=8, emission="cosine")
 
     B, T = 2, 60

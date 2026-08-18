@@ -152,7 +152,7 @@ def test_forward_deterministic_when_sampler_pinned(monkeypatch):
     (phi = mu exactly). Asserted: bit-identical recon. Why: sampling is the only
     randomness in the forward pass; frozen at the mean it must be deterministic.
     """
-    monkeypatch.setattr(model_mod, "sample_vonmises",
+    monkeypatch.setattr(model_mod, "sample_vonmises_icdf",
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch()
@@ -179,7 +179,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
         calls["n"] += 1
         return torch.zeros_like(kappa)
 
-    monkeypatch.setattr(model_mod, "sample_vonmises", fake_sampler)
+    monkeypatch.setattr(model_mod, "sample_vonmises_icdf", fake_sampler)
     monkeypatch.setattr(model_mod.torch, "randn_like", torch.zeros_like)
     model = _tf_model()
     model.eval()
@@ -197,7 +197,7 @@ def test_forward_samples_k_averages_k_evaluations(monkeypatch):
 
 def test_forward_transformer_pos_weight_one_is_plain_bce(monkeypatch):
     """Sampler pinned to the mean: recon equals the masked BCE at phi = mu, by hand."""
-    monkeypatch.setattr(model_mod, "sample_vonmises",
+    monkeypatch.setattr(model_mod, "sample_vonmises_icdf",
                         lambda k: torch.zeros_like(k))
     model = _tf_model()
     h, delta, mask, y = _batch(B=1, T=8)
