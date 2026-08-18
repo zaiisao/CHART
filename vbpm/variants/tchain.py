@@ -75,14 +75,14 @@ class _SweepLoop(nn.Module):
     def forward(self, psi, mask, ph_f, te, a0):
         """Run both passes; returns the pair marginal in logs and the log evidence."""
         b, t, k = psi.shape
-        m = te.shape[-1]
+        m = te.shape[0]
         a = a0
         alphas = []
         logZ = torch.zeros(b, device=psi.device, dtype=psi.dtype)
         for i in range(t):
             if i > 0:
-                moved = torch.einsum("bkm,bmkj->bjm", a, ph_f)
-                a = torch.einsum("bkm,bmn->bkn", moved, te)
+                moved = torch.einsum("bkm,mkj->bjm", a, ph_f)
+                a = torch.einsum("bkm,mn->bkn", moved, te)
             live = mask[:, i][:, None, None]
             a = a * (live * psi[:, i][:, :, None] + (1.0 - live))
             norm = a.reshape(b, -1).sum(-1).clamp(min=1e-30)
@@ -96,8 +96,8 @@ class _SweepLoop(nn.Module):
         for i in range(t - 1, 0, -1):
             live = mask[:, i][:, None, None]
             msg = beta * (live * psi[:, i][:, :, None] + (1.0 - live))
-            mixed = torch.einsum("bkm,bnm->bkn", msg, te)
-            beta = torch.einsum("bjm,bmkj->bkm", mixed, ph_f)
+            mixed = torch.einsum("bkm,nm->bkn", msg, te)
+            beta = torch.einsum("bjm,mkj->bkm", mixed, ph_f)
             beta = beta / beta.reshape(b, -1).sum(-1).clamp(min=1e-30)[:, None, None]
             betas[i - 1] = beta
 
@@ -109,7 +109,7 @@ class _SweepLoop(nn.Module):
 class TempoChainVBPM(nn.Module):
     """The tutorial's generative model with (phase, tempo) as the chain state."""
 
-    wants_raw = True
+    wants_raw = False
     emission_net = None
 
     def __init__(self, input_dim: int, d_model: int = 128, bins: int = 96,
@@ -117,7 +117,7 @@ class TempoChainVBPM(nn.Module):
                  sigma: float = 0.01, band: int = 3,
                  phase_kernel: str = "vonmises", tempo_kernel: str = "gauss",
                  tempo_revert: bool = True, phase_nu: float = 4.0,
-                 use_graphs: bool = False, harmonics: int = 6,
+                 use_graphs: bool = False,
                  emission: EmissionSpec | str = "triangle",
                  walk: WalkSpec | None = None, encoder_pe: bool = False):
         super().__init__()
@@ -141,29 +141,10 @@ class TempoChainVBPM(nn.Module):
         self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
-        self.harmonics = int(harmonics)
-        coef = torch.zeros(3, 2 * self.harmonics)
-        coef[2, 0] = 1.0
-        self.emission_coef = nn.Parameter(coef)
-        self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
-
-        self.kappa_head = nn.Linear(d_model, 1)
-        nn.init.zeros_(self.kappa_head.weight)
-        nn.init.constant_(self.kappa_head.bias, math.log(self.walk.kappa_physical))
-        self.sigma_head = nn.Linear(d_model, 1)
-        nn.init.zeros_(self.sigma_head.weight)
-        nn.init.constant_(self.sigma_head.bias, math.log(self.sigma))
-        self.phi0_head = nn.Linear(d_model, self.bins)
-        nn.init.zeros_(self.phi0_head.weight)
-        nn.init.zeros_(self.phi0_head.bias)
-
         rates = torch.exp(torch.linspace(math.log(tempo_lo), math.log(tempo_hi),
                                          self.tempo_bins))
         self.register_buffer("rates", rates)
         self.register_buffer("theta", torch.arange(self.bins) * (TWO_PI / self.bins))
-        j = torch.arange(1, self.harmonics + 1, dtype=torch.float32)
-        angle = self.theta[:, None] * j[None, :]
-        self.register_buffer("fourier", torch.cat([angle.cos(), angle.sin()], dim=1))
         self._sweep_loop = _SweepLoop()
         self.use_graphs = bool(use_graphs)
         self._graphs: dict = {}
@@ -181,32 +162,29 @@ class TempoChainVBPM(nn.Module):
         """The inference network read at test time; controls assert ITS target-blindness."""
         return self.encoder
 
-    def class_logits_at_bins(self):
-        """[K, 3]: the tutorial's emission p(b | phi) over (non-beat, beat, downbeat).
-
-        Each class is a truncated Fourier series on the circle, so the reader stays dumb
-        -- three biases and 2H coefficients per class -- and the beat class has to find
-        its own subdivisions rather than be told the meter. Only the downbeat class is
-        seeded, with the first cosine, because phi = 0 IS the downbeat landmark by the
-        coordinate's definition and not by an assumption about how many beats fill a bar.
-        """
-        return self.emission_bias[None, :] + self.fourier @ self.emission_coef.T
-
     def emission_logits_at_bins(self):
-        """log-odds of a downbeat at each phase bin, read off the three-way emission."""
-        lp = torch.log_softmax(self.class_logits_at_bins(), dim=-1)
-        return lp[:, 2] - torch.logsumexp(lp[:, :2], dim=-1)
+        """log-odds of a downbeat at each phase bin: p(b | phi), tabulated."""
+        phi = self.theta
+        if self.emission_kind == "triangle":
+            wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
+            shape = 1.0 - 2.0 * wrapped.abs() / math.pi
+        elif self.emission_kind == "bump":
+            shape = 2.0 * torch.exp(self.bump_kappa * (torch.cos(phi) - 1.0)) - 1.0
+        else:
+            shape = torch.cos(phi)
+        return self.emission_a + self.emission_b * shape
 
     def emission_logits(self, phi, mask=None):
-        """The same log-odds read at arbitrary phases rather than at bin centres."""
-        j = torch.arange(1, self.harmonics + 1, device=phi.device, dtype=phi.dtype)
-        angle = phi[..., None] * j
-        basis = torch.cat([angle.cos(), angle.sin()], dim=-1)
-        logits = self.emission_bias + basis @ self.emission_coef.T
-        lp = torch.log_softmax(logits, dim=-1)
-        return lp[..., 2] - torch.logsumexp(lp[..., :2], dim=-1)
+        """The same emission read at arbitrary phases rather than at bin centres."""
+        if self.emission_kind == "triangle":
+            wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
+            return self.emission_a + self.emission_b * (1.0 - 2.0 * wrapped.abs() / math.pi)
+        if self.emission_kind == "bump":
+            peak = torch.exp(self.bump_kappa * (torch.cos(phi) - 1.0))
+            return self.emission_a + self.emission_b * (2.0 * peak - 1.0)
+        return self.emission_a + self.emission_b * torch.cos(phi)
 
-    def log_phase_shift(self, kappa):
+    def log_phase_shift(self):
         """[M, K, K]: for tempo m, the phase advances by rate_m and jitters.
 
         The jitter's shape is a modelling choice, and the corpus prefers a heavy tail:
@@ -215,8 +193,8 @@ class TempoChainVBPM(nn.Module):
         section 9.9 recommends; cauchy is the corpus's answer.
         """
         diff = self.theta[None, :] - self.theta[:, None]
-        d = (diff[None] - self.rates[:, None, None])[None]
-        kappa = kappa[:, None, None, None]
+        d = diff[None] - self.rates[:, None, None]
+        kappa = torch.as_tensor(self.walk.kappa_physical, device=d.device, dtype=d.dtype)
         if self.phase_kernel == "student":
             # wrapped Student-t: nu dials the tail between Cauchy (nu=1) and the
             # Gaussian/von Mises limit (nu -> inf). The scale is matched to vM(kappa),
@@ -235,7 +213,7 @@ class TempoChainVBPM(nn.Module):
             lt = torch.log1p(-rho ** 2) - torch.log(denom) - math.log(TWO_PI)
         else:
             lt = kappa * torch.cos(d) - math.log(TWO_PI) - log_i0(kappa)
-        return lt - torch.logsumexp(lt, dim=3, keepdim=True)
+        return lt - torch.logsumexp(lt, dim=2, keepdim=True)
 
     def log_tempo_kernel(self, sigma=None):
         """[M, M]: how log tempo may move in one frame, banded to +-band.
@@ -253,16 +231,16 @@ class TempoChainVBPM(nn.Module):
         independently: tempo increments are negatively autocorrelated (-0.26 at lag 1,
         -0.11 at lags 2-3), which a driftless walk cannot produce.
         """
+        sigma = self.sigma if sigma is None else sigma
         lr = torch.log(self.rates)
-        sigma = sigma[:, None, None]
         if self.tempo_revert:
             s_prior = float(self.walk.tempo_sigma)
-            a = (1.0 - (sigma / s_prior) ** 2).clamp(min=0.0).sqrt()
+            a = math.sqrt(max(1.0 - min((sigma / s_prior) ** 2, 1.0), 0.0))
             mu = float(self.walk.tempo_mu)
-            target = mu + a * (lr[None, :, None] - mu)
-            d = lr[None, None, :] - target
+            target = mu + a * (lr - mu)
+            d = lr[None, :] - target[:, None]
         else:
-            d = (lr[None, :] - lr[:, None])[None]
+            d = lr[None, :] - lr[:, None]
         if self.tempo_kernel == "cauchy":
             lt = -torch.log1p((d / sigma) ** 2)
         elif self.tempo_kernel == "laplace":
@@ -272,8 +250,8 @@ class TempoChainVBPM(nn.Module):
         if self.band > 0:
             idx = torch.arange(self.tempo_bins, device=lr.device)
             far = (idx[None, :] - idx[:, None]).abs() > self.band
-            lt = lt.masked_fill(far[None], -1e9)
-        return lt - torch.logsumexp(lt, dim=2, keepdim=True)
+            lt = lt.masked_fill(far, -1e9)
+        return lt - torch.logsumexp(lt, dim=1, keepdim=True)
 
     def _sweep(self, b, t, k):
         """The sweep callable, CUDA-graphed per (batch, length) shape when enabled."""
@@ -282,31 +260,15 @@ class TempoChainVBPM(nn.Module):
         key = (b, t, k, self.tempo_bins)
         if key not in self._graphs:
             m, dev = self.tempo_bins, self.rates.device
-            kap = torch.full((b,), float(self.walk.kappa_physical), device=dev)
-            sig = torch.full((b,), float(self.sigma), device=dev)
             sa = (torch.rand(b, t, k, device=dev).add(0.1).requires_grad_(),
                   torch.ones(b, t, device=dev),
-                  self.log_phase_shift(kap).exp().detach(),
-                  self.log_tempo_kernel(sig).exp().detach(),
+                  self.log_phase_shift().exp().detach(),
+                  self.log_tempo_kernel().exp().detach(),
                   torch.rand(b, k, m, device=dev).add(0.1).requires_grad_())
             self._graphs[key] = _graph(self._sweep_loop, sa, [sa[0], sa[4]])
         return self._graphs[key]
 
-    def prior_params(self, feats, mask):
-        """(kappa, sigma, log phi0) for each song: the prior's own heads on the audio.
-
-        Option T-b of the phase question and its tempo counterpart. The heads are zeroed
-        at init and their biases carry the corpus constants, so an untrained model is
-        exactly the constant-prior model and every departure from it is learned. The
-        initial phase head starts uniform, which is Option I-1.
-        """
-        w = mask[..., None]
-        pooled = (feats * w).sum(1) / w.sum(1).clamp(min=1.0)
-        kappa = self.kappa_head(pooled)[:, 0].clamp(-8.0, 12.0).exp()
-        sigma = self.sigma_head(pooled)[:, 0].clamp(-8.0, 2.0).exp()
-        return kappa, sigma, torch.log_softmax(self.phi0_head(pooled), dim=-1)
-
-    def forward_backward(self, log_psi, mask, kappa, sigma, log_phi0):
+    def forward_backward(self, log_psi, mask, sigma=None):
         """Scaled linear-domain recursion, equivalent to log-space message passing.
 
         alpha is renormalised every frame anyway, so carrying it in the linear domain
@@ -316,21 +278,18 @@ class TempoChainVBPM(nn.Module):
         the wall clock goes -- and why the sweep is worth CUDA-graphing.
         """
         b, t, k = log_psi.shape
-        ph_f = self.log_phase_shift(kappa).exp()               # [B, M, k, k'] per tempo
-        te = self.log_tempo_kernel(sigma).exp()                # [B, M, M]
-        a0 = (log_phi0.exp()[:, :, None]
-              * self.tempo_log_prior.exp()[None, None, :]).contiguous()
+        m = self.tempo_bins
+        ph_f = self.log_phase_shift().exp()                    # [M, k, k'] per tempo
+        te = self.log_tempo_kernel(sigma).exp()                # [M, M]
+        a0 = (self.tempo_log_prior.exp()[None, None, :] / k).expand(b, k, m).contiguous()
         return self._sweep(b, t, k)(log_psi.exp(), mask, ph_f, te, a0)
 
     def marginals(self, h, mask, sigma=None):
-        """(log psi, log gamma, log Z, kappa): the encoder pass and one sweep."""
+        """(log psi, log gamma, log Z) for one batch: the encoder pass and one sweep."""
         feats = self.encoder.features(h, mask)
         log_psi = torch.log_softmax(self.psi_head(feats), dim=-1)
-        kappa, sigma_x, log_phi0 = self.prior_params(feats, mask)
-        if sigma is not None:
-            sigma_x = torch.full_like(sigma_x, float(sigma))
-        log_g, logZ = self.forward_backward(log_psi, mask, kappa, sigma_x, log_phi0)
-        return log_psi, log_g, logZ, kappa
+        log_g, logZ = self.forward_backward(log_psi, mask, sigma)
+        return log_psi, log_g, logZ
 
     def mean_path(self, gamma_phase):
         """Circular mean of the phase marginals, unwrapped: the discrete analogue of mu(x)."""
@@ -342,24 +301,23 @@ class TempoChainVBPM(nn.Module):
         path = torch.cat([wrapped[:, :1], wrapped[:, :1] + torch.cumsum(step, -1)], -1)
         return path, torch.sqrt(re ** 2 + im ** 2 + 1e-12)
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
         """One ELBO evaluation: exact expectations under the chain, no sampling."""
-        assert raw is not None, "the three-way emission needs the batch's class targets"
-        cls = raw["cls"].to(h.device)
-        log_psi, log_g, logZ, kappa = self.marginals(h, mask)
+        log_psi, log_g, logZ = self.marginals(h, mask)
         gamma = log_g.exp()
         gamma_phase = gamma.sum(-1)
         gamma_tempo = gamma.sum(-2)
 
-        lp = torch.log_softmax(self.class_logits_at_bins(), dim=-1)
-        ll = lp[:, cls].permute(1, 2, 0)
+        e = self.emission_logits_at_bins()
+        ll = (pos_weight * y[:, :, None] * -nn.functional.softplus(-e)
+              + (1.0 - y)[:, :, None] * -nn.functional.softplus(e))
         recon = ((gamma_phase * ll).sum(-1) * mask).sum(-1)
         kl = ((gamma_phase * log_psi).sum(-1) * mask).sum(-1) - logZ
 
         phi, resultant = self.mean_path(gamma_phase)
         rate = (gamma_tempo * self.rates).sum(-1)
         return {"elbo": recon - kl, "recon": recon, "kl": kl, "phi": phi,
-                "kappa": resultant * kappa[:, None],
+                "kappa": resultant * float(self.walk.kappa_physical),
                 "resultant": resultant.mean(1), "rate": rate,
                 "rate_sd": (gamma_tempo * (self.rates[None, None] - rate[..., None]) ** 2
                             ).sum(-1).sqrt().mean(1)}
@@ -370,7 +328,7 @@ class TempoChainVBPM(nn.Module):
         assert not self.training, "deployment path must run in eval mode"
         if mask is None:
             mask = torch.ones(h.shape[:2], device=h.device, dtype=h.dtype)
-        _psi, log_g, _z, _k = self.marginals(h, mask)
+        _psi, log_g, _z = self.marginals(h, mask)
         return self.mean_path(log_g.exp().sum(-1))[0]
 
     @torch.no_grad()
@@ -378,7 +336,7 @@ class TempoChainVBPM(nn.Module):
         """Alternative D: the emission read through the posterior's phase marginal."""
         if mask is None:
             mask = torch.ones(h.shape[:2], device=h.device, dtype=h.dtype)
-        _psi, log_g, _z, _k = self.marginals(h, mask)
+        _psi, log_g, _z = self.marginals(h, mask)
         return (log_g.exp().sum(-1) * torch.sigmoid(self.emission_logits_at_bins())).sum(-1)
 
 

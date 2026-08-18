@@ -70,7 +70,7 @@ def main():
                 continue
             h = frontend.forward_features(raw["input"]).clone()
             mask = raw["mask"].to(device)
-            _psi, log_g, _z, _k = model.marginals(h, mask)
+            _psi, log_g, _z = model.marginals(h, mask)
             g = log_g.exp().sum(-2)
             agg += (g * mask[..., None])[keep].sum((0, 1))
     agg = (agg / agg.sum()).cpu().numpy()
