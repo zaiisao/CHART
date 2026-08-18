@@ -333,8 +333,9 @@ class VBPM(nn.Module):
         post, memory = (self.encoder(h, mask, target) if self.posterior_reads_b
                         else self.encoder(h, mask))
         prior_offset = prior_kappa = None
+        prior_memory = memory
         if self.prior_net is not None:
-            post_p, _mem_p = self.prior_net(h, mask)
+            post_p, prior_memory = self.prior_net(h, mask)
             prior_offset = post_p["phase"]["mu_offset"]
             prior_kappa = post_p["phase"]["kappa"]
         phase, tempo = post["phase"], post["tempo"]
@@ -348,7 +349,7 @@ class VBPM(nn.Module):
         entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
-        kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(memory, mask)
+        kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(prior_memory, mask)
         if prior_kappa is not None:
             kappa_p = prior_kappa
 
