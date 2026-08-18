@@ -171,20 +171,22 @@ class VBPM(nn.Module):
     def conditional_tempo_log_prior(self, dotphi, mu_p, sigma_p, w):
         """Log p_eta(log v | x): the walk of tempo_log_prior, started where x says.
 
-        Only the INITIAL tempo is centred on the prior network -- the steps keep the
-        corpus walk. Pricing every frame against a predicted tempo instead divides an
-        order-one log mismatch by the head's width and charges 1e9 nats at
-        initialisation, which is a different generative model and a worse conditioned
-        one.
+        The two widths are different quantities and the head supplies the one that
+        varies. The LEVEL is priced against the corpus spread, because an audio-predicted
+        tempo and a sampled one differ by order one in logs and dividing that by a
+        step-scale width charges 1e9 nats at initialisation. The STEP is priced against
+        the network's own width, which is the per-song walk scale the corpus says spans
+        twentyfold and which no single constant can serve.
         """
         log_dotphi = torch.log(dotphi)
-        z = (log_dotphi[:, 0] - torch.log(mu_p[:, 0].clamp(min=1e-8))) / sigma_p[:, 0]
-        init = -0.5 * z ** 2 - torch.log(sigma_p[:, 0]) - 0.5 * math.log(TWO_PI)
+        spread = float(self.walk.tempo_sigma)
+        z = (log_dotphi[:, 0] - torch.log(mu_p[:, 0].clamp(min=1e-8))) / spread
+        init = -0.5 * z ** 2 - math.log(spread) - 0.5 * math.log(TWO_PI)
         pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
         step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
         step = torch.where(pair, step, torch.zeros_like(step))
-        lp = (-0.5 * (step / self.walk.walk_sigma) ** 2
-              - math.log(self.walk.walk_sigma) - 0.5 * math.log(TWO_PI))
+        s = sigma_p[:, 1:]
+        lp = -0.5 * (step / s) ** 2 - torch.log(s) - 0.5 * math.log(TWO_PI)
         return init + (lp * pair).sum(1)
 
     def initial_phase_posterior(self, memory):
