@@ -80,8 +80,12 @@ class VBPM(nn.Module):
         # right to refuse them; without one they are the whole conditional prior.
         self.kappa0_p_raw = None
         self.kappa_p_head = self.walk_sigma_head = self.phi0_prior_head = None
+        self.phi0_offset_head = None
         if posterior_reads_b:
             self.kappa0_p_raw = nn.Parameter(torch.tensor(-6.0))
+            self.phi0_offset_head = nn.Linear(d_model, 1)
+            nn.init.zeros_(self.phi0_offset_head.weight)
+            nn.init.zeros_(self.phi0_offset_head.bias)
         else:
             self.kappa_p_head = nn.Linear(d_model, 1)
             nn.init.zeros_(self.kappa_p_head.weight)
@@ -152,7 +156,7 @@ class VBPM(nn.Module):
         a1, a2, u = self.phi0_prior_head(pooled).unbind(-1)
         return kappa_p, walk_sigma, torch.atan2(a2, a1), nn.functional.softplus(u)
 
-    def conditional_prior(self, post_p, memory_p):
+    def conditional_prior(self, post_p, memory_p, mask_p):
         """p_eta(z | x) read entirely off the prior network, every channel consumed.
 
         The velocity prior centres on the prior net's own tempo instead of the corpus
@@ -164,6 +168,9 @@ class VBPM(nn.Module):
         tempo = post_p["tempo"]
         ramp = torch.cumsum(tempo["mu"], dim=1) - tempo["mu"][:, :1]
         mu0, _ = self.prior_net._anchor(ramp, post_p["rotation"]["weight"])
+        w = mask_p[..., None]
+        pooled = (memory_p * w).sum(1) / w.sum(1).clamp(min=1.0)
+        mu0 = mu0 + math.pi * torch.tanh(self.phi0_offset_head(pooled)[:, 0])
         kappa0 = nn.functional.softplus(self.kappa0_p_raw).expand_as(mu0)
         return (post_p["phase"]["kappa"], post_p["phase"]["mu_offset"], mu0, kappa0,
                 tempo["mu"], tempo["sigma"])
@@ -398,7 +405,7 @@ class VBPM(nn.Module):
         else:
             post_p, _mem_p = self.prior_net(h, mask)
             (kappa_p, prior_offset, mu0, kappa0,
-             tempo_mu_p, tempo_sigma_p) = self.conditional_prior(post_p, _mem_p)
+             tempo_mu_p, tempo_sigma_p) = self.conditional_prior(post_p, _mem_p, mask)
             walk_sigma = None
 
         theta = None
@@ -477,6 +484,10 @@ class VBPM(nn.Module):
         dotphi = post["tempo"]["mu"]
         mean_ramp = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
         theta, _ = net._anchor(mean_ramp, post["rotation"]["weight"])
+        if self.phi0_offset_head is not None:
+            w = (torch.ones_like(memory[..., :1]) if mask is None else mask[..., None])
+            pooled = (memory * w).sum(1) / w.sum(1).clamp(min=1.0)
+            theta = theta + math.pi * torch.tanh(self.phi0_offset_head(pooled)[:, 0])
         T = dotphi.shape[1]
         stride = self.decoder.knot_stride
         phase = theta
