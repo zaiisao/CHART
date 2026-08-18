@@ -59,7 +59,7 @@ class VBPM(nn.Module):
         if emission.kind == "transformer":
             self.emission_net = EmissionTransformer(emission.dim, emission.layers,
                                                     use_positional=emission.positional)
-        else:
+        elif emission.recon != "class":
             # JA: emission_a and emission_b_raw are scalars used by the Bernoulli distribution
             self.emission_a = nn.Parameter(torch.tensor(-3.0))
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
@@ -67,23 +67,32 @@ class VBPM(nn.Module):
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
         self.harmonics = int(emission.harmonics)
-        if self.recon_kind == "class":
+        if self.recon_kind == "class" or posterior_reads_b:
             self.wants_raw = True
+        if self.recon_kind == "class":
             coef = torch.zeros(3, 2 * self.harmonics)
             coef[2, 0] = 1.0
             self.emission_coef = nn.Parameter(coef)
             self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
 
-        self.kappa_p_head = nn.Linear(d_model, 1)
-        nn.init.zeros_(self.kappa_p_head.weight)
-        nn.init.constant_(self.kappa_p_head.bias, math.log(self.walk.kappa_physical))
-        self.walk_sigma_head = nn.Linear(d_model, 1)
-        nn.init.zeros_(self.walk_sigma_head.weight)
-        nn.init.constant_(self.walk_sigma_head.bias, math.log(self.walk.walk_sigma))
-        self.phi0_prior_head = nn.Linear(d_model, 3)
-        nn.init.zeros_(self.phi0_prior_head.weight)
-        with torch.no_grad():
-            self.phi0_prior_head.bias.copy_(torch.tensor([1.0, 0.0, -6.0]))
+        # p_eta's parameters come from ONE place. With a prior network every factor is
+        # its output, so the scalar heads below would be dead weight and the audit is
+        # right to refuse them; without one they are the whole conditional prior.
+        self.kappa0_p_raw = None
+        self.kappa_p_head = self.walk_sigma_head = self.phi0_prior_head = None
+        if posterior_reads_b:
+            self.kappa0_p_raw = nn.Parameter(torch.tensor(-6.0))
+        else:
+            self.kappa_p_head = nn.Linear(d_model, 1)
+            nn.init.zeros_(self.kappa_p_head.weight)
+            nn.init.constant_(self.kappa_p_head.bias, math.log(self.walk.kappa_physical))
+            self.walk_sigma_head = nn.Linear(d_model, 1)
+            nn.init.zeros_(self.walk_sigma_head.weight)
+            nn.init.constant_(self.walk_sigma_head.bias, math.log(self.walk.walk_sigma))
+            self.phi0_prior_head = nn.Linear(d_model, 3)
+            nn.init.zeros_(self.phi0_prior_head.weight)
+            with torch.no_grad():
+                self.phi0_prior_head.bias.copy_(torch.tensor([1.0, 0.0, -6.0]))
 
         self.phi0_posterior = bool(phi0_posterior)
         if self.phi0_posterior:
@@ -143,6 +152,41 @@ class VBPM(nn.Module):
         a1, a2, u = self.phi0_prior_head(pooled).unbind(-1)
         return kappa_p, walk_sigma, torch.atan2(a2, a1), nn.functional.softplus(u)
 
+    def conditional_prior(self, post_p, memory_p):
+        """p_eta(z | x) read entirely off the prior network, every channel consumed.
+
+        The velocity prior centres on the prior net's own tempo instead of the corpus
+        constant, and the initial phase is that ramp's anchor, so the three channels the
+        deployed read-out uses -- tempo mean, tempo width, rotation weight -- are the
+        three the objective trains. They had no consumer before, which left inference
+        decoding a random ramp through a random anchor while the ELBO improved.
+        """
+        tempo = post_p["tempo"]
+        ramp = torch.cumsum(tempo["mu"], dim=1) - tempo["mu"][:, :1]
+        mu0, _ = self.prior_net._anchor(ramp, post_p["rotation"]["weight"])
+        kappa0 = nn.functional.softplus(self.kappa0_p_raw).expand_as(mu0)
+        return (post_p["phase"]["kappa"], post_p["phase"]["mu_offset"], mu0, kappa0,
+                tempo["mu"], tempo["sigma"])
+
+    def conditional_tempo_log_prior(self, dotphi, mu_p, sigma_p, w):
+        """Log p_eta(log v | x): the walk of tempo_log_prior, started where x says.
+
+        Only the INITIAL tempo is centred on the prior network -- the steps keep the
+        corpus walk. Pricing every frame against a predicted tempo instead divides an
+        order-one log mismatch by the head's width and charges 1e9 nats at
+        initialisation, which is a different generative model and a worse conditioned
+        one.
+        """
+        log_dotphi = torch.log(dotphi)
+        z = (log_dotphi[:, 0] - torch.log(mu_p[:, 0].clamp(min=1e-8))) / sigma_p[:, 0]
+        init = -0.5 * z ** 2 - torch.log(sigma_p[:, 0]) - 0.5 * math.log(TWO_PI)
+        pair = (w[:, 1:] > 0) & (w[:, :-1] > 0)
+        step = log_dotphi[:, 1:] - log_dotphi[:, :-1]
+        step = torch.where(pair, step, torch.zeros_like(step))
+        lp = (-0.5 * (step / self.walk.walk_sigma) ** 2
+              - math.log(self.walk.walk_sigma) - 0.5 * math.log(TWO_PI))
+        return init + (lp * pair).sum(1)
+
     def initial_phase_posterior(self, memory):
         """(mu, kappa) of q(phi_0 | c_0): the note's boundary head, eq (7).
 
@@ -159,7 +203,10 @@ class VBPM(nn.Module):
         return kappa0 * torch.cos(phi_1 - mu0) - math.log(TWO_PI) - log_i0(kappa0)
 
     def emission_logits(self, phi, mask=None):
-        """Downbeat logits from the LATENT alone (Point 1) -- never from h."""
+        """Downbeat log-odds at phi. Under the three-way emission it is read off it."""
+        if self.recon_kind == "class":
+            lp = torch.log_softmax(self.class_logits(phi), dim=-1)
+            return lp[..., 2] - torch.logsumexp(lp[..., :2], dim=-1)
         if self.emission_net is not None:
             return self.emission_net(phi, mask)
 
@@ -332,12 +379,7 @@ class VBPM(nn.Module):
             target = raw["cls"].to(h.device)
         post, memory = (self.encoder(h, mask, target) if self.posterior_reads_b
                         else self.encoder(h, mask))
-        prior_offset = prior_kappa = None
-        prior_memory = memory
-        if self.prior_net is not None:
-            post_p, prior_memory = self.prior_net(h, mask)
-            prior_offset = post_p["phase"]["mu_offset"]
-            prior_kappa = post_p["phase"]["kappa"]
+        prior_offset = tempo_mu_p = tempo_sigma_p = None
         phase, tempo = post["phase"], post["tempo"]
 
         phase_mu_offset, phase_kappa = phase["mu_offset"], phase["kappa"]
@@ -349,9 +391,13 @@ class VBPM(nn.Module):
         entropy_norm = 0.5 * math.log(2.0 * math.pi * math.e)
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
-        kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(prior_memory, mask)
-        if prior_kappa is not None:
-            kappa_p = prior_kappa
+        if self.prior_net is None:
+            kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(memory, mask)
+        else:
+            post_p, _mem_p = self.prior_net(h, mask)
+            (kappa_p, prior_offset, mu0, kappa0,
+             tempo_mu_p, tempo_sigma_p) = self.conditional_prior(post_p, _mem_p)
+            walk_sigma = None
 
         theta = None
         if self.phase_init == "anchor":
@@ -379,7 +425,10 @@ class VBPM(nn.Module):
                 (dotphi[:, :-1] + phase_mu_offset[:, 1:] + eps) * pair_w, dim=1)
             phi = phi_1[:, None] + torch.cat([torch.zeros_like(steps[:, :1]), steps], dim=1)
 
-            logp_tempo = logp_tempo + self.tempo_log_prior(dotphi, w, walk_sigma)
+            logp_tempo = logp_tempo + (
+                self.tempo_log_prior(dotphi, w, walk_sigma) if tempo_mu_p is None
+                else self.conditional_tempo_log_prior(dotphi, tempo_mu_p,
+                                                      tempo_sigma_p, w))
             if self.phi0_posterior:
                 logp_phi1 = logp_phi1 - kl_vonmises(mu0_q, kappa0_q, mu0, kappa0)
             else:
@@ -388,12 +437,12 @@ class VBPM(nn.Module):
                 phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w, kappa_p[:, 1:],
                 None if prior_offset is None else prior_offset[:, 1:])
 
-            if target is None:
-                recon = recon + self.recon_term(self.emission_logits(phi, mask),
-                                                y, w, pos_weight)
-            else:
+            if self.recon_kind == "class":
                 recon = recon + self.recon_term(self.class_logits(phi), target, w,
                                                 pos_weight)
+            else:
+                recon = recon + self.recon_term(self.emission_logits(phi, mask),
+                                                y, w, pos_weight)
 
         recon = recon / samples
         logp_tempo = logp_tempo / samples

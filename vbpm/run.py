@@ -133,7 +133,8 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
             print(f"            select[{select}] {score:.4f}  "
                   f"best {best['score']:.4f} @ epoch {best['epoch']}", flush=True)
 
-        b_note = ("" if model.emission_net is not None
+        b_note = ("" if getattr(model, "emission_net", None) is not None
+                  or not hasattr(model, "emission_b_raw")
                   else f"  b {float(model.emission_b):5.2f}")
         adv, kap, perr, cov = health / steps
         # The variant's own diagnostic, on the frozen probe. no_grad covers the frontend
