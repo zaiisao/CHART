@@ -43,7 +43,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
         self.items, self.rejects = [], []
         computed = 0
         for song in songs:
-            _beat_times, downbeat_times = song.beats()
+            beat_times, downbeat_times = song.beats()
             downbeat_times = np.asarray(downbeat_times, dtype=np.float64)
             if len(downbeat_times) < MIN_DOWNBEATS:
                 self.rejects.append(song.song_id)
@@ -61,13 +61,14 @@ class ExcerptDataset(torch.utils.data.Dataset):
                 computed += 1
                 if computed % 200 == 0:
                     print(f"  input cache: {computed} computed...", flush=True)
-            self.items.append((song, downbeat_times, path))
+            self.items.append((song, downbeat_times,
+                               np.asarray(beat_times, dtype=np.float64), path))
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, index: int) -> dict:
-        song, downbeat_times, path = self.items[index]
+        song, downbeat_times, beat_times, path = self.items[index]
         array = np.load(path, mmap_mode="r")
         total = len(array)
         frames = min(self.excerpt_frames, total)
@@ -76,7 +77,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
         # Fresh random window per call (Beat This's policy); val/test take the middle
         # so every scored window is identical across runs.
         start = longer // 2 if self.deterministic else int(np.random.randint(0, longer + 1))
-        targets = self._targets(downbeat_times, start, frames,
+        targets = self._targets(downbeat_times, beat_times, start, frames,
                                 target_tol_frames=self.target_tol_frames)
 
         window = np.array(array[start:start + frames], dtype=np.float32)
@@ -87,17 +88,24 @@ class ExcerptDataset(torch.utils.data.Dataset):
         if pad > 0:                                            # song shorter than the window
             window = np.pad(window, [(0, pad)] + [(0, 0)] * (window.ndim - 1))
             targets["y"] = np.pad(targets["y"], (0, pad))
+            targets["cls"] = np.pad(targets["cls"], (0, pad))
             mask = np.pad(mask, (0, pad))
 
-        return {"input": window, "y": targets["y"], "mask": mask,
+        return {"input": window, "y": targets["y"], "cls": targets["cls"],
+                "mask": mask,
                 "t0": np.float32(start / self.fps), "fps": np.float32(self.fps),
                 "downbeat_times": targets["downbeat_times"],
                 "anchors": targets["anchors"],
                 "dataset": song.dataset, "song_id": song.song_id}
 
-    def _targets(self, downbeat_times, start: int, frames: int,
+    def _targets(self, downbeat_times, beat_times, start: int, frames: int,
                  target_tol_frames: int = 0):
-        """build_crop's target math on a [start, start+frames) window, or None."""
+        """build_crop's target math on a [start, start+frames) window, or None.
+
+        ``cls`` is the three-way label the tutorial's emission reads, 0 = non-beat,
+        1 = beat, 2 = downbeat, written downbeat-last so a downbeat overwrites the beat
+        that shares its time.
+        """
         lo_t, hi_t = start / self.fps, (start + frames) / self.fps
 
         inside = downbeat_times[(downbeat_times >= lo_t) & (downbeat_times <= hi_t)]
@@ -110,7 +118,14 @@ class ExcerptDataset(torch.utils.data.Dataset):
         for t in inside:
             centre = int(round(t * self.fps)) - start
             y[max(0, centre - target_tol_frames):centre + target_tol_frames + 1] = 1.0
-        return {"y": y, "downbeat_times": np.asarray(inside, dtype=np.float64),
+        cls = np.zeros(frames, dtype=np.int64)
+        for times, label in ((beat_times, 1), (inside, 2)):
+            for t in times[(times >= lo_t) & (times <= hi_t)]:
+                centre = int(round(t * self.fps)) - start
+                lo = max(0, centre - target_tol_frames)
+                cls[lo:centre + target_tol_frames + 1] = label
+        return {"y": y, "cls": cls,
+                "downbeat_times": np.asarray(inside, dtype=np.float64),
                 "anchors": np.asarray(anchors, dtype=np.float64)}
 
 
@@ -130,7 +145,7 @@ def collate_excerpts(batch: list) -> dict:
     if not batch:
         raise ValueError("collate_excerpts: every item in the batch was empty")
     out = {}
-    for key in ("input", "y", "mask"):
+    for key in ("input", "y", "cls", "mask"):
         out[key] = torch.from_numpy(np.stack([item[key] for item in batch]))
     for key in ("t0", "fps"):
         out[key] = torch.tensor([item[key] for item in batch])
