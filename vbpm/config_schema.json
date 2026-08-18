@@ -208,5 +208,10 @@
     "type": "boolean",
     "default": false,
     "description": "q(phi_0) comes from its own boundary head instead of the anchor's point mass. The note's eq (7): the first latent is a von Mises like every other frame, so the initial KL is finite and closed form and the chain has something for later evidence to reweight."
+  },
+  "posterior_reads_b": {
+    "type": "boolean",
+    "default": false,
+    "description": "q reads the labels as well as the audio, and a second audio-only network becomes the conditional prior p_eta(z | x). The note's asymmetry: x is in every factor, b only in the posterior. Deployment then reads the prior, since b is absent at inference."
   }
 }

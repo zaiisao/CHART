@@ -26,7 +26,8 @@ def common_kwargs(cfg) -> dict:
                              tempo_sigma=cfg.tempo_prior_sigma,
                              walk_sigma=cfg.walk_sigma),
             "phase_init": cfg.phase_init,
-            "phi0_posterior": getattr(cfg, "phi0_posterior", False)}
+            "phi0_posterior": getattr(cfg, "phi0_posterior", False),
+            "posterior_reads_b": getattr(cfg, "posterior_reads_b", False)}
 
 
 def refuse_unsupported(cfg, variant: str, supported=()) -> None:

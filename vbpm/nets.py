@@ -148,6 +148,28 @@ class Encoder(nn.Module):
         return heads, features
 
 
+class PosteriorEncoder(Encoder):
+    """q_psi(z | h, b): the label sequence enters as three more input channels.
+
+    The note's asymmetry -- x is in every factor, b only in the posterior. The labels
+    are one-hot rather than an embedding so the extra channels are zero-initialised in
+    effect and the trunk starts where the audio-only encoder starts.
+    """
+
+    reads_target = True
+
+    def __init__(self, input_dim: int, **kw):
+        super().__init__(input_dim + 3, **kw)
+
+    def forward(self, h, mask=None, cls=None):
+        """(posterior param dict, trunk memory), reading the labels alongside x."""
+        assert cls is not None, "the posterior encoder requires the batch's labels"
+        one_hot = nn.functional.one_hot(cls, num_classes=3).to(h.dtype)
+        x = torch.cat([h, one_hot], dim=-1)
+        features = self.features(x, mask)
+        return self.heads(features), features
+
+
 class EmissionTransformer(nn.Module):
     """The tutorial's section 9.6 emission: a Transformer over the LATENT sequence."""
 

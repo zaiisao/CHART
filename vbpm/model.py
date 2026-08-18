@@ -9,7 +9,8 @@ from torch import nn
 from .constants import (CORRECTION_MAX, DELTA_MAX, KAPPA_INTER, KAPPA_Q_MIN,
                         TWO_PI, WALK_INTER_SIGMA,
                         WALK_INTER_W, WALK_INTRA_SIGMA, WALK_MIX_SIGMA, WALK_MIX_W)
-from .nets import Encoder, EmissionTransformer, ZDecoder, vonmises_log_density
+from .nets import (Encoder, EmissionTransformer, PosteriorEncoder, ZDecoder,
+                   vonmises_log_density)
 from .observation import (annotation_frames, count_loglik, gauss_time_loglik,
                           interval_loglik, recon_term)
 from .specs import DecoderSpec, EmissionSpec, PlacementSpec, UpdateSpec, WalkSpec
@@ -27,7 +28,8 @@ class VBPM(nn.Module):
                  update: UpdateSpec | None = None,
                  phase_init: str = "anchor",
                  decoder: DecoderSpec | None = None,
-                 encoder_pe: bool = False, phi0_posterior: bool = False):
+                 encoder_pe: bool = False, phi0_posterior: bool = False,
+                 posterior_reads_b: bool = False):
         super().__init__()
         emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
@@ -35,8 +37,15 @@ class VBPM(nn.Module):
         self.update = update or UpdateSpec()
         self.decoder = decoder or DecoderSpec()
 
-        self.encoder = Encoder(input_dim, d_model,
-                               kappa_physical=self.walk.kappa_physical, use_pe=encoder_pe)
+        self.posterior_reads_b = bool(posterior_reads_b)
+        enc = PosteriorEncoder if self.posterior_reads_b else Encoder
+        self.encoder = enc(input_dim, d_model=d_model,
+                           kappa_physical=self.walk.kappa_physical, use_pe=encoder_pe)
+        self.prior_net = None
+        if self.posterior_reads_b:
+            self.prior_net = Encoder(input_dim, d_model,
+                                     kappa_physical=self.walk.kappa_physical,
+                                     use_pe=encoder_pe)
 
         self.emission_kind = emission.kind
         self.phase_init = phase_init
@@ -286,10 +295,11 @@ class VBPM(nn.Module):
             kp = torch.where(crossing, torch.full_like(kappa, KAPPA_INTER), kp)
         return (kl_vonmises(mu, kappa, mu, kp) * mask).sum(1)
 
-    def kl_phase_step(self, delta, kappa_q, mask, kappa_p=None):
+    def kl_phase_step(self, delta, kappa_q, mask, kappa_p=None, delta_p=None):
         kp = (torch.full_like(kappa_q, self.walk.kappa_physical) if kappa_p is None
               else kappa_p)
-        return (kl_vonmises(delta, kappa_q, torch.zeros_like(delta), kp) * mask).sum(1)
+        dp = torch.zeros_like(delta) if delta_p is None else delta_p
+        return (kl_vonmises(delta, kappa_q, dp, kp) * mask).sum(1)
 
     def tempo_log_prior(self, dotphi, w, walk_sigma=None):
         log_dotphi = torch.log(dotphi)
@@ -316,7 +326,17 @@ class VBPM(nn.Module):
         return (vonmises_log_density(phi[:, 1:], predicted, kappa_p) * pair).sum(1)
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0, raw=None):
-        post, memory = self.encoder(h, mask)
+        target = None
+        if self.recon_kind == "class" or self.posterior_reads_b:
+            assert raw is not None, "the three-way emission needs the batch's class targets"
+            target = raw["cls"].to(h.device)
+        post, memory = (self.encoder(h, mask, target) if self.posterior_reads_b
+                        else self.encoder(h, mask))
+        prior_offset = prior_kappa = None
+        if self.prior_net is not None:
+            post_p, _mem_p = self.prior_net(h, mask)
+            prior_offset = post_p["phase"]["mu_offset"]
+            prior_kappa = post_p["phase"]["kappa"]
         phase, tempo = post["phase"], post["tempo"]
 
         phase_mu_offset, phase_kappa = phase["mu_offset"], phase["kappa"]
@@ -329,10 +349,8 @@ class VBPM(nn.Module):
         h_tempo = ((entropy_norm + torch.log(tempo_sigma)) * w).sum(1)
 
         kappa_p, walk_sigma, mu0, kappa0 = self.prior_params(memory, mask)
-        target = None
-        if self.recon_kind == "class":
-            assert raw is not None, "the three-way emission needs the batch's class targets"
-            target = raw["cls"].to(h.device)
+        if prior_kappa is not None:
+            kappa_p = prior_kappa
 
         theta = None
         if self.phase_init == "anchor":
@@ -366,7 +384,8 @@ class VBPM(nn.Module):
             else:
                 logp_phi1 = logp_phi1 + self.initial_phase_log_prior(phi_1, mu0, kappa0)
             kl_phase = kl_phase + self.kl_phase_step(
-                phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w, kappa_p[:, 1:])
+                phase_mu_offset[:, 1:], phase_kappa[:, 1:], pair_w, kappa_p[:, 1:],
+                None if prior_offset is None else prior_offset[:, 1:])
 
             if target is None:
                 recon = recon + self.recon_term(self.emission_logits(phi, mask),
@@ -391,16 +410,21 @@ class VBPM(nn.Module):
 
     @property
     def deployed_net(self):
-        """The inference network read at test time; controls assert ITS target-blindness."""
-        return self.encoder
+        """The inference network read at test time; controls assert ITS target-blindness.
+
+        With a label-reading posterior the deployed object is the conditional prior, the
+        note's own answer: b is absent at inference, so what is read is p_eta(z | x).
+        """
+        return self.encoder if self.prior_net is None else self.prior_net
 
     @torch.no_grad()
     def infer_phase(self, h, mask=None):
         assert not self.training, "deployment path must run in eval mode"
-        post, memory = self.encoder(h, mask)
+        net = self.deployed_net
+        post, memory = net(h, mask)
         dotphi = post["tempo"]["mu"]
         mean_ramp = torch.cumsum(dotphi, dim=1) - dotphi[:, :1]
-        theta, _ = self.encoder._anchor(mean_ramp, post["rotation"]["weight"])
+        theta, _ = net._anchor(mean_ramp, post["rotation"]["weight"])
         T = dotphi.shape[1]
         stride = self.decoder.knot_stride
         phase = theta

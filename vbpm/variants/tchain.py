@@ -346,6 +346,7 @@ def build_model(cfg, input_dim: int) -> TempoChainVBPM:
     kw = common_kwargs(cfg)
     kw.pop("phase_init", None)
     kw.pop("phi0_posterior", None)
+    kw.pop("posterior_reads_b", None)
     return TempoChainVBPM(input_dim, bins=cfg.chain_bins, tempo_bins=cfg.tempo_bins,
                           tempo_lo=cfg.tempo_lo, tempo_hi=cfg.tempo_hi,
                           sigma=cfg.chain_sigma, band=cfg.tempo_band,
