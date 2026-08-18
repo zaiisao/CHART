@@ -111,3 +111,67 @@ def second_resultant(kappa: torch.Tensor) -> torch.Tensor:
     return torch.where(kappa < 0.1,
                        kappa * kappa / 8.0,
                        1.0 - (2.0 / kappa.clamp(min=1e-12)) * a1)
+
+
+TWO_PI = 2.0 * math.pi
+VM_NODES = 512
+
+
+def _vm_tables(kappa, nodes: int = VM_NODES):
+    """(grid, cdf, dcdf_dkappa) for vM(0, kappa) on [-pi, pi], one row per element.
+
+    The trapezoid rule on a periodic density converges geometrically, so a fixed grid
+    replaces the root-find's quadrature entirely: F_kappa and its kappa-derivative are
+    cumulative sums over the same nodes, and the inverse is a searchsorted away.
+    """
+    unit = torch.linspace(-1.0, 1.0, nodes, device=kappa.device, dtype=kappa.dtype)
+    half = (8.0 / kappa.clamp(min=1e-3).sqrt()).clamp(max=math.pi)
+    grid = half[..., None] * unit
+    k = kappa[..., None]
+    dens = torch.exp(k * (torch.cos(grid) - 1.0)) / (TWO_PI * torch.special.i0e(k))
+    step = (2.0 * half / (nodes - 1))[..., None]
+    trap = 0.5 * (dens[..., 1:] + dens[..., :-1]) * step
+    cdf = torch.cat([torch.zeros_like(trap[..., :1]), trap.cumsum(-1)], dim=-1)
+    cdf = cdf / cdf[..., -1:].clamp(min=1e-30)
+    a = _MeanResultant.apply(kappa)[..., None]
+    weight = (torch.cos(grid) - a) * dens
+    dtrap = 0.5 * (weight[..., 1:] + weight[..., :-1]) * step
+    dcdf = torch.cat([torch.zeros_like(dtrap[..., :1]), dtrap.cumsum(-1)], dim=-1)
+    return grid, cdf, dcdf
+
+
+class _VonMisesInvCDF(torch.autograd.Function):
+    """phi = S_kappa(eps), the inverse von Mises CDF, differentiable in kappa.
+
+    The inverse has no closed form, so the kappa-derivative comes from differentiating
+    the identity F_kappa(S_kappa(eps)) = eps, which gives dS/dkappa = -dF/dkappa
+    evaluated at phi, divided by the density there. Nothing needs the inverse in closed
+    form: the value is read off the tabulated CDF and the gradient off the same table.
+    """
+
+    @staticmethod
+    def forward(ctx, kappa, eps):
+        grid, cdf, dcdf = _vm_tables(kappa)
+        idx = torch.searchsorted(cdf.contiguous(), eps[..., None].contiguous())
+        idx = idx.clamp(1, cdf.shape[-1] - 1)
+        lo, hi = idx - 1, idx
+        c_lo, c_hi = cdf.gather(-1, lo), cdf.gather(-1, hi)
+        frac = ((eps[..., None] - c_lo) / (c_hi - c_lo).clamp(min=1e-30)).clamp(0.0, 1.0)
+        g_lo, g_hi = grid.gather(-1, lo), grid.gather(-1, hi)
+        phi = (g_lo + frac * (g_hi - g_lo))[..., 0]
+        d_lo, d_hi = dcdf.gather(-1, lo), dcdf.gather(-1, hi)
+        d_at = (d_lo + frac * (d_hi - d_lo))[..., 0]
+        dens = torch.exp(kappa * (torch.cos(phi) - 1.0)) / (TWO_PI * torch.special.i0e(kappa))
+        ctx.save_for_backward(-d_at / dens.clamp(min=1e-30))
+        return phi
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (dphi_dkappa,) = ctx.saved_tensors
+        return grad_out * dphi_dkappa, None
+
+
+def sample_vonmises_icdf(kappa: torch.Tensor) -> torch.Tensor:
+    """Reparameterised vM(0, kappa) draw whose kappa-gradient is the implicit one."""
+    eps = torch.rand_like(kappa).clamp(1e-6, 1.0 - 1e-6)
+    return _VonMisesInvCDF.apply(kappa, eps)
