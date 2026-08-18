@@ -40,7 +40,70 @@ from ..vonmises import log_i0
 DEFAULTS = {"chain_bins": 96, "tempo_bins": 24, "tempo_lo": 0.030, "tempo_hi": 0.180,
             "chain_sigma": 0.01, "tempo_band": 3,
             "phase_kernel": "vonmises", "tempo_kernel": "gauss",
-            "tempo_revert": True, "phase_nu": 4.0}
+            "tempo_revert": True, "phase_nu": 4.0, "use_graphs": False}
+
+
+def _graph(loop, sample_args, grad_inputs):
+    """Capture loop over sample_args, warming cuBLAS on those exact shapes first.
+
+    Capture fails at some batch shapes because the first matmul of that shape
+    allocates a cuBLAS workspace, which is not permitted mid-capture. Running the
+    real shapes on a side stream first forces the allocation to happen early.
+    """
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(5):
+            out = loop(*sample_args)
+            torch.autograd.backward(sum(o.sum() for o in out), inputs=grad_inputs)
+            for g in grad_inputs:
+                g.grad = None
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    return torch.cuda.make_graphed_callables(loop, sample_args, num_warmup_iters=11)
+
+
+class _SweepLoop(nn.Module):
+    """The whole forward-backward sweep as one callable, so it graphs without aliasing.
+
+    make_graphed_callables reuses static output buffers per replay, so graphing a
+    single frame and calling it T times makes every frame alias the last. Capturing
+    the entire sweep keeps one buffer set for the whole recursion.
+    """
+
+    def forward(self, psi, mask, ph_f, te, a0):
+        """Run both passes; returns the pair marginal in logs and the log evidence."""
+        b, t, k = psi.shape
+        m = te.shape[0]
+        a = a0
+        alphas = []
+        logZ = torch.zeros(b, device=psi.device, dtype=psi.dtype)
+        for i in range(t):
+            if i > 0:
+                moved = torch.einsum("bkm,mkj->bjm", a, ph_f)
+                a = torch.einsum("bkm,mn->bkn", moved, te)
+            live = mask[:, i][:, None, None]
+            a = a * (live * psi[:, i][:, :, None] + (1.0 - live))
+            norm = a.reshape(b, -1).sum(-1).clamp(min=1e-30)
+            a = a / norm[:, None, None]
+            logZ = logZ + torch.log(norm)
+            alphas.append(a)
+
+        beta = torch.ones(b, k, m, device=psi.device, dtype=psi.dtype) / (k * m)
+        betas = [None] * t
+        betas[t - 1] = beta
+        for i in range(t - 1, 0, -1):
+            live = mask[:, i][:, None, None]
+            msg = beta * (live * psi[:, i][:, :, None] + (1.0 - live))
+            mixed = torch.einsum("bkm,nm->bkn", msg, te)
+            beta = torch.einsum("bjm,mkj->bkm", mixed, ph_f)
+            beta = beta / beta.reshape(b, -1).sum(-1).clamp(min=1e-30)[:, None, None]
+            betas[i - 1] = beta
+
+        g = torch.stack(alphas, 1) * torch.stack(betas, 1)
+        g = g / g.reshape(b, t, -1).sum(-1).clamp(min=1e-30)[:, :, None, None]
+        return torch.log(g.clamp(min=1e-30)), logZ
 
 
 class TempoChainVBPM(nn.Module):
@@ -54,6 +117,7 @@ class TempoChainVBPM(nn.Module):
                  sigma: float = 0.01, band: int = 3,
                  phase_kernel: str = "vonmises", tempo_kernel: str = "gauss",
                  tempo_revert: bool = True, phase_nu: float = 4.0,
+                 use_graphs: bool = False,
                  emission: EmissionSpec | str = "triangle",
                  walk: WalkSpec | None = None, encoder_pe: bool = False):
         super().__init__()
@@ -81,6 +145,9 @@ class TempoChainVBPM(nn.Module):
                                          self.tempo_bins))
         self.register_buffer("rates", rates)
         self.register_buffer("theta", torch.arange(self.bins) * (TWO_PI / self.bins))
+        self._sweep_loop = _SweepLoop()
+        self.use_graphs = bool(use_graphs)
+        self._graphs: dict = {}
         z = (torch.log(rates) - self.walk.tempo_mu) / self.walk.tempo_sigma
         lp = -0.5 * z ** 2
         self.register_buffer("tempo_log_prior", lp - torch.logsumexp(lp, 0))
@@ -186,49 +253,36 @@ class TempoChainVBPM(nn.Module):
             lt = lt.masked_fill(far, -1e9)
         return lt - torch.logsumexp(lt, dim=1, keepdim=True)
 
+    def _sweep(self, b, t, k):
+        """The sweep callable, CUDA-graphed per (batch, length) shape when enabled."""
+        if not self.use_graphs or not torch.is_grad_enabled() or not self.rates.is_cuda:
+            return self._sweep_loop
+        key = (b, t, k, self.tempo_bins)
+        if key not in self._graphs:
+            m, dev = self.tempo_bins, self.rates.device
+            sa = (torch.rand(b, t, k, device=dev).add(0.1).requires_grad_(),
+                  torch.ones(b, t, device=dev),
+                  self.log_phase_shift().exp().detach(),
+                  self.log_tempo_kernel().exp().detach(),
+                  torch.rand(b, k, m, device=dev).add(0.1).requires_grad_())
+            self._graphs[key] = _graph(self._sweep_loop, sa, [sa[0], sa[4]])
+        return self._graphs[key]
+
     def forward_backward(self, log_psi, mask, sigma=None):
         """Scaled linear-domain recursion, equivalent to log-space message passing.
 
-        alpha is renormalised every frame anyway, so carrying it in the linear domain and accumulating log of the normaliser is
-        equivalent to log-space message passing, and replaces two logsumexp reductions
-        per frame with two matmuls. The recursion is launch-bound rather than
-        arithmetic-bound, so this is where the wall clock goes.
+        alpha is renormalised every frame anyway, so carrying it in the linear domain
+        and accumulating log of the normaliser is equivalent to log-space message
+        passing, and replaces two logsumexp reductions per frame with two matmuls.
+        The recursion is launch-bound rather than arithmetic-bound, so this is where
+        the wall clock goes -- and why the sweep is worth CUDA-graphing.
         """
         b, t, k = log_psi.shape
         m = self.tempo_bins
-        ph = self.log_phase_shift().exp()                      # [M, K, K]
+        ph_f = self.log_phase_shift().exp()                    # [M, k, k'] per tempo
         te = self.log_tempo_kernel(sigma).exp()                # [M, M]
-        ph_f = ph                                              # [M, k, k'] per tempo
-        psi = log_psi.exp()
-
-        a = (self.tempo_log_prior.exp()[None, None, :] / k).expand(b, k, m).contiguous()
-        alphas = []
-        logZ = torch.zeros(b, device=log_psi.device, dtype=log_psi.dtype)
-        for i in range(t):
-            if i > 0:
-                moved = torch.einsum("bkm,mkj->bjm", a, ph_f)
-                a = torch.einsum("bkm,mn->bkn", moved, te)
-            live = mask[:, i][:, None, None]
-            a = a * (live * psi[:, i][:, :, None] + (1.0 - live))
-            norm = a.reshape(b, -1).sum(-1).clamp(min=1e-30)
-            a = a / norm[:, None, None]
-            logZ = logZ + torch.log(norm)
-            alphas.append(a)
-
-        beta = torch.ones(b, k, m, device=log_psi.device, dtype=log_psi.dtype) / (k * m)
-        betas = [None] * t
-        betas[t - 1] = beta
-        for i in range(t - 1, 0, -1):
-            live = mask[:, i][:, None, None]
-            msg = beta * (live * psi[:, i][:, :, None] + (1.0 - live))
-            mixed = torch.einsum("bkm,nm->bkn", msg, te)
-            beta = torch.einsum("bjm,mkj->bkm", mixed, ph_f)
-            beta = beta / beta.reshape(b, -1).sum(-1).clamp(min=1e-30)[:, None, None]
-            betas[i - 1] = beta
-
-        g = torch.stack(alphas, 1) * torch.stack(betas, 1)
-        g = g / g.reshape(b, t, -1).sum(-1).clamp(min=1e-30)[:, :, None, None]
-        return torch.log(g.clamp(min=1e-30)), logZ
+        a0 = (self.tempo_log_prior.exp()[None, None, :] / k).expand(b, k, m).contiguous()
+        return self._sweep(b, t, k)(log_psi.exp(), mask, ph_f, te, a0)
 
     def marginals(self, h, mask, sigma=None):
         """(log psi, log gamma, log Z) for one batch: the encoder pass and one sweep."""
@@ -296,4 +350,5 @@ def build_model(cfg, input_dim: int) -> TempoChainVBPM:
                           sigma=cfg.chain_sigma, band=cfg.tempo_band,
                           phase_kernel=cfg.phase_kernel, tempo_kernel=cfg.tempo_kernel,
                           tempo_revert=cfg.tempo_revert, phase_nu=cfg.phase_nu,
+                          use_graphs=cfg.use_graphs,
                           **kw)
