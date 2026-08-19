@@ -43,7 +43,10 @@ from ..vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 DEFAULTS = {"chain_rate_grid": 24, "rate_posterior": "categorical",
             "ar_delta_max": 3.1416, "ar_delta_rel": 0.0, "ar_phi0_grid": 0,
-            "ar_phi0_anchor": False, "ar_rate_resid": 0.0, "ar_stride": 1}
+            "ar_phi0_anchor": False, "ar_rate_resid": 0.0, "ar_stride": 1,
+            "ar_rate_lo": 0.020, "ar_rate_hi": 0.200,
+            "ar_phase_kernel": "vonmises", "ar_tempo_walk": False,
+            "ar_tempo_kernel": "cauchy"}
 
 
 def objective(out, beta: float, cfg):
@@ -64,7 +67,9 @@ class ARChainVBPM(nn.Module):
                  rate_posterior: str = "categorical", encoder_pe: bool = False,
                  delta_max: float = 3.1416, delta_rel: float = 0.0,
                  phi0_grid: int = 0, phi0_anchor: bool = False,
-                 stride: int = 1,
+                 stride: int = 1, phase_kernel: str = "vonmises",
+                 tempo_walk: bool = False, tempo_kernel: str = "cauchy",
+                 walk_sigma: float = 0.00212,
                  rate_resid: float = 0.0):
         super().__init__()
         emission = EmissionSpec.coerce(emission)
@@ -82,7 +87,13 @@ class ARChainVBPM(nn.Module):
         self.rate_posterior = rate_posterior
         self.phi0_anchor = bool(phi0_anchor)
         self.stride = int(stride)
+        self.phase_kernel = phase_kernel
+        self.tempo_walk = bool(tempo_walk)
+        self.tempo_kernel = tempo_kernel
+        self.walk_sigma = float(walk_sigma)
         self.rate_resid = float(rate_resid)
+        assert not (self.rate_resid > 0.0 and rate_posterior != "categorical"), \
+            "ar_rate_resid only acts on the categorical rate posterior"
         self.rate_resid_head = None
         if self.rate_resid > 0.0 and rate_posterior == "categorical":
             self.rate_resid_head = nn.Linear(d_model, rate_grid)
@@ -117,8 +128,9 @@ class ARChainVBPM(nn.Module):
             with torch.no_grad():
                 self.phi0_head.bias.copy_(torch.tensor([1.0, 0.0, 0.0]))
 
+        n_out = 5 if self.tempo_walk else 3
         self.step_head = nn.Sequential(nn.Linear(d_model + 2, d_model), nn.ReLU(),
-                                       nn.Linear(d_model, 3))
+                                       nn.Linear(d_model, n_out))
         last = self.step_head[-1]
         nn.init.zeros_(last.weight)
         kappa_step = self.walk.kappa_physical
@@ -127,9 +139,14 @@ class ARChainVBPM(nn.Module):
             kp = torch.tensor(float(self.walk.kappa_physical))
             kappa_step = float(inv_a(a_ratio(kp) ** self.stride))
         self.kappa_p_stride = float(kappa_step)
+        self.gamma_stride = self.stride / math.sqrt(self.walk.kappa_physical)
+        bias = [1.0, 0.0, inverse_softplus(kappa_step)]
+        if self.tempo_walk:
+            walk_scale = (self.walk_sigma * self.stride if tempo_kernel == "cauchy"
+                          else self.walk_sigma * math.sqrt(self.stride))
+            bias += [0.0, inverse_softplus(walk_scale)]
         with torch.no_grad():
-            last.bias.copy_(torch.tensor(
-                [1.0, 0.0, inverse_softplus(kappa_step)]))
+            last.bias.copy_(torch.tensor(bias))
 
         if rate_posterior == "categorical":
             self.rate_head = nn.Linear(d_model, rate_grid)
@@ -147,6 +164,12 @@ class ARChainVBPM(nn.Module):
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
+        self.log_rate_lo, self.log_rate_hi = math.log(rate_lo), math.log(rate_hi)
+        # the residual moves a candidate off its bin, so the walk's support must
+        # admit the shifted rate or a positive residual on the top bin is
+        # discarded at the first step while the anchor still used it.
+        self.log_rate_lo_eff = self.log_rate_lo - float(rate_resid)
+        self.log_rate_hi_eff = self.log_rate_hi + float(rate_resid)
         rates = torch.exp(torch.linspace(math.log(rate_lo), math.log(rate_hi),
                                          rate_grid))
         self.register_buffer("rates", rates)
@@ -197,6 +220,78 @@ class ARChainVBPM(nn.Module):
         kl0 = k0 * mean_resultant(k0) - log_i0(k0)
         return phi0, kl0
 
+    def step_kl(self, delta, kq, kp, x):
+        """KL( q(step) || p(step) ) for the step whose realised value is x.
+
+        Under a von Mises prior this is the closed form. Under the wrapped
+        Cauchy the prior has a tight core and a heavy tail -- the shape the
+        corpus prefers by 0.77 nats/bar, and the one a single concentration
+        cannot express: phase follows tempo almost exactly, yet a fermata or a
+        tempo break stays affordable. Its density is closed form and
+        normalised, so only the cross term needs the sample:
+
+            KL = -H(q) - E_q[log p]  ~=  -H(q) - log p(x),   x ~ q
+
+        H(q) is exact, so the estimator is unbiased with the variance of one
+        term rather than of the whole divergence. The core is matched to the
+        von Mises it replaces by CORE width (gamma = 1/sqrt(kappa) is HWHM
+        matching, not resultant matching -- the two differ by an order of
+        magnitude, so swapping the kernel at fixed kappa_physical is not a
+        neutral tail change and the two arms are not like-for-like).
+        """
+        if self.phase_kernel == "vonmises":
+            return kl_vonmises(delta, kq, torch.zeros_like(delta), kp)
+        # S independent wrapped Cauchy steps compose to a wrapped Cauchy of
+        # scale S*gamma, NOT sqrt(S)*gamma: reading gamma off the von Mises
+        # stride concentration mixed the two conventions and made the prior a
+        # factor sqrt(S) too tight. tempo_step_kl already had this right.
+        gamma = self.gamma_stride
+        rho = torch.exp(-torch.as_tensor(gamma, device=delta.device,
+                                         dtype=delta.dtype)).clamp(1e-4, 1 - 1e-6)
+        denom = 1.0 + rho ** 2 - 2.0 * rho * torch.cos(x)
+        log_p = torch.log1p(-rho ** 2) - torch.log(denom) - math.log(TWO_PI)
+        entropy = math.log(TWO_PI) + log_i0(kq) - kq * mean_resultant(kq)
+        return -entropy - log_p
+
+    def _bound_log_rate(self, u):
+        """Keep the walk inside the rate support WITHOUT an absorbing rail.
+
+        torch.clamp has exactly zero gradient past the bound, so a walk that
+        reaches the rail stops receiving any likelihood gradient and only the
+        KL pushes back -- the absorbing-clamp pathology this project already
+        recorded once. A tanh saturation is bounded by the same interval and
+        differentiable everywhere, so a state at the edge still learns which
+        way to move.
+        """
+        mid = 0.5 * (self.log_rate_lo_eff + self.log_rate_hi_eff)
+        half = 0.5 * (self.log_rate_hi_eff - self.log_rate_lo_eff)
+        return mid + half * torch.tanh((u - mid) / half)
+
+    def tempo_step_kl(self, w, s_w):
+        """KL of one tempo increment: exact Gaussian entropy, sampled cross term.
+
+        The increment law is where the heavy tail belongs. A ritardando is a
+        PERSISTENT change, so the phase channel cannot carry it -- an i.i.d.
+        innovation pays for the same deviation at every step and never learns
+        that the tempo moved. Priced on the corpus's own rubato: the same tempo
+        path costs 17490 nats under the shipped Gaussian walk and 33 under a
+        Cauchy of the SAME scale, while a steady window still prefers the
+        steady path under either.
+        """
+        S = max(self.stride, 1)
+        if self.tempo_kernel == "cauchy":
+            scale = self.walk_sigma * S
+            log_p = -math.log(math.pi * scale) - torch.log1p((w / scale) ** 2)
+        elif self.tempo_kernel == "laplace":
+            scale = self.walk_sigma * math.sqrt(S)
+            log_p = -w.abs() / scale - math.log(2.0 * scale)
+        else:
+            scale = self.walk_sigma * math.sqrt(S)
+            log_p = -0.5 * (w / scale) ** 2 - math.log(scale) \
+                - 0.5 * math.log(TWO_PI)
+        entropy = 0.5 * math.log(TWO_PI * math.e) + torch.log(s_w)
+        return -entropy - log_p
+
     def _anchor_phi0(self, feats, mask, rates_c, sample):
         """phi_0*(x, r): the closed-form anchor under each candidate ramp.
 
@@ -216,7 +311,7 @@ class ARChainVBPM(nn.Module):
         if sample:
             eps = sample_vonmises_icdf(k0.expand(feats.shape[0]))
             mu0 = mu0 + eps[:, None]
-        kl0 = (k0 * mean_resultant(k0) - log_i0(k0)).expand(feats.shape[0])
+        kl0 = (k0 * mean_resultant(k0) - log_i0(k0)).expand_as(mu0)
         return mu0, kl0
 
     def _rollout(self, feats, mask, rates, phi0, sample=True):
@@ -228,6 +323,8 @@ class ARChainVBPM(nn.Module):
         """
         B, T, D = feats.shape
         C = rates.shape[1]
+        assert not (self.tempo_walk and self.stride <= 1), \
+            "the tempo walk is a per-stride latent; run it with ar_stride > 1"
         if self.stride > 1:
             return self._rollout_strided(feats, mask, rates, phi0, sample)
         kp = torch.as_tensor(self.walk.kappa_physical, device=feats.device,
@@ -253,7 +350,7 @@ class ARChainVBPM(nn.Module):
             eps = sample_vonmises_icdf(kq) if sample else torch.zeros_like(kq)
             phi = mu + eps
             pair = (mask[:, t] * mask[:, t - 1])[:, None]
-            kls = kls + kl_vonmises(delta, kq, torch.zeros_like(delta), kp) * pair
+            kls = kls + self.step_kl(delta, kq, kp, delta + eps) * pair
             phis.append(phi)
             kappas.append(kq)
         return torch.stack(phis, 2), kls, torch.stack(kappas, 2)
@@ -261,13 +358,16 @@ class ARChainVBPM(nn.Module):
     def _rollout_strided(self, feats, mask, rates, phi0, sample=True):
         """Form 1 at stride S: decisions every S frames, evidence at every frame.
 
-        The S-step transition is the fine chain's own marginal -- S von Mises
-        innovations compose to one whose resultant is A(kappa)^S -- so the
-        latent is the stride-point phases and nothing about the model's law is
-        approximated; within a stride the path is the deterministic
-        interpolation of the latent, the same reading the mainline's
-        knot-stride corrector commits to. The head decides at the timescale
-        tempo actually moves, and the sequential critical path shrinks by S.
+        This is a DIFFERENT generative model, not a coarser reading of the same
+        one, and the difference is worth stating because the audit caught the
+        earlier docstring claiming otherwise. Two approximations: the S-step
+        kernel is a von Mises whose RESULTANT matches the S-fold convolution
+        (first Fourier coefficient only -- 9e-6 nats per step at kappa 383,
+        S 8, harmless but not exact), and the within-stride path is the
+        deterministic interpolation rather than the Brownian bridge the fine
+        chain implies (bridge sd peaks at sqrt(S/4/kappa)). Every frame still
+        pays its own emission evidence. Consequence: a stride > 1 ELBO is NOT
+        comparable term-for-term with a stride = 1 one.
         """
         B, T, D = feats.shape
         C = rates.shape[1]
@@ -281,24 +381,45 @@ class ARChainVBPM(nn.Module):
         knots = [phi]
         kls = feats.new_zeros(B, C)
         kappas = []
+        log_rate = torch.log(rates)
         steps = list(range(S, T, S))
         for t in steps:
             trig = torch.stack([phi.cos(), phi.sin()], dim=-1)
-            d1, d2, u = lin2(act(trig @ w_phi + proj[:, t][:, None, :])).unbind(-1)
+            out = lin2(act(trig @ w_phi + proj[:, t][:, None, :]))
+            if self.tempo_walk:
+                d1, d2, u, mu_w, s_raw = out.unbind(-1)
+                s_w = nn.functional.softplus(s_raw) + 1e-6
+                eps_w = torch.randn_like(s_w) if sample else torch.zeros_like(s_w)
+                w = mu_w + s_w * eps_w
+                # The walk owns an UNBOUNDED state, and a heavy tail supplies
+                # almost no restoring force, so an unclamped log-rate runs away
+                # (measured: nan within one run). The model's own rate support
+                # is the physical bound, and reverting the step toward the
+                # corpus mean is what tchain's kernel does for the same reason:
+                # a driftless walk has a uniform stationary law and expresses no
+                # preference among tempi.
+                log_rate = self._bound_log_rate(log_rate + w)
+                rate_t = log_rate.exp()
+                kls = kls + self.tempo_step_kl(w, s_w) \
+                    * (mask[:, t] * mask[:, t - S])[:, None]
+            else:
+                d1, d2, u = out.unbind(-1)
+                rate_t = rates
             delta = torch.atan2(d2, d1)
             if self.delta_rel > 0.0:
-                cap = self.delta_rel * rates * S
+                cap = self.delta_rel * rate_t * S
                 delta = cap * torch.tanh(delta / cap)
             elif self.delta_max < math.pi:
                 delta = self.delta_max * torch.tanh(delta / self.delta_max)
             kq = nn.functional.softplus(u) + KAPPA_Q_MIN
-            mu = phi + rates * S + delta
+            mu = phi + rate_t * S + delta
             eps = sample_vonmises_icdf(kq) if sample else torch.zeros_like(kq)
             phi = mu + eps
             pair = (mask[:, t] * mask[:, t - S])[:, None]
-            kls = kls + kl_vonmises(delta, kq, torch.zeros_like(delta), kp) * pair
+            kls = kls + self.step_kl(delta, kq, kp, delta + eps) * pair
             knots.append(phi)
             kappas.append(kq)
+        del log_rate
         knot = torch.stack(knots, 2)
         seg = (knot[..., 1:] - knot[..., :-1]) / S
         frac = torch.arange(S, device=feats.device, dtype=feats.dtype)
@@ -307,7 +428,7 @@ class ARChainVBPM(nn.Module):
         tail = T - path.shape[-1]
         if tail > 0:
             last = path[..., -1:]
-            ramp = rates[..., None] * torch.arange(
+            ramp = rate_t[..., None] * torch.arange(
                 1, tail + 1, device=feats.device, dtype=feats.dtype)
             path = torch.cat([path, last + ramp], dim=-1)
         kq_full = torch.stack(kappas, 2).repeat_interleave(S, dim=-1)
@@ -338,27 +459,35 @@ class ARChainVBPM(nn.Module):
         R = self.rates.shape[0]
         rate_logits = self.rate_head(pooled)
         base = self.rates[None, :].expand(B, -1)
+        log_prior = self.rate_log_prior[None].expand(B, -1)
         if self.rate_resid_head is not None:
             resid = self.rate_resid * torch.tanh(self.rate_resid_head(pooled))
             base = base * torch.exp(resid)
+            # the residual moves each candidate off its bin centre, so pricing
+            # it at the unshifted centre stops being a KL on a common support.
+            # This is a CONDITIONAL model, so an x-dependent p(c | x) is
+            # legitimate; what is not legitimate is scoring one rate and
+            # charging for another.
+            z = (torch.log(base) - self.tempo_prior_mu) / self.tempo_prior_sigma
+            log_prior = torch.log_softmax(-0.5 * z ** 2, dim=-1)
         if self.phi0_anchor:
             phi0_c, kl0 = self._anchor_phi0(feats, mask, base, sample)
-            return base, phi0_c, self.rate_log_prior, rate_logits, kl0
+            return base, phi0_c, log_prior, rate_logits, kl0
         if self.phi0_grid > 0:
             N = self.phi0_grid
             p0_logits = self.phi0_grid_head(pooled)
             logits = (rate_logits[:, :, None] + p0_logits[:, None, :]).reshape(B, R * N)
-            log_prior = (self.rate_log_prior[:, None].expand(R, N)
-                         - math.log(N)).reshape(-1)
+            log_prior = (log_prior[:, :, None].expand(B, R, N)
+                         - math.log(N)).reshape(B, R * N)
             rates_c = base[:, :, None].expand(B, R, N).reshape(B, R * N)
             phi0_c = self.phi0_vals[None, :].expand(R, N).reshape(-1)[None].expand(B, -1)
-            kl0 = feats.new_zeros(B)
+            kl0 = feats.new_zeros(B, R * N)
         else:
             logits = rate_logits
-            log_prior = self.rate_log_prior
             rates_c = base
             p0, kl0 = self._phi0_amortized(feats, sample)
             phi0_c = p0[:, None].expand(-1, rates_c.shape[1])
+            kl0 = kl0[:, None].expand(-1, rates_c.shape[1])
         return rates_c, phi0_c, log_prior, logits, kl0
 
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0,
@@ -376,11 +505,11 @@ class ARChainVBPM(nn.Module):
                 feats, mask, pooled, sample=True)
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, phi0_c)
             recon_c = self._recon(phi, mask, y, pos_weight, cls)
-            log_qc = torch.log_softmax(logits + log_prior[None], dim=-1)
+            log_qc = torch.log_softmax(logits + log_prior, dim=-1)
             qc = log_qc.exp()
-            kl_mix = (qc * (log_qc - log_prior[None])).sum(-1)
+            kl_mix = (qc * (log_qc - log_prior)).sum(-1)
             recon = (qc * recon_c).sum(-1)
-            kl = (qc * kl_chain).sum(-1) + kl0 + kl_mix
+            kl = (qc * (kl_chain + kl0)).sum(-1) + kl_mix
             best = log_qc.argmax(-1)
             rate_best = rates_c.gather(1, best[:, None])[:, 0]
         else:
@@ -389,13 +518,14 @@ class ARChainVBPM(nn.Module):
             log_r = mu_lr + sigma * torch.randn_like(sigma)
             rates_c = torch.exp(log_r)[:, None]
             p0, kl0 = self._phi0_amortized(feats, sample=True)
+            kl0 = kl0[:, None]
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, p0[:, None])
             recon = self._recon(phi, mask, y, pos_weight, cls)[:, 0]
             kl_mix = (torch.log(torch.tensor(self.tempo_prior_sigma))
                       - torch.log(sigma)
                       + (sigma ** 2 + (mu_lr - self.tempo_prior_mu) ** 2)
                       / (2.0 * self.tempo_prior_sigma ** 2) - 0.5)
-            kl = kl_chain[:, 0] + kl0 + kl_mix
+            kl = kl_chain[:, 0] + kl0[:, 0] + kl_mix
             best = torch.zeros(B, dtype=torch.long, device=feats.device)
             rate_best = torch.exp(mu_lr)
 
@@ -418,7 +548,7 @@ class ARChainVBPM(nn.Module):
         if self.rate_posterior == "categorical":
             rates_c, phi0_c, log_prior, logits, _kl0 = self._components(
                 feats, mask, pooled, sample=False)
-            best = torch.log_softmax(logits + log_prior[None], dim=-1).argmax(-1)
+            best = torch.log_softmax(logits + log_prior, dim=-1).argmax(-1)
             idx = best[:, None]
             rates = rates_c.gather(1, idx)
             phi0 = phi0_c.gather(1, idx)
@@ -437,6 +567,7 @@ class ARChainVBPM(nn.Module):
 def build_model(cfg, input_dim: int) -> ARChainVBPM:
     return ARChainVBPM(input_dim,
                        rate_grid=cfg.chain_rate_grid,
+                       rate_lo=cfg.ar_rate_lo, rate_hi=cfg.ar_rate_hi,
                        emission=EmissionSpec(kind=cfg.emission,
                                              bump_kappa=cfg.emission_bump_kappa,
                                              recon=getattr(cfg, "emission_recon",
@@ -450,7 +581,11 @@ def build_model(cfg, input_dim: int) -> ARChainVBPM:
                        phi0_grid=cfg.ar_phi0_grid,
                        rate_resid=cfg.ar_rate_resid,
                        phi0_anchor=cfg.ar_phi0_anchor,
-                       stride=cfg.ar_stride)
+                       stride=cfg.ar_stride,
+                       phase_kernel=cfg.ar_phase_kernel,
+                       tempo_walk=cfg.ar_tempo_walk,
+                       tempo_kernel=cfg.ar_tempo_kernel,
+                       walk_sigma=cfg.walk_sigma)
 
 
 def epoch_note(model, probe) -> str:
