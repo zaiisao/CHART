@@ -46,7 +46,8 @@ DEFAULTS = {"chain_rate_grid": 24, "rate_posterior": "categorical",
             "ar_phi0_anchor": False, "ar_rate_resid": 0.0, "ar_stride": 1,
             "ar_rate_lo": 0.020, "ar_rate_hi": 0.200,
             "ar_phase_kernel": "vonmises", "ar_tempo_walk": False,
-            "ar_tempo_kernel": "cauchy", "ar_beat_subdiv": 4}
+            "ar_tempo_kernel": "cauchy", "ar_beat_subdiv": 4,
+            "ar_readout": "head"}
 
 
 def objective(out, beta: float, cfg):
@@ -65,7 +66,7 @@ class VBPM(nn.Module):
                  rate: RateSpec | None = None,
                  chain: ChainSpec | None = None,
                  tempo_walk: TempoWalkSpec | None = None,
-                 encoder_pe: bool = False):
+                 readout: str = "head", encoder_pe: bool = False):
         super().__init__()
         # the specs ARE the configuration: nothing below copies a field out of
         # one, so there is exactly one place each knob is written down.
@@ -74,6 +75,8 @@ class VBPM(nn.Module):
         self.rate = rate or RateSpec()
         self.chain = chain or ChainSpec()
         self.tempo = tempo_walk or TempoWalkSpec()
+        self.readout = readout
+        self._resultant = None
 
         assert not (self.rate.resid > 0.0 and self.rate.posterior != "categorical"), \
             "a rate residual only acts on the categorical rate posterior"
@@ -321,6 +324,11 @@ class VBPM(nn.Module):
         re = (a[:, None, :] * torch.cos(ramp)).sum(-1)
         im = (a[:, None, :] * torch.sin(ramp)).sum(-1)
         mu0 = -torch.atan2(im, re)
+        # |R| / sum a: how COHERENT the evidence is under this ramp. The anchor
+        # is the direction of the fold; this is its length, and it is the
+        # label-free score that says which candidate rate the audio supports.
+        self._resultant = ((re ** 2 + im ** 2).sqrt()
+                           / a.sum(-1, keepdim=True).clamp(min=1e-6))
         k0 = nn.functional.softplus(self.kappa0_raw) + KAPPA_Q_MIN
         if sample:
             eps = sample_vonmises_icdf(k0.expand(feats.shape[0]))
@@ -576,7 +584,24 @@ class VBPM(nn.Module):
         if self.rate.posterior == "categorical":
             rates_c, phi0_c, log_prior, logits, _kl0 = self._components(
                 feats, mask, pooled, sample=False)
-            best = torch.log_softmax(logits + log_prior, dim=-1).argmax(-1)
+            if self.readout == "search" and self.chain.phi0 == "anchor":
+                # MEASURED WORSE, kept as a documented negative. Scoring
+                # candidates by the coherence of the evidence folded under each
+                # ramp beat a REGRESSED rate historically (0.206 -> 0.570), but
+                # it loses to an enumerated rate carrying a tempo prior: gtzan
+                # 0.445 vs 0.475 on identical weights, with level-correct songs
+                # falling 71.5% -> 61.2%. The reason is geometric and fatal --
+                # the fold cannot separate a rate from its integer multiples
+                # (evidence at downbeats only: R = 0.997 at the truth, 0.989 at
+                # 2x) and prefers whichever multiple aligns the most mass, so
+                # once the evidence head responds to beats at all the BEAT rate
+                # wins outright (R = 0.955 at 4x against 0.262 at the truth).
+                # No retraining repairs that: the head can only choose which
+                # frames contribute, and the doubled ramp maps the frames it
+                # likes and dislikes onto the same angle.
+                best = self._resultant.argmax(-1)
+            else:
+                best = torch.log_softmax(logits + log_prior, dim=-1).argmax(-1)
             idx = best[:, None]
             rates = rates_c.gather(1, idx)
             phi0 = phi0_c.gather(1, idx)
@@ -607,6 +632,7 @@ def build_model(cfg, input_dim: int) -> VBPM:
                                 phi0_grid=cfg.ar_phi0_grid),
                 tempo_walk=TempoWalkSpec(enabled=cfg.ar_tempo_walk,
                                          kernel=cfg.ar_tempo_kernel),
+                readout=cfg.ar_readout,
                 **common_kwargs(cfg))
 
 
