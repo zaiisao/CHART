@@ -1,4 +1,17 @@
-"""von Mises: closed-form KL and reparameterised Best-Fisher sampling."""
+"""von Mises: closed-form KL, and two samplers of which only one is exact.
+
+`sample_vonmises_icdf` is the mainline draw and the one the phase note derives:
+phi = S_kappa(eps) with S the inverse CDF, whose kappa-derivative comes from
+differentiating F_kappa(S_kappa(eps)) = eps rather than from any closed form.
+Its gradient is unbiased at every concentration.
+
+`sample_vonmises` is Best-Fisher rejection with a pathwise gradient. It is
+cheaper per draw but its kappa-gradient is biased -- measured -48% at kappa = 2,
+negligible above kappa ~ 50 -- so it is only safe where the concentration is
+known to stay large. q's concentration is LEARNED and floored at KAPPA_Q_MIN =
+0.01, so that condition cannot be assumed during training. It survives here for
+the variants that already used it.
+"""
 from __future__ import annotations
 
 import math
