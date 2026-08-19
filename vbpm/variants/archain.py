@@ -43,7 +43,7 @@ from ..vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 DEFAULTS = {"chain_rate_grid": 24, "rate_posterior": "categorical",
             "ar_delta_max": 3.1416, "ar_delta_rel": 0.0, "ar_phi0_grid": 0,
-            "ar_phi0_anchor": False, "ar_rate_resid": 0.0}
+            "ar_phi0_anchor": False, "ar_rate_resid": 0.0, "ar_stride": 1}
 
 
 def objective(out, beta: float, cfg):
@@ -64,6 +64,7 @@ class ARChainVBPM(nn.Module):
                  rate_posterior: str = "categorical", encoder_pe: bool = False,
                  delta_max: float = 3.1416, delta_rel: float = 0.0,
                  phi0_grid: int = 0, phi0_anchor: bool = False,
+                 stride: int = 1,
                  rate_resid: float = 0.0):
         super().__init__()
         emission = EmissionSpec.coerce(emission)
@@ -80,6 +81,7 @@ class ARChainVBPM(nn.Module):
             self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
         self.rate_posterior = rate_posterior
         self.phi0_anchor = bool(phi0_anchor)
+        self.stride = int(stride)
         self.rate_resid = float(rate_resid)
         self.rate_resid_head = None
         if self.rate_resid > 0.0 and rate_posterior == "categorical":
@@ -119,9 +121,15 @@ class ARChainVBPM(nn.Module):
                                        nn.Linear(d_model, 3))
         last = self.step_head[-1]
         nn.init.zeros_(last.weight)
+        kappa_step = self.walk.kappa_physical
+        if self.stride > 1:
+            from .vmchain import a_ratio, inv_a
+            kp = torch.tensor(float(self.walk.kappa_physical))
+            kappa_step = float(inv_a(a_ratio(kp) ** self.stride))
+        self.kappa_p_stride = float(kappa_step)
         with torch.no_grad():
             last.bias.copy_(torch.tensor(
-                [1.0, 0.0, inverse_softplus(self.walk.kappa_physical)]))
+                [1.0, 0.0, inverse_softplus(kappa_step)]))
 
         if rate_posterior == "categorical":
             self.rate_head = nn.Linear(d_model, rate_grid)
@@ -220,16 +228,20 @@ class ARChainVBPM(nn.Module):
         """
         B, T, D = feats.shape
         C = rates.shape[1]
+        if self.stride > 1:
+            return self._rollout_strided(feats, mask, rates, phi0, sample)
         kp = torch.as_tensor(self.walk.kappa_physical, device=feats.device,
                              dtype=feats.dtype)
         phi = phi0
         phis = [phi]
         kls = feats.new_zeros(B, C)
         kappas = []
+        lin1, act, lin2 = self.step_head[0], self.step_head[1], self.step_head[2]
+        proj = feats @ lin1.weight[:, 2:].T + lin1.bias
+        w_phi = lin1.weight[:, :2].T
         for t in range(1, T):
-            inp = torch.cat([phi.cos()[..., None], phi.sin()[..., None],
-                             feats[:, t][:, None, :].expand(B, C, D)], dim=-1)
-            d1, d2, u = self.step_head(inp).unbind(-1)
+            trig = torch.stack([phi.cos(), phi.sin()], dim=-1)
+            d1, d2, u = lin2(act(trig @ w_phi + proj[:, t][:, None, :])).unbind(-1)
             delta = torch.atan2(d2, d1)
             if self.delta_rel > 0.0:
                 cap = self.delta_rel * rates
@@ -245,6 +257,64 @@ class ARChainVBPM(nn.Module):
             phis.append(phi)
             kappas.append(kq)
         return torch.stack(phis, 2), kls, torch.stack(kappas, 2)
+
+    def _rollout_strided(self, feats, mask, rates, phi0, sample=True):
+        """Form 1 at stride S: decisions every S frames, evidence at every frame.
+
+        The S-step transition is the fine chain's own marginal -- S von Mises
+        innovations compose to one whose resultant is A(kappa)^S -- so the
+        latent is the stride-point phases and nothing about the model's law is
+        approximated; within a stride the path is the deterministic
+        interpolation of the latent, the same reading the mainline's
+        knot-stride corrector commits to. The head decides at the timescale
+        tempo actually moves, and the sequential critical path shrinks by S.
+        """
+        B, T, D = feats.shape
+        C = rates.shape[1]
+        S = self.stride
+        kp = torch.as_tensor(self.kappa_p_stride, device=feats.device,
+                             dtype=feats.dtype)
+        lin1, act, lin2 = self.step_head[0], self.step_head[1], self.step_head[2]
+        proj = feats @ lin1.weight[:, 2:].T + lin1.bias
+        w_phi = lin1.weight[:, :2].T
+        phi = phi0
+        knots = [phi]
+        kls = feats.new_zeros(B, C)
+        kappas = []
+        steps = list(range(S, T, S))
+        for t in steps:
+            trig = torch.stack([phi.cos(), phi.sin()], dim=-1)
+            d1, d2, u = lin2(act(trig @ w_phi + proj[:, t][:, None, :])).unbind(-1)
+            delta = torch.atan2(d2, d1)
+            if self.delta_rel > 0.0:
+                cap = self.delta_rel * rates * S
+                delta = cap * torch.tanh(delta / cap)
+            elif self.delta_max < math.pi:
+                delta = self.delta_max * torch.tanh(delta / self.delta_max)
+            kq = nn.functional.softplus(u) + KAPPA_Q_MIN
+            mu = phi + rates * S + delta
+            eps = sample_vonmises_icdf(kq) if sample else torch.zeros_like(kq)
+            phi = mu + eps
+            pair = (mask[:, t] * mask[:, t - S])[:, None]
+            kls = kls + kl_vonmises(delta, kq, torch.zeros_like(delta), kp) * pair
+            knots.append(phi)
+            kappas.append(kq)
+        knot = torch.stack(knots, 2)
+        seg = (knot[..., 1:] - knot[..., :-1]) / S
+        frac = torch.arange(S, device=feats.device, dtype=feats.dtype)
+        inner = knot[..., :-1, None] + seg[..., None] * frac
+        path = inner.reshape(B, C, -1)
+        tail = T - path.shape[-1]
+        if tail > 0:
+            last = path[..., -1:]
+            ramp = rates[..., None] * torch.arange(
+                1, tail + 1, device=feats.device, dtype=feats.dtype)
+            path = torch.cat([path, last + ramp], dim=-1)
+        kq_full = torch.stack(kappas, 2).repeat_interleave(S, dim=-1)
+        kq_full = torch.cat([kq_full,
+                             kq_full[..., -1:].expand(B, C, T - kq_full.shape[-1])],
+                            dim=-1)[..., :T - 1]
+        return path[..., :T], kls, kq_full
 
     def _recon(self, phi, mask, y, pos_weight, cls=None):
         if self.recon_kind == "class":
@@ -379,7 +449,8 @@ def build_model(cfg, input_dim: int) -> ARChainVBPM:
                        delta_rel=cfg.ar_delta_rel,
                        phi0_grid=cfg.ar_phi0_grid,
                        rate_resid=cfg.ar_rate_resid,
-                       phi0_anchor=cfg.ar_phi0_anchor)
+                       phi0_anchor=cfg.ar_phi0_anchor,
+                       stride=cfg.ar_stride)
 
 
 def epoch_note(model, probe) -> str:
