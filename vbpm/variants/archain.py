@@ -80,12 +80,12 @@ class VBPM(nn.Module):
         assert not (self.chain.phi0 == "anchor" and self.chain.phi0_grid > 0), \
             "the anchor replaces the phi0 grid; enable one or the other"
 
-        if self.recon_kind in ("class", "tied"):
+        if self.emission.recon in ("class", "tied"):
             self.wants_raw = True
-        if self.recon_kind == "tied":
+        if self.emission.recon == "tied":
             self.tied_a = nn.Parameter(torch.tensor([-3.0, -3.0]))
             self.tied_b_raw = nn.Parameter(torch.tensor([1.0, 1.0]))
-        if self.recon_kind == "class":
+        if self.emission.recon == "class":
             coef = torch.zeros(3, 2 * self.emission.harmonics)
             coef[2, 0] = 1.0
             self.emission_coef = nn.Parameter(coef)
@@ -100,41 +100,41 @@ class VBPM(nn.Module):
                                kappa_physical=self.walk.kappa_physical,
                                use_pe=encoder_pe)
 
-        assert not (self.phi0_anchor and self.phi0_grid > 0), \
+        assert not (self.chain.phi0 == "anchor" and self.chain.phi0_grid > 0), \
             "ar_phi0_anchor replaces the phi0 grid; enable one or the other"
-        if self.phi0_anchor:
+        if self.chain.phi0 == "anchor":
             self.evidence_head = nn.Linear(d_model, 1)
             nn.init.zeros_(self.evidence_head.weight)
             nn.init.zeros_(self.evidence_head.bias)
             self.kappa0_raw = nn.Parameter(torch.tensor(5.0))
-        elif self.phi0_grid > 0:
-            self.phi0_grid_head = nn.Linear(d_model, self.phi0_grid)
+        elif self.chain.phi0_grid > 0:
+            self.phi0_grid_head = nn.Linear(d_model, self.chain.phi0_grid)
             nn.init.zeros_(self.phi0_grid_head.weight)
             nn.init.zeros_(self.phi0_grid_head.bias)
             self.register_buffer(
-                "phi0_vals", torch.arange(self.phi0_grid) * (TWO_PI / self.phi0_grid))
+                "phi0_vals", torch.arange(self.chain.phi0_grid) * (TWO_PI / self.chain.phi0_grid))
         else:
             self.phi0_head = nn.Linear(d_model, 3)
             nn.init.zeros_(self.phi0_head.weight)
             with torch.no_grad():
                 self.phi0_head.bias.copy_(torch.tensor([1.0, 0.0, 0.0]))
 
-        n_out = 5 if self.tempo_walk else 3
+        n_out = 5 if self.tempo.enabled else 3
         self.step_head = nn.Sequential(nn.Linear(d_model + 2, d_model), nn.ReLU(),
                                        nn.Linear(d_model, n_out))
         last = self.step_head[-1]
         nn.init.zeros_(last.weight)
         kappa_step = self.walk.kappa_physical
-        if self.stride > 1:
+        if self.chain.stride > 1:
             from .vmchain import a_ratio, inv_a
             kp = torch.tensor(float(self.walk.kappa_physical))
-            kappa_step = float(inv_a(a_ratio(kp) ** self.stride))
+            kappa_step = float(inv_a(a_ratio(kp) ** self.chain.stride))
         self.kappa_p_stride = float(kappa_step)
-        self.gamma_stride = self.stride / math.sqrt(self.walk.kappa_physical)
+        self.gamma_stride = self.chain.stride / math.sqrt(self.walk.kappa_physical)
         bias = [1.0, 0.0, inverse_softplus(kappa_step)]
-        if self.tempo_walk:
-            walk_scale = (self.walk_sigma * self.stride if self.tempo_kernel == "cauchy"
-                          else self.walk_sigma * math.sqrt(self.stride))
+        if self.tempo.enabled:
+            walk_scale = (self.walk.walk_sigma * self.chain.stride if self.tempo.kernel == "cauchy"
+                          else self.walk.walk_sigma * math.sqrt(self.chain.stride))
             bias += [0.0, inverse_softplus(walk_scale)]
         with torch.no_grad():
             last.bias.copy_(torch.tensor(bias))
@@ -148,9 +148,9 @@ class VBPM(nn.Module):
             nn.init.zeros_(self.rate_head.weight)
             with torch.no_grad():
                 self.rate_head.bias.copy_(torch.tensor(
-                    [self.tempo_prior_mu, inverse_softplus(0.05)]))
+                    [self.walk.tempo_mu, inverse_softplus(0.05)]))
 
-        if self.recon_kind not in ("class", "tied"):
+        if self.emission.recon not in ("class", "tied"):
             self.emission_a = nn.Parameter(torch.tensor(-3.0))
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
@@ -164,85 +164,9 @@ class VBPM(nn.Module):
         rates = torch.exp(torch.linspace(math.log(self.rate.lo), math.log(self.rate.hi),
                                          self.rate.grid))
         self.register_buffer("rates", rates)
-        z = (torch.log(rates) - self.tempo_prior_mu) / self.tempo_prior_sigma
+        z = (torch.log(rates) - self.walk.tempo_mu) / self.walk.tempo_sigma
         lp = -0.5 * z ** 2
         self.register_buffer("rate_log_prior", lp - torch.logsumexp(lp, 0))
-
-    # ---- read-throughs: the spec is the field, these are just short names -----
-    @property
-    def recon_kind(self):
-        return self.emission.recon
-
-    @property
-    def beat_subdiv(self):
-        """The beat channel's subdivision. Meter stays deferred as a LATENT; this
-        is a named constant, not a hidden hardcode, and becomes the enumerated M
-        the day meter returns."""
-        return self.emission.subdiv
-
-    @property
-    def stride(self):
-        return self.chain.stride
-
-    @property
-    def phase_kernel(self):
-        return self.chain.phase_kernel
-
-    @property
-    def delta_max(self):
-        return self.chain.delta_max
-
-    @property
-    def delta_rel(self):
-        return self.chain.delta_rel
-
-    @property
-    def phi0_anchor(self):
-        return self.chain.phi0 == "anchor"
-
-    @property
-    def phi0_grid(self):
-        return self.chain.phi0_grid
-
-    @property
-    def rate_posterior(self):
-        return self.rate.posterior
-
-    @property
-    def rate_resid(self):
-        return self.rate.resid
-
-    @property
-    def tempo_walk(self):
-        return self.tempo.enabled
-
-    @property
-    def tempo_kernel(self):
-        return self.tempo.kernel
-
-    @property
-    def walk_sigma(self):
-        return self.walk.walk_sigma
-
-    @property
-    def tempo_prior_mu(self):
-        return self.walk.tempo_mu
-
-    @property
-    def tempo_prior_sigma(self):
-        return self.walk.tempo_sigma
-
-    @property
-    def emission_kind(self):
-        return self.emission.kind
-
-    @property
-    def bump_kappa(self):
-        return self.emission.bump_kappa
-
-    @property
-    def harmonics(self):
-        return self.emission.harmonics
 
     @property
     def emission_b(self):
@@ -267,7 +191,7 @@ class VBPM(nn.Module):
         b = nn.functional.softplus(self.tied_b_raw)
         wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
         tri_db = 1.0 - 2.0 * wrapped.abs() / math.pi
-        sub_phi = self.beat_subdiv * phi
+        sub_phi = self.emission.subdiv * phi
         wrapped_b = torch.atan2(torch.sin(sub_phi), torch.cos(sub_phi))
         tri_bt = 1.0 - 2.0 * wrapped_b.abs() / math.pi
         return (self.tied_a[0] + b[0] * tri_db,
@@ -283,22 +207,22 @@ class VBPM(nn.Module):
         2x mode half the claimed downbeats sit on annotated beats and one shared
         shape must split its mass -- ~log 2 per conflicted event.
         """
-        j = torch.arange(1, self.harmonics + 1, device=phi.device, dtype=phi.dtype)
+        j = torch.arange(1, self.emission.harmonics + 1, device=phi.device, dtype=phi.dtype)
         angle = phi[..., None] * j
         basis = torch.cat([angle.cos(), angle.sin()], dim=-1)
         return self.emission_bias + basis @ self.emission_coef.T
 
     def emission_logits(self, phi, mask=None):
-        if self.recon_kind == "tied":
+        if self.emission.recon == "tied":
             return self.tied_logits(phi)[0]
-        if self.recon_kind == "class":
+        if self.emission.recon == "class":
             lp = torch.log_softmax(self.class_logits(phi), dim=-1)
             return lp[..., 2] - torch.logsumexp(lp[..., :2], dim=-1)
-        if self.emission_kind == "triangle":
+        if self.emission.kind == "triangle":
             wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
             return self.emission_a + self.emission_b * (1.0 - 2.0 * wrapped.abs() / math.pi)
-        if self.emission_kind == "bump":
-            peak = torch.exp(self.bump_kappa * (torch.cos(phi) - 1.0))
+        if self.emission.kind == "bump":
+            peak = torch.exp(self.emission.bump_kappa * (torch.cos(phi) - 1.0))
             return self.emission_a + self.emission_b * (2.0 * peak - 1.0)
         return self.emission_a + self.emission_b * torch.cos(phi)
 
@@ -329,7 +253,7 @@ class VBPM(nn.Module):
         magnitude, so swapping the kernel at fixed kappa_physical is not a
         neutral tail change and the two arms are not like-for-like).
         """
-        if self.phase_kernel == "vonmises":
+        if self.chain.phase_kernel == "vonmises":
             return kl_vonmises(delta, kq, torch.zeros_like(delta), kp)
         # S independent wrapped Cauchy steps compose to a wrapped Cauchy of
         # scale S*gamma, NOT sqrt(S)*gamma: reading gamma off the von Mises
@@ -368,15 +292,15 @@ class VBPM(nn.Module):
         Cauchy of the SAME scale, while a steady window still prefers the
         steady path under either.
         """
-        S = max(self.stride, 1)
-        if self.tempo_kernel == "cauchy":
-            scale = self.walk_sigma * S
+        S = max(self.chain.stride, 1)
+        if self.tempo.kernel == "cauchy":
+            scale = self.walk.walk_sigma * S
             log_p = -math.log(math.pi * scale) - torch.log1p((w / scale) ** 2)
-        elif self.tempo_kernel == "laplace":
-            scale = self.walk_sigma * math.sqrt(S)
+        elif self.tempo.kernel == "laplace":
+            scale = self.walk.walk_sigma * math.sqrt(S)
             log_p = -w.abs() / scale - math.log(2.0 * scale)
         else:
-            scale = self.walk_sigma * math.sqrt(S)
+            scale = self.walk.walk_sigma * math.sqrt(S)
             log_p = -0.5 * (w / scale) ** 2 - math.log(scale) \
                 - 0.5 * math.log(TWO_PI)
         entropy = 0.5 * math.log(TWO_PI * math.e) + torch.log(s_w)
@@ -413,9 +337,9 @@ class VBPM(nn.Module):
         """
         B, T, D = feats.shape
         C = rates.shape[1]
-        assert not (self.tempo_walk and self.stride <= 1), \
+        assert not (self.tempo.enabled and self.chain.stride <= 1), \
             "the tempo walk is a per-stride latent; run it with ar_stride > 1"
-        if self.stride > 1:
+        if self.chain.stride > 1:
             return self._rollout_strided(feats, mask, rates, phi0, sample)
         kp = torch.as_tensor(self.walk.kappa_physical, device=feats.device,
                              dtype=feats.dtype)
@@ -430,11 +354,11 @@ class VBPM(nn.Module):
             trig = torch.stack([phi.cos(), phi.sin()], dim=-1)
             d1, d2, u = lin2(act(trig @ w_phi + proj[:, t][:, None, :])).unbind(-1)
             delta = torch.atan2(d2, d1)
-            if self.delta_rel > 0.0:
-                cap = self.delta_rel * rates
+            if self.chain.delta_rel > 0.0:
+                cap = self.chain.delta_rel * rates
                 delta = cap * torch.tanh(delta / cap)
-            elif self.delta_max < math.pi:
-                delta = self.delta_max * torch.tanh(delta / self.delta_max)
+            elif self.chain.delta_max < math.pi:
+                delta = self.chain.delta_max * torch.tanh(delta / self.chain.delta_max)
             kq = nn.functional.softplus(u) + KAPPA_Q_MIN
             mu = phi + rates + delta
             eps = sample_vonmises_icdf(kq) if sample else torch.zeros_like(kq)
@@ -461,7 +385,7 @@ class VBPM(nn.Module):
         """
         B, T, D = feats.shape
         C = rates.shape[1]
-        S = self.stride
+        S = self.chain.stride
         kp = torch.as_tensor(self.kappa_p_stride, device=feats.device,
                              dtype=feats.dtype)
         lin1, act, lin2 = self.step_head[0], self.step_head[1], self.step_head[2]
@@ -476,7 +400,7 @@ class VBPM(nn.Module):
         for t in steps:
             trig = torch.stack([phi.cos(), phi.sin()], dim=-1)
             out = lin2(act(trig @ w_phi + proj[:, t][:, None, :]))
-            if self.tempo_walk:
+            if self.tempo.enabled:
                 d1, d2, u, mu_w, s_raw = out.unbind(-1)
                 s_w = nn.functional.softplus(s_raw) + 1e-6
                 eps_w = torch.randn_like(s_w) if sample else torch.zeros_like(s_w)
@@ -496,11 +420,11 @@ class VBPM(nn.Module):
                 d1, d2, u = out.unbind(-1)
                 rate_t = rates
             delta = torch.atan2(d2, d1)
-            if self.delta_rel > 0.0:
-                cap = self.delta_rel * rate_t * S
+            if self.chain.delta_rel > 0.0:
+                cap = self.chain.delta_rel * rate_t * S
                 delta = cap * torch.tanh(delta / cap)
-            elif self.delta_max < math.pi:
-                delta = self.delta_max * torch.tanh(delta / self.delta_max)
+            elif self.chain.delta_max < math.pi:
+                delta = self.chain.delta_max * torch.tanh(delta / self.chain.delta_max)
             kq = nn.functional.softplus(u) + KAPPA_Q_MIN
             mu = phi + rate_t * S + delta
             eps = sample_vonmises_icdf(kq) if sample else torch.zeros_like(kq)
@@ -528,7 +452,7 @@ class VBPM(nn.Module):
         return path[..., :T], kls, kq_full
 
     def _recon(self, phi, mask, y, pos_weight, cls=None):
-        if self.recon_kind == "tied":
+        if self.emission.recon == "tied":
             e_db, e_bt = self.tied_logits(phi)
             is_db = (cls == 2).to(phi.dtype)[:, None, :]
             # a downbeat IS a beat: the targets are written downbeat-last, so
@@ -542,7 +466,7 @@ class VBPM(nn.Module):
                   + is_bt * nn.functional.logsigmoid(e_bt)
                   + (1.0 - is_bt) * nn.functional.logsigmoid(-e_bt))
             return (ll * mask[:, None, :]).sum(-1)
-        if self.recon_kind == "class":
+        if self.emission.recon == "class":
             C = phi.shape[1]
             lp = torch.log_softmax(self.class_logits(phi), dim=-1)
             picked = lp.gather(-1, cls[:, None, :, None].expand(-1, C, -1, -1)
@@ -565,20 +489,20 @@ class VBPM(nn.Module):
         base = self.rates[None, :].expand(B, -1)
         log_prior = self.rate_log_prior[None].expand(B, -1)
         if self.rate_resid_head is not None:
-            resid = self.rate_resid * torch.tanh(self.rate_resid_head(pooled))
+            resid = self.rate.resid * torch.tanh(self.rate_resid_head(pooled))
             base = base * torch.exp(resid)
             # the residual moves each candidate off its bin centre, so pricing
             # it at the unshifted centre stops being a KL on a common support.
             # This is a CONDITIONAL model, so an x-dependent p(c | x) is
             # legitimate; what is not legitimate is scoring one rate and
             # charging for another.
-            z = (torch.log(base) - self.tempo_prior_mu) / self.tempo_prior_sigma
+            z = (torch.log(base) - self.walk.tempo_mu) / self.walk.tempo_sigma
             log_prior = torch.log_softmax(-0.5 * z ** 2, dim=-1)
-        if self.phi0_anchor:
+        if self.chain.phi0 == "anchor":
             phi0_c, kl0 = self._anchor_phi0(feats, mask, base, sample)
             return base, phi0_c, log_prior, rate_logits, kl0
-        if self.phi0_grid > 0:
-            N = self.phi0_grid
+        if self.chain.phi0_grid > 0:
+            N = self.chain.phi0_grid
             p0_logits = self.phi0_grid_head(pooled)
             logits = (rate_logits[:, :, None] + p0_logits[:, None, :]).reshape(B, R * N)
             log_prior = (log_prior[:, :, None].expand(B, R, N)
@@ -597,14 +521,14 @@ class VBPM(nn.Module):
     def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0,
                 raw=None):
         cls = None
-        if self.recon_kind in ("class", "tied"):
+        if self.emission.recon in ("class", "tied"):
             assert raw is not None, "the three-way emission needs the batch's class targets"
             cls = raw["cls"].to(h.device)
         feats = self.encoder.features(h, mask)
         pooled = self._pooled(feats, mask)
         B = feats.shape[0]
 
-        if self.rate_posterior == "categorical":
+        if self.rate.posterior == "categorical":
             rates_c, phi0_c, log_prior, logits, kl0 = self._components(
                 feats, mask, pooled, sample=True)
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, phi0_c)
@@ -625,10 +549,10 @@ class VBPM(nn.Module):
             kl0 = kl0[:, None]
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, p0[:, None])
             recon = self._recon(phi, mask, y, pos_weight, cls)[:, 0]
-            kl_mix = (torch.log(torch.tensor(self.tempo_prior_sigma))
+            kl_mix = (torch.log(torch.tensor(self.walk.tempo_sigma))
                       - torch.log(sigma)
-                      + (sigma ** 2 + (mu_lr - self.tempo_prior_mu) ** 2)
-                      / (2.0 * self.tempo_prior_sigma ** 2) - 0.5)
+                      + (sigma ** 2 + (mu_lr - self.walk.tempo_mu) ** 2)
+                      / (2.0 * self.walk.tempo_sigma ** 2) - 0.5)
             kl = kl_chain[:, 0] + kl0[:, 0] + kl_mix
             best = torch.zeros(B, dtype=torch.long, device=feats.device)
             rate_best = torch.exp(mu_lr)
@@ -649,7 +573,7 @@ class VBPM(nn.Module):
             mask = torch.ones(h.shape[:2], device=h.device, dtype=h.dtype)
         feats = self.encoder.features(h, mask)
         pooled = self._pooled(feats, mask)
-        if self.rate_posterior == "categorical":
+        if self.rate.posterior == "categorical":
             rates_c, phi0_c, log_prior, logits, _kl0 = self._components(
                 feats, mask, pooled, sample=False)
             best = torch.log_softmax(logits + log_prior, dim=-1).argmax(-1)
