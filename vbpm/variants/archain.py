@@ -67,57 +67,34 @@ class VBPM(nn.Module):
                  tempo_walk: TempoWalkSpec | None = None,
                  encoder_pe: bool = False):
         super().__init__()
-        rate = rate or RateSpec()
-        chain = chain or ChainSpec()
-        tempo_walk = tempo_walk or TempoWalkSpec()
-        rate_grid, rate_lo, rate_hi = rate.grid, rate.lo, rate.hi
-        rate_posterior, rate_resid = rate.posterior, rate.resid
-        stride, phase_kernel = chain.stride, chain.phase_kernel
-        delta_max, delta_rel = chain.delta_max, chain.delta_rel
-        phi0_anchor, phi0_grid = chain.phi0 == "anchor", chain.phi0_grid
-        tempo_kernel = tempo_walk.kernel
-        tempo_walk = tempo_walk.enabled
-        emission = EmissionSpec.coerce(emission)
+        # the specs ARE the configuration: nothing below copies a field out of
+        # one, so there is exactly one place each knob is written down.
+        self.emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
-        self.emission_kind = emission.kind
-        self.bump_kappa = float(emission.bump_kappa)
-        self.recon_kind = emission.recon
-        self.harmonics = int(emission.harmonics)
-        # TEMPORARY CONSTANT, not a hidden hardcode: the beat channel needs a
-        # subdivision and meter is deliberately deferred as a latent until the
-        # phase/tempo chassis is stable. It is a named config key so it can be
-        # swept, and the moment meter returns it becomes the enumerated M.
-        self.beat_subdiv = int(emission.subdiv)
+        self.rate = rate or RateSpec()
+        self.chain = chain or ChainSpec()
+        self.tempo = tempo_walk or TempoWalkSpec()
+
+        assert not (self.rate.resid > 0.0 and self.rate.posterior != "categorical"), \
+            "a rate residual only acts on the categorical rate posterior"
+        assert not (self.chain.phi0 == "anchor" and self.chain.phi0_grid > 0), \
+            "the anchor replaces the phi0 grid; enable one or the other"
+
         if self.recon_kind in ("class", "tied"):
             self.wants_raw = True
         if self.recon_kind == "tied":
             self.tied_a = nn.Parameter(torch.tensor([-3.0, -3.0]))
             self.tied_b_raw = nn.Parameter(torch.tensor([1.0, 1.0]))
         if self.recon_kind == "class":
-            coef = torch.zeros(3, 2 * self.harmonics)
+            coef = torch.zeros(3, 2 * self.emission.harmonics)
             coef[2, 0] = 1.0
             self.emission_coef = nn.Parameter(coef)
             self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
-        self.rate_posterior = rate_posterior
-        self.phi0_anchor = bool(phi0_anchor)
-        self.stride = int(stride)
-        self.phase_kernel = phase_kernel
-        self.tempo_walk = bool(tempo_walk)
-        self.tempo_kernel = tempo_kernel
-        self.walk_sigma = float(self.walk.walk_sigma)
-        self.rate_resid = float(rate_resid)
-        assert not (self.rate_resid > 0.0 and rate_posterior != "categorical"), \
-            "ar_rate_resid only acts on the categorical rate posterior"
         self.rate_resid_head = None
-        if self.rate_resid > 0.0 and rate_posterior == "categorical":
-            self.rate_resid_head = nn.Linear(d_model, rate_grid)
+        if self.rate.resid > 0.0 and self.rate.posterior == "categorical":
+            self.rate_resid_head = nn.Linear(d_model, self.rate.grid)
             nn.init.zeros_(self.rate_resid_head.weight)
             nn.init.zeros_(self.rate_resid_head.bias)
-        self.tempo_prior_mu = float(self.walk.tempo_mu)
-        self.tempo_prior_sigma = float(self.walk.tempo_sigma)
-        self.delta_max = float(delta_max)
-        self.delta_rel = float(delta_rel)
-        self.phi0_grid = int(phi0_grid)
 
         self.encoder = Encoder(input_dim, d_model,
                                kappa_physical=self.walk.kappa_physical,
@@ -156,14 +133,14 @@ class VBPM(nn.Module):
         self.gamma_stride = self.stride / math.sqrt(self.walk.kappa_physical)
         bias = [1.0, 0.0, inverse_softplus(kappa_step)]
         if self.tempo_walk:
-            walk_scale = (self.walk_sigma * self.stride if tempo_kernel == "cauchy"
+            walk_scale = (self.walk_sigma * self.stride if self.tempo_kernel == "cauchy"
                           else self.walk_sigma * math.sqrt(self.stride))
             bias += [0.0, inverse_softplus(walk_scale)]
         with torch.no_grad():
             last.bias.copy_(torch.tensor(bias))
 
-        if rate_posterior == "categorical":
-            self.rate_head = nn.Linear(d_model, rate_grid)
+        if self.rate.posterior == "categorical":
+            self.rate_head = nn.Linear(d_model, self.rate.grid)
             nn.init.zeros_(self.rate_head.weight)
             nn.init.zeros_(self.rate_head.bias)
         else:
@@ -178,18 +155,94 @@ class VBPM(nn.Module):
             self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
-        self.log_rate_lo, self.log_rate_hi = math.log(rate_lo), math.log(rate_hi)
+        self.log_rate_lo, self.log_rate_hi = math.log(self.rate.lo), math.log(self.rate.hi)
         # the residual moves a candidate off its bin, so the walk's support must
         # admit the shifted rate or a positive residual on the top bin is
         # discarded at the first step while the anchor still used it.
-        self.log_rate_lo_eff = self.log_rate_lo - float(rate_resid)
-        self.log_rate_hi_eff = self.log_rate_hi + float(rate_resid)
-        rates = torch.exp(torch.linspace(math.log(rate_lo), math.log(rate_hi),
-                                         rate_grid))
+        self.log_rate_lo_eff = self.log_rate_lo - float(self.rate.resid)
+        self.log_rate_hi_eff = self.log_rate_hi + float(self.rate.resid)
+        rates = torch.exp(torch.linspace(math.log(self.rate.lo), math.log(self.rate.hi),
+                                         self.rate.grid))
         self.register_buffer("rates", rates)
         z = (torch.log(rates) - self.tempo_prior_mu) / self.tempo_prior_sigma
         lp = -0.5 * z ** 2
         self.register_buffer("rate_log_prior", lp - torch.logsumexp(lp, 0))
+
+    # ---- read-throughs: the spec is the field, these are just short names -----
+    @property
+    def recon_kind(self):
+        return self.emission.recon
+
+    @property
+    def beat_subdiv(self):
+        """The beat channel's subdivision. Meter stays deferred as a LATENT; this
+        is a named constant, not a hidden hardcode, and becomes the enumerated M
+        the day meter returns."""
+        return self.emission.subdiv
+
+    @property
+    def stride(self):
+        return self.chain.stride
+
+    @property
+    def phase_kernel(self):
+        return self.chain.phase_kernel
+
+    @property
+    def delta_max(self):
+        return self.chain.delta_max
+
+    @property
+    def delta_rel(self):
+        return self.chain.delta_rel
+
+    @property
+    def phi0_anchor(self):
+        return self.chain.phi0 == "anchor"
+
+    @property
+    def phi0_grid(self):
+        return self.chain.phi0_grid
+
+    @property
+    def rate_posterior(self):
+        return self.rate.posterior
+
+    @property
+    def rate_resid(self):
+        return self.rate.resid
+
+    @property
+    def tempo_walk(self):
+        return self.tempo.enabled
+
+    @property
+    def tempo_kernel(self):
+        return self.tempo.kernel
+
+    @property
+    def walk_sigma(self):
+        return self.walk.walk_sigma
+
+    @property
+    def tempo_prior_mu(self):
+        return self.walk.tempo_mu
+
+    @property
+    def tempo_prior_sigma(self):
+        return self.walk.tempo_sigma
+
+    @property
+    def emission_kind(self):
+        return self.emission.kind
+
+    @property
+    def bump_kappa(self):
+        return self.emission.bump_kappa
+
+    @property
+    def harmonics(self):
+        return self.emission.harmonics
 
     @property
     def emission_b(self):
