@@ -1,7 +1,38 @@
-emission: cosine
+# The recipe the default run uses. Promoted from vbpm/variants/archain.py on
+# 2026-08-19, replacing the factorized-posterior model.py recipe (kept at
+# configs/attic/factorized_baseline.yaml), which scores at the null floor on
+# gtzan (0.074 against nulls 0.074/0.075, n=993) and cannot overfit even a
+# metronomic single song (ballroom_103, 400 epochs: F ends 0.000, KL never
+# falls below ~520 nats -- the independence cost of the per-frame factors).
+#
+# What this recipe is: the phase note's Form 1 posterior -- an autoregressive
+# von Mises chain whose step head reads the SAMPLED previous phase -- with the
+# global mode handled where a gradient cannot handle it. The rate is a set of
+# candidates summed exactly; the initial phase is the closed-form circular-mean
+# anchor under each candidate ramp, so nothing about the alignment is regressed
+# and nothing about it is gridded.
+#
+# ar_stride is 1 here on purpose: a strided run is a valid ELBO of a DIFFERENT
+# generative model (deterministic within-stride phase), so the reference recipe
+# stays exact and sweeps override it with ar_stride=8 for a 7x screening pass.
+variant: archain
+emission: triangle
 emission_recon: class
-phi0_posterior: true
-posterior_reads_b: true
-pos_weight: 1.0
-epochs: 60
+target_tol_frames: 0
+
+ar_phi0_anchor: true
+ar_delta_rel: 0.3
+ar_rate_resid: 0.05
+ar_stride: 1
+ar_rate_lo: 0.012
+ar_rate_hi: 0.200
+chain_rate_grid: 36
+
+excerpt_seconds: 30.0
+batch_size: 4
+epochs: 24
+lr: 3.0e-4
 beta_warmup: 0
+pos_weight: 1.0
+kappa_physical: 383.0
+frontend_lr_scale: 0.0
