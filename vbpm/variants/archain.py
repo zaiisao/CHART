@@ -473,7 +473,12 @@ class ARChainVBPM(nn.Module):
         if self.recon_kind == "tied":
             e_db, e_bt = self.tied_logits(phi)
             is_db = (cls == 2).to(phi.dtype)[:, None, :]
-            is_bt = (cls == 1).to(phi.dtype)[:, None, :]
+            # a downbeat IS a beat: the targets are written downbeat-last, so
+            # cls == 2 at a downbeat and the beat channel must still fire there.
+            # Testing cls == 1 told the beat channel "no beat" at exactly the
+            # frames its own triangle peaks, so the two channels fought each
+            # other at every bar line.
+            is_bt = (cls >= 1).to(phi.dtype)[:, None, :]
             ll = (is_db * nn.functional.logsigmoid(e_db)
                   + (1.0 - is_db) * nn.functional.logsigmoid(-e_db)
                   + is_bt * nn.functional.logsigmoid(e_bt)
