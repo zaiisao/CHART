@@ -1,49 +1,33 @@
-"""The base hooks: tutorial §7, encoder-deployed, no conditional prior."""
+"""The hooks every variant shares: how to build the specs, optimise, and score.
+
+There is no model here any more. The factorized-posterior VBPM this module used
+to construct was deleted on 2026-08-19 -- it scored at the null floor on gtzan
+(0.074 against nulls of 0.074/0.075, n=993) and could not overfit a metronomic
+single song. It is recoverable from git history at 644182b if a control run is
+ever needed.
+"""
 from __future__ import annotations
 
 import torch
 
-from ..model import VBPM
 from ..specs import EmissionSpec, WalkSpec
 
 
 COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "emission_recon",
                "kappa_physical")
 
-DEFAULTS_IF_UNSUPPORTED = {}
-
 
 def common_kwargs(cfg) -> dict:
-    """The kwargs every VBPM subclass should be built with."""
+    """The spec objects every variant is built with."""
     return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
                                      positional=cfg.emission_positional,
                                      bump_kappa=cfg.emission_bump_kappa,
-                                     recon=getattr(cfg, "emission_recon", "event")),
-            "walk": WalkSpec(kind=getattr(cfg, "walk_kind", "gauss"),
-                             kappa_physical=cfg.kappa_physical,
-                             kappa_gate=getattr(cfg, "kappa_gate", False),
+                                     recon=getattr(cfg, "emission_recon", "event"),
+                                     subdiv=getattr(cfg, "ar_beat_subdiv", 4)),
+            "walk": WalkSpec(kappa_physical=cfg.kappa_physical,
                              tempo_mu=cfg.tempo_prior_mu,
                              tempo_sigma=cfg.tempo_prior_sigma,
-                             walk_sigma=cfg.walk_sigma),
-            "phase_init": cfg.phase_init,
-            "phi0_posterior": getattr(cfg, "phi0_posterior", False),
-            "posterior_reads_b": getattr(cfg, "posterior_reads_b", False)}
-
-
-def refuse_unsupported(cfg, variant: str, supported=()) -> None:
-    """Fail loudly if the config asks for a key this variant does not forward."""
-    for key, default in DEFAULTS_IF_UNSUPPORTED.items():
-        if key in supported:
-            continue
-        got = getattr(cfg, key, default)
-        assert got == default, (
-            f"variant {variant!r} does not forward {key}={got!r}; it would train "
-            f"{key}={default!r} and the result would be a null by construction")
-
-
-def build_model(cfg, input_dim: int) -> VBPM:
-    """The §7 model: encoder + fixed physical prior + latent-only emission."""
-    return VBPM(input_dim, **common_kwargs(cfg))
+                             walk_sigma=cfg.walk_sigma)}
 
 
 def optimizer(model, cfg):
@@ -58,8 +42,9 @@ def objective(out, beta: float, cfg):
 
 
 def on_epoch(model, cfg, epoch: int) -> None:
-    """Scheduled emission-sharpness floor, and the tempo posterior's annealed width."""
-    if cfg.emission_sharpness > 0 and model.emission_net is None:
+    """Scheduled emission-sharpness floor, where the emission has a gain to raise."""
+    if cfg.emission_sharpness > 0 and getattr(model, "emission_net", None) is None \
+            and hasattr(model, "emission_b_floor"):
         ramp = min(1.0, epoch / max(cfg.sharpness_warmup, 1))
         model.emission_b_floor.fill_(cfg.emission_sharpness * ramp)
 

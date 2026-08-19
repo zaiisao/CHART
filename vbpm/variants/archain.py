@@ -36,7 +36,7 @@ from torch import nn
 from .base import epoch_note as _base_note, on_epoch, optimizer  # noqa: F401
 from ..constants import KAPPA_Q_MIN, TWO_PI
 from ..nets import Encoder, inverse_softplus
-from ..specs import EmissionSpec, WalkSpec
+from ..specs import ChainSpec, EmissionSpec, RateSpec, TempoWalkSpec, WalkSpec
 from ..observation import class_recon
 from ..vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
@@ -53,25 +53,30 @@ def objective(out, beta: float, cfg):
     return out["recon"] - beta * out["kl"]
 
 
-class ARChainVBPM(nn.Module):
+class VBPM(nn.Module):
     """The tutorial's generative model with the note's Form 1 posterior."""
 
     wants_raw = False
     emission_net = None
 
     def __init__(self, input_dim: int, d_model: int = 128,
-                 rate_grid: int = 24, rate_lo: float = 0.020, rate_hi: float = 0.200,
                  emission: EmissionSpec | str = "triangle",
                  walk: WalkSpec | None = None,
-                 tempo_prior_mu: float = -2.6827, tempo_prior_sigma: float = 0.3903,
-                 rate_posterior: str = "categorical", encoder_pe: bool = False,
-                 delta_max: float = 3.1416, delta_rel: float = 0.0,
-                 phi0_grid: int = 0, phi0_anchor: bool = False,
-                 stride: int = 1, phase_kernel: str = "vonmises",
-                 tempo_walk: bool = False, tempo_kernel: str = "cauchy",
-                 walk_sigma: float = 0.00212, beat_subdiv: int = 4,
-                 rate_resid: float = 0.0):
+                 rate: RateSpec | None = None,
+                 chain: ChainSpec | None = None,
+                 tempo_walk: TempoWalkSpec | None = None,
+                 encoder_pe: bool = False):
         super().__init__()
+        rate = rate or RateSpec()
+        chain = chain or ChainSpec()
+        tempo_walk = tempo_walk or TempoWalkSpec()
+        rate_grid, rate_lo, rate_hi = rate.grid, rate.lo, rate.hi
+        rate_posterior, rate_resid = rate.posterior, rate.resid
+        stride, phase_kernel = chain.stride, chain.phase_kernel
+        delta_max, delta_rel = chain.delta_max, chain.delta_rel
+        phi0_anchor, phi0_grid = chain.phi0 == "anchor", chain.phi0_grid
+        tempo_kernel = tempo_walk.kernel
+        tempo_walk = tempo_walk.enabled
         emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
         self.emission_kind = emission.kind
@@ -82,7 +87,7 @@ class ARChainVBPM(nn.Module):
         # subdivision and meter is deliberately deferred as a latent until the
         # phase/tempo chassis is stable. It is a named config key so it can be
         # swept, and the moment meter returns it becomes the enumerated M.
-        self.beat_subdiv = int(beat_subdiv)
+        self.beat_subdiv = int(emission.subdiv)
         if self.recon_kind in ("class", "tied"):
             self.wants_raw = True
         if self.recon_kind == "tied":
@@ -99,7 +104,7 @@ class ARChainVBPM(nn.Module):
         self.phase_kernel = phase_kernel
         self.tempo_walk = bool(tempo_walk)
         self.tempo_kernel = tempo_kernel
-        self.walk_sigma = float(walk_sigma)
+        self.walk_sigma = float(self.walk.walk_sigma)
         self.rate_resid = float(rate_resid)
         assert not (self.rate_resid > 0.0 and rate_posterior != "categorical"), \
             "ar_rate_resid only acts on the categorical rate posterior"
@@ -108,8 +113,8 @@ class ARChainVBPM(nn.Module):
             self.rate_resid_head = nn.Linear(d_model, rate_grid)
             nn.init.zeros_(self.rate_resid_head.weight)
             nn.init.zeros_(self.rate_resid_head.bias)
-        self.tempo_prior_mu = float(tempo_prior_mu)
-        self.tempo_prior_sigma = float(tempo_prior_sigma)
+        self.tempo_prior_mu = float(self.walk.tempo_mu)
+        self.tempo_prior_sigma = float(self.walk.tempo_sigma)
         self.delta_max = float(delta_max)
         self.delta_rel = float(delta_rel)
         self.phi0_grid = int(phi0_grid)
@@ -182,7 +187,7 @@ class ARChainVBPM(nn.Module):
         rates = torch.exp(torch.linspace(math.log(rate_lo), math.log(rate_hi),
                                          rate_grid))
         self.register_buffer("rates", rates)
-        z = (torch.log(rates) - tempo_prior_mu) / tempo_prior_sigma
+        z = (torch.log(rates) - self.tempo_prior_mu) / self.tempo_prior_sigma
         lp = -0.5 * z ** 2
         self.register_buffer("rate_log_prior", lp - torch.logsumexp(lp, 0))
 
@@ -610,29 +615,22 @@ class ARChainVBPM(nn.Module):
         return torch.sigmoid(self.emission_logits(self.infer_phase(h, mask), mask))
 
 
-def build_model(cfg, input_dim: int) -> ARChainVBPM:
-    return ARChainVBPM(input_dim,
-                       rate_grid=cfg.chain_rate_grid,
-                       rate_lo=cfg.ar_rate_lo, rate_hi=cfg.ar_rate_hi,
-                       emission=EmissionSpec(kind=cfg.emission,
-                                             bump_kappa=cfg.emission_bump_kappa,
-                                             recon=getattr(cfg, "emission_recon",
-                                                           "event")),
-                       walk=WalkSpec(kappa_physical=cfg.kappa_physical),
-                       tempo_prior_mu=cfg.tempo_prior_mu,
-                       tempo_prior_sigma=cfg.tempo_prior_sigma,
-                       rate_posterior=cfg.rate_posterior,
-                       delta_max=cfg.ar_delta_max,
-                       delta_rel=cfg.ar_delta_rel,
-                       phi0_grid=cfg.ar_phi0_grid,
-                       rate_resid=cfg.ar_rate_resid,
-                       phi0_anchor=cfg.ar_phi0_anchor,
-                       stride=cfg.ar_stride,
-                       phase_kernel=cfg.ar_phase_kernel,
-                       tempo_walk=cfg.ar_tempo_walk,
-                       tempo_kernel=cfg.ar_tempo_kernel,
-                       walk_sigma=cfg.walk_sigma,
-                       beat_subdiv=cfg.ar_beat_subdiv)
+def build_model(cfg, input_dim: int) -> VBPM:
+    """One VBPM from a config: five specs, no loose floats."""
+    from .base import common_kwargs
+    return VBPM(input_dim,
+                rate=RateSpec(grid=cfg.chain_rate_grid, lo=cfg.ar_rate_lo,
+                              hi=cfg.ar_rate_hi, posterior=cfg.rate_posterior,
+                              resid=cfg.ar_rate_resid),
+                chain=ChainSpec(stride=cfg.ar_stride,
+                                phase_kernel=cfg.ar_phase_kernel,
+                                delta_max=cfg.ar_delta_max,
+                                delta_rel=cfg.ar_delta_rel,
+                                phi0="anchor" if cfg.ar_phi0_anchor else "amortized",
+                                phi0_grid=cfg.ar_phi0_grid),
+                tempo_walk=TempoWalkSpec(enabled=cfg.ar_tempo_walk,
+                                         kernel=cfg.ar_tempo_kernel),
+                **common_kwargs(cfg))
 
 
 def epoch_note(model, probe) -> str:

@@ -13,7 +13,7 @@ from .. import run as run_mod
 from ..config import load_config
 from ..data.dataset import load_catalog
 from ..data.excerpts import ExcerptDataset, collate_excerpts
-from ..model import downbeat_times
+from ..readout import downbeat_times
 from ..scoring.evaluation import continuity_scores, f_measure
 
 

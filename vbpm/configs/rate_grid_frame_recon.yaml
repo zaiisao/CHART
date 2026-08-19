@@ -1,8 +1,0 @@
-# rate_grid with the tutorial's own reconstruction term (eq 57, sum_k log Bernoulli)
-# in place of the run-level event likelihood. A/B against rate_grid.yaml (gtzan F 0.733).
-variant: rate_grid
-emission: triangle
-emission_recon: frame
-pos_weight: 1.0
-epochs: 60
-beta_warmup: 0

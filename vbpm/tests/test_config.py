@@ -8,7 +8,7 @@ import pytest
 from vbpm import config
 
 CONFIG_DIR = pathlib.Path(config.__file__).parent / "configs"
-DEFAULT_CONFIG = str(CONFIG_DIR / "tempo_init_clip.yaml")
+DEFAULT_CONFIG = str(CONFIG_DIR / "baseline.yaml")
 SHIPPED_CONFIGS = sorted(CONFIG_DIR.glob("*.yaml"))
 
 

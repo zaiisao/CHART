@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 
 from .constants import (KAPPA_PHYSICAL, TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA,
                         TEMPO_WALK_SIGMA)
@@ -18,6 +19,7 @@ class EmissionSpec:
     bump_kappa: float = 20.0
     recon: str = "event"
     harmonics: int = 6
+    subdiv: int = 4
 
     @classmethod
     def coerce(cls, value):
@@ -80,3 +82,46 @@ class DecoderSpec:
     def __post_init__(self):
         self.dim = int(self.dim)
         self.knot_stride = int(self.knot_stride)
+
+@dataclasses.dataclass
+class RateSpec:
+    """q(rate | x): the candidate set and how far a candidate may be trimmed.
+
+    The candidates are summed exactly, so this is enumeration over a small
+    discrete set rather than a discretisation of the tempo axis -- the
+    distinction the project's continuity rule turns on. `resid` lets each
+    candidate move continuously off its nominal value, which is also why the
+    prior must be priced at the shifted rate rather than at the nominal one.
+    """
+
+    grid: int = 24
+    lo: float = 0.020
+    hi: float = 0.200
+    posterior: str = "categorical"
+    resid: float = 0.0
+
+
+@dataclasses.dataclass
+class ChainSpec:
+    """The autoregressive phase chain: its step, its kernel, and its base case."""
+
+    stride: int = 1
+    phase_kernel: str = "vonmises"
+    delta_max: float = math.pi
+    delta_rel: float = 0.0
+    phi0: str = "amortized"          # amortized | anchor
+    phi0_grid: int = 0               # retired; an atomic q against a continuous prior
+
+
+@dataclasses.dataclass
+class TempoWalkSpec:
+    """Whether log-tempo moves within a window, and under which law.
+
+    Off by default: the corpus says tempo is mean-reverting rather than
+    diffusing (structure-function growth exponent 0.26 over six datasets), and
+    every driftless walk law measured so far pays a large bribe for standing
+    still. The scale comes from WalkSpec.walk_sigma.
+    """
+
+    enabled: bool = False
+    kernel: str = "cauchy"
