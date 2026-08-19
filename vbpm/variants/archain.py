@@ -37,12 +37,13 @@ from .base import epoch_note as _base_note, on_epoch, optimizer  # noqa: F401
 from ..constants import KAPPA_Q_MIN, TWO_PI
 from ..nets import Encoder, inverse_softplus
 from ..specs import EmissionSpec, WalkSpec
+from ..observation import class_recon
 from ..vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 
 DEFAULTS = {"chain_rate_grid": 24, "rate_posterior": "categorical",
             "ar_delta_max": 3.1416, "ar_delta_rel": 0.0, "ar_phi0_grid": 0,
-            "ar_phi0_anchor": False}
+            "ar_phi0_anchor": False, "ar_rate_resid": 0.0}
 
 
 def objective(out, beta: float, cfg):
@@ -62,14 +63,29 @@ class ARChainVBPM(nn.Module):
                  tempo_prior_mu: float = -2.6827, tempo_prior_sigma: float = 0.3903,
                  rate_posterior: str = "categorical", encoder_pe: bool = False,
                  delta_max: float = 3.1416, delta_rel: float = 0.0,
-                 phi0_grid: int = 0, phi0_anchor: bool = False):
+                 phi0_grid: int = 0, phi0_anchor: bool = False,
+                 rate_resid: float = 0.0):
         super().__init__()
         emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
         self.emission_kind = emission.kind
         self.bump_kappa = float(emission.bump_kappa)
+        self.recon_kind = emission.recon
+        self.harmonics = int(emission.harmonics)
+        if self.recon_kind == "class":
+            self.wants_raw = True
+            coef = torch.zeros(3, 2 * self.harmonics)
+            coef[2, 0] = 1.0
+            self.emission_coef = nn.Parameter(coef)
+            self.emission_bias = nn.Parameter(torch.tensor([0.0, -2.5, -3.6]))
         self.rate_posterior = rate_posterior
         self.phi0_anchor = bool(phi0_anchor)
+        self.rate_resid = float(rate_resid)
+        self.rate_resid_head = None
+        if self.rate_resid > 0.0 and rate_posterior == "categorical":
+            self.rate_resid_head = nn.Linear(d_model, rate_grid)
+            nn.init.zeros_(self.rate_resid_head.weight)
+            nn.init.zeros_(self.rate_resid_head.bias)
         self.tempo_prior_mu = float(tempo_prior_mu)
         self.tempo_prior_sigma = float(tempo_prior_sigma)
         self.delta_max = float(delta_max)
@@ -118,8 +134,9 @@ class ARChainVBPM(nn.Module):
                 self.rate_head.bias.copy_(torch.tensor(
                     [self.tempo_prior_mu, inverse_softplus(0.05)]))
 
-        self.emission_a = nn.Parameter(torch.tensor(-3.0))
-        self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
+        if self.recon_kind != "class":
+            self.emission_a = nn.Parameter(torch.tensor(-3.0))
+            self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
         rates = torch.exp(torch.linspace(math.log(rate_lo), math.log(rate_hi),
@@ -137,7 +154,25 @@ class ARChainVBPM(nn.Module):
     def deployed_net(self):
         return self.encoder
 
+    def class_logits(self, phi):
+        """[..., 3] logits over (non-beat, beat, downbeat) at the sampled phase.
+
+        The mainline's three-way emission verbatim: truncated Fourier series per
+        class, only the downbeat class seeded (first cosine), because phi = 0 is
+        the downbeat by the coordinate's definition and everything else is
+        learned. This is the vocabulary that prices a metrical level: under the
+        2x mode half the claimed downbeats sit on annotated beats and one shared
+        shape must split its mass -- ~log 2 per conflicted event.
+        """
+        j = torch.arange(1, self.harmonics + 1, device=phi.device, dtype=phi.dtype)
+        angle = phi[..., None] * j
+        basis = torch.cat([angle.cos(), angle.sin()], dim=-1)
+        return self.emission_bias + basis @ self.emission_coef.T
+
     def emission_logits(self, phi, mask=None):
+        if self.recon_kind == "class":
+            lp = torch.log_softmax(self.class_logits(phi), dim=-1)
+            return lp[..., 2] - torch.logsumexp(lp[..., :2], dim=-1)
         if self.emission_kind == "triangle":
             wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
             return self.emission_a + self.emission_b * (1.0 - 2.0 * wrapped.abs() / math.pi)
@@ -211,7 +246,13 @@ class ARChainVBPM(nn.Module):
             kappas.append(kq)
         return torch.stack(phis, 2), kls, torch.stack(kappas, 2)
 
-    def _recon(self, phi, mask, y, pos_weight):
+    def _recon(self, phi, mask, y, pos_weight, cls=None):
+        if self.recon_kind == "class":
+            C = phi.shape[1]
+            lp = torch.log_softmax(self.class_logits(phi), dim=-1)
+            picked = lp.gather(-1, cls[:, None, :, None].expand(-1, C, -1, -1)
+                               ).squeeze(-1)
+            return (picked * mask[:, None, :]).sum(-1)
         e = self.emission_logits(phi)
         ll = (pos_weight * y[:, None, :] * -nn.functional.softplus(-e)
               + (1.0 - y)[:, None, :] * -nn.functional.softplus(e))
@@ -226,28 +267,36 @@ class ARChainVBPM(nn.Module):
         B = feats.shape[0]
         R = self.rates.shape[0]
         rate_logits = self.rate_head(pooled)
+        base = self.rates[None, :].expand(B, -1)
+        if self.rate_resid_head is not None:
+            resid = self.rate_resid * torch.tanh(self.rate_resid_head(pooled))
+            base = base * torch.exp(resid)
         if self.phi0_anchor:
-            rates_c = self.rates[None, :].expand(B, -1)
-            phi0_c, kl0 = self._anchor_phi0(feats, mask, rates_c, sample)
-            return rates_c, phi0_c, self.rate_log_prior, rate_logits, kl0
+            phi0_c, kl0 = self._anchor_phi0(feats, mask, base, sample)
+            return base, phi0_c, self.rate_log_prior, rate_logits, kl0
         if self.phi0_grid > 0:
             N = self.phi0_grid
             p0_logits = self.phi0_grid_head(pooled)
             logits = (rate_logits[:, :, None] + p0_logits[:, None, :]).reshape(B, R * N)
             log_prior = (self.rate_log_prior[:, None].expand(R, N)
                          - math.log(N)).reshape(-1)
-            rates_c = self.rates[:, None].expand(R, N).reshape(-1)[None].expand(B, -1)
+            rates_c = base[:, :, None].expand(B, R, N).reshape(B, R * N)
             phi0_c = self.phi0_vals[None, :].expand(R, N).reshape(-1)[None].expand(B, -1)
             kl0 = feats.new_zeros(B)
         else:
             logits = rate_logits
             log_prior = self.rate_log_prior
-            rates_c = self.rates[None, :].expand(B, -1)
+            rates_c = base
             p0, kl0 = self._phi0_amortized(feats, sample)
             phi0_c = p0[:, None].expand(-1, rates_c.shape[1])
         return rates_c, phi0_c, log_prior, logits, kl0
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0,
+                raw=None):
+        cls = None
+        if self.recon_kind == "class":
+            assert raw is not None, "the three-way emission needs the batch's class targets"
+            cls = raw["cls"].to(h.device)
         feats = self.encoder.features(h, mask)
         pooled = self._pooled(feats, mask)
         B = feats.shape[0]
@@ -256,7 +305,7 @@ class ARChainVBPM(nn.Module):
             rates_c, phi0_c, log_prior, logits, kl0 = self._components(
                 feats, mask, pooled, sample=True)
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, phi0_c)
-            recon_c = self._recon(phi, mask, y, pos_weight)
+            recon_c = self._recon(phi, mask, y, pos_weight, cls)
             log_qc = torch.log_softmax(logits + log_prior[None], dim=-1)
             qc = log_qc.exp()
             kl_mix = (qc * (log_qc - log_prior[None])).sum(-1)
@@ -271,7 +320,7 @@ class ARChainVBPM(nn.Module):
             rates_c = torch.exp(log_r)[:, None]
             p0, kl0 = self._phi0_amortized(feats, sample=True)
             phi, kl_chain, kq = self._rollout(feats, mask, rates_c, p0[:, None])
-            recon = self._recon(phi, mask, y, pos_weight)[:, 0]
+            recon = self._recon(phi, mask, y, pos_weight, cls)[:, 0]
             kl_mix = (torch.log(torch.tensor(self.tempo_prior_sigma))
                       - torch.log(sigma)
                       + (sigma ** 2 + (mu_lr - self.tempo_prior_mu) ** 2)
@@ -319,7 +368,9 @@ def build_model(cfg, input_dim: int) -> ARChainVBPM:
     return ARChainVBPM(input_dim,
                        rate_grid=cfg.chain_rate_grid,
                        emission=EmissionSpec(kind=cfg.emission,
-                                             bump_kappa=cfg.emission_bump_kappa),
+                                             bump_kappa=cfg.emission_bump_kappa,
+                                             recon=getattr(cfg, "emission_recon",
+                                                           "event")),
                        walk=WalkSpec(kappa_physical=cfg.kappa_physical),
                        tempo_prior_mu=cfg.tempo_prior_mu,
                        tempo_prior_sigma=cfg.tempo_prior_sigma,
@@ -327,10 +378,13 @@ def build_model(cfg, input_dim: int) -> ARChainVBPM:
                        delta_max=cfg.ar_delta_max,
                        delta_rel=cfg.ar_delta_rel,
                        phi0_grid=cfg.ar_phi0_grid,
+                       rate_resid=cfg.ar_rate_resid,
                        phi0_anchor=cfg.ar_phi0_anchor)
 
 
 def epoch_note(model, probe) -> str:
+    if getattr(model, "wants_raw", False):
+        return ""
     out = model(probe["h"], probe["mask"], probe["y"])
     return (f"  rate {float(out['rate'].mean()):.4f}"
             f"  kl_mix {float(out['kl_mix']):.2f}  kl0 {float(out['kl0']):.2f}")
