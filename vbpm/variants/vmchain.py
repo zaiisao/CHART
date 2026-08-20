@@ -26,7 +26,6 @@ import math
 import torch
 import torch.nn as nn
 
-from .base import epoch_note, objective, optimizer  # noqa: F401
 from ..constants import TWO_PI
 from ..nets import Encoder
 from ..specs import WalkSpec
@@ -190,7 +189,6 @@ class VonMisesChain(nn.Module):
 
         self.emission_a = nn.Parameter(torch.tensor(-3.0))
         self.emission_b_raw = nn.Parameter(torch.tensor(1.0))
-        self.emission_net = None
         self.register_buffer("emission_b_floor", torch.tensor(0.0))
 
         rates = torch.exp(torch.linspace(math.log(tempo_lo), math.log(tempo_hi),
@@ -293,7 +291,7 @@ class VonMisesChain(nn.Module):
         path = torch.cat([wrapped[:, :1], wrapped[:, :1] + torch.cumsum(step, -1)], -1)
         return path, torch.sqrt(re ** 2 + im ** 2 + 1e-12)
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, pos_weight: float = 1.0):
         """One ELBO evaluation; the phase expectation is numerical quadrature."""
         mu_psi, kappa_psi = self.psi(h, mask)
         mu, kappa, logw, logZ = self.filter(mu_psi, kappa_psi, mask)

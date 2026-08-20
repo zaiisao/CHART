@@ -12,19 +12,11 @@ from .constants import (KAPPA_PHYSICAL, TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA,
 class EmissionSpec:
     """p(y_t | phi_t): which shape reads the latent, and how big it is."""
 
-    kind: str = "cosine"
+    kind: str = "band"
     layers: int = 2
     dim: int = 64
     positional: bool = False
     bump_kappa: float = 20.0
-    recon: str = "event"
-    harmonics: int = 6
-    subdiv: int = 4
-
-    @classmethod
-    def coerce(cls, value):
-        """Accept either a spec or the bare kind string the configs still pass."""
-        return value if isinstance(value, cls) else cls(kind=value)
 
 
 @dataclasses.dataclass
@@ -82,6 +74,7 @@ class DecoderSpec:
     def __post_init__(self):
         self.dim = int(self.dim)
         self.knot_stride = int(self.knot_stride)
+
 
 @dataclasses.dataclass
 class RateSpec:

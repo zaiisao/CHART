@@ -11,6 +11,7 @@ import torch
 
 from .. import run as run_mod
 from ..config import load_config
+from ..variants.base import emission_of
 from ..data.dataset import load_catalog
 from ..data.excerpts import ExcerptDataset, collate_excerpts
 from ..readout import downbeat_times
@@ -28,11 +29,8 @@ def parse_args():
     p.add_argument("--every", type=int, default=25)
     p.add_argument("--gpu", type=int, default=1, choices=(0, 1, 2, 3))
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--delta-on", type=int, default=None)
     p.add_argument("--grad-log", default="")
-    p.add_argument("--oracle-tempo", action="store_true")
     p.add_argument("--kl-only", action="store_true")
-    p.add_argument("--pin-tempo", action="store_true")
     p.add_argument("--pin-gain", action="store_true")
     p.add_argument("--lr-drop", type=int, default=0)
     p.add_argument("--lr-anneal", type=float, default=0.0)
@@ -64,6 +62,7 @@ def resolve_plot_path(args) -> str:
 
 
 def main() -> None:
+    """Fit ONE song and report what the trajectory does."""
     args = parse_args()
     args.plot = resolve_plot_path(args)
     cfg, hooks = load_config(args.config, args.set)
@@ -73,8 +72,6 @@ def main() -> None:
         "overfit_one freezes the frontend; frontend_lr_scale configs are not mirrored here"
     shipped_epochs = cfg.epochs
     cfg.epochs = args.epochs
-    if args.delta_on is not None:
-        cfg.delta_on = bool(args.delta_on)
     if hasattr(cfg, "dec_warmup") and args.epochs != shipped_epochs:
         cfg.dec_warmup = round(cfg.dec_warmup * args.epochs / shipped_epochs)
     device = torch.device(f"cuda:{args.gpu}")
@@ -119,30 +116,15 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
-    assert not (args.pin_gain and model.emission_net is not None), \
-        "--pin-gain pins the two-scalar gain; the transformer emission has none"
     assert not (args.pin_gain and getattr(model, "wants_raw", False)), \
         "--pin-gain pins the Bernoulli emission gain, which the interval recipe never reads"
 
     opt, clip_params = hooks.optimizer(model, cfg)
     if args.pin_gain:
         with torch.no_grad():
-            model.emission_b_raw.fill_(2.0)
-        model.emission_a.requires_grad_(False)
-        model.emission_b_raw.requires_grad_(False)
-    if args.oracle_tempo:
-        with torch.no_grad():
-            model.encoder.out.bias[2] = math.log(true_dotphi)
-    if args.pin_tempo:
-        raw_value = math.log(true_dotphi)
-        orig_channels = model.encoder.output_channels
-
-        def pinned_channels(trunk):
-            r = orig_channels(trunk)
-            r["tempo_log_mu"] = torch.full_like(r["tempo_log_mu"], raw_value)
-            return r
-        model.encoder.output_channels = pinned_channels
-
+            emission_of(model).b_raw.fill_(2.0)
+        emission_of(model).a.requires_grad_(False)
+        emission_of(model).b_raw.requires_grad_(False)
     # ONCE: the frontend is frozen, so its features never change. Recomputing them per
     # epoch is pure waste and drags 20M parameters into the graph. --thaw gives that up:
     # the features are then a function of parameters under training, so they move.
@@ -160,7 +142,9 @@ def main() -> None:
             acts = frontend._audio2frames.model.task_heads(h)
             act = torch.sigmoid(acts["downbeat"])
             period_est = float(estimate_bar_period(act, mask, fps)[0])
-            model.encoder.out.bias[2] = math.log(2.0 * math.pi / (period_est * fps))
+            assert hasattr(model, "init_rate_prior"), \
+                f"{cfg.variant} has no init_rate_prior: --acf-init cannot be honoured"
+            model.init_rate_prior(2.0 * math.pi / (period_est * fps))
         print(f"acf-init: bar period {period_est:.3f}s "
               f"(birth ratio {period_s / period_est:.2f})", flush=True)
     y = raw["y"].to(device)
@@ -177,12 +161,12 @@ def main() -> None:
             for g in opt.param_groups:
                 g["lr"] *= args.lr_anneal
         if args.pin_gain:
-            model.emission_a.data.fill_(2.2 - float(model.emission_b))
+            em = emission_of(model)
+            em.a.data.fill_(2.2 - float(em.b))
         if args.thaw > 0.0:
             h = frontend.forward_features(raw["input"])
         extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
-        out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
-                    **extra)
+        out = model(h, mask, y, pos_weight=cfg.pos_weight, **extra)
         if args.kl_only:
             loss = (out["kl"] / frames).mean()
         else:
@@ -192,8 +176,10 @@ def main() -> None:
         loss.backward()
 
         if args.grad_log:
-            groups = {"enc_out": "encoder.out", "zdec": "zdec",
-                      "delta_head": "delta_head", "enc_trunk": "encoder.blocks"}
+            groups = {"evidence": "posterior_model.evidence_head",
+                      "rate_head": "posterior_model.rate_head",
+                      "emission": "emission_model",
+                      "enc_trunk": "posterior_model.encoder.blocks"}
             norms = {}
             for tag, prefix in groups.items():
                 tot = 0.0
@@ -230,18 +216,6 @@ def main() -> None:
                          for w in wraps]) if len(wraps) else np.array([1e9])
         fsc = f_measure(wraps / fps, targets / fps)[0] if len(wraps) else 0.0
         cmlt, amlt = continuity_scores(targets / fps, wraps / fps)
-        off = ""
-        if hasattr(model, "zdec"):
-            saved = [q.detach().clone() for q in model.zdec.parameters()]
-            with torch.no_grad():
-                for q in model.zdec.parameters():
-                    q.zero_()
-                w_off = downbeat_times(model.infer_phase(h, mask), mask)[0].cpu().numpy()
-                for q, v in zip(model.zdec.parameters(), saved):
-                    q.copy_(v)
-            e_off = np.array([abs(w - targets[np.argmin(abs(targets - w))]) / fps * 1000.0
-                              for w in w_off]) if len(w_off) else np.array([1e9])
-            off = (f"  [zdec off {np.median(e_off):5.0f}ms {np.mean(e_off < 70.0):4.0%}]")
         inc = mu_t[0, 1:] - mu_t[0, :-1]
         step_ok = ((mask[0, 1:] > 0) & (mask[0, :-1] > 0)).to(inc.dtype)
         tempo = float((inc * step_ok).sum() / step_ok.sum().clamp(min=1.0))
@@ -250,6 +224,8 @@ def main() -> None:
         # generalisation to fail, so if this does not grow the anchor mechanism itself
         # is broken rather than merely untrained.
         res = f"  res {float(out['resultant'].mean()):5.3f}" if "resultant" in out else ""
+        bw = (f"  w {int(model.emission_model.band_w):3d}"
+              if hasattr(getattr(model, "emission_model", None), "band_w") else "")
         if True:
             phi_w = torch.atan2(torch.sin(mu_t[0]), torch.cos(mu_t[0]))
             prox = (1.0 - phi_w.abs() / math.pi).float().cpu().numpy()
@@ -257,11 +233,11 @@ def main() -> None:
 
         print(f"  ep {epoch:4d}  recon {float(out['recon'].mean()):9.2f}  "
               f"kl {float(out['kl'].mean()):9.2f}  "
-              f"b {'  n/a' if not hasattr(model, 'emission_b_raw') else f'{float(model.emission_b):5.2f}'}  "
+              f"b {float(emission_of(model).b):5.2f}  "
               f"tempo {tempo:.4f} (ratio {tempo / true_dotphi:5.2f})  "
               f"med|err| {np.median(errs):6.0f}ms  in-tol {np.mean(errs < 70.0):4.0%}"
               f"  F {fsc:.3f} CMLt {cmlt:.3f} AMLt {amlt:.3f}  n{len(wraps)}/{len(targets)}"
-              f"{res}{off}",
+              f"{bw}{res}",
               flush=True)
 
     if args.save:

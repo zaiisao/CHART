@@ -1,0 +1,97 @@
+"""VBPM: a downbeat chain whose tempo is fixed between downbeats."""
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+from . import base
+from ..nets import EmissionModel, PosteriorModel, PriorModel
+from ..specs import EmissionSpec, RateSpec, WalkSpec
+
+DEFAULTS = {"chain_rate_grid": 36, "ar_rate_lo": 0.012, "ar_rate_hi": 0.200}
+
+
+class VBPM(nn.Module):
+    """The tutorial's generative model with a bar-gated tempo chain posterior."""
+
+    def __init__(self, input_dim: int, d_model: int = 128,
+                 emission: EmissionSpec | None = None,
+                 walk: WalkSpec | None = None,
+                 rate: RateSpec | None = None,
+                 encoder_pe: bool = False):
+        super().__init__()
+
+        self.emission_spec = emission or EmissionSpec()
+        self.walk_spec = walk or WalkSpec()
+        self.rate_spec = rate or RateSpec()
+
+        self.emission_model = EmissionModel(self.emission_spec)
+        self.prior_model = PriorModel(self.rate_spec, self.walk_spec)
+        self.posterior_model = PosteriorModel(input_dim, d_model, self.prior_model,
+                                              encoder_pe=encoder_pe)
+
+    @property
+    def deployed_net(self):
+        """The network that runs at test time; it reads audio only."""
+        return self.posterior_model.encoder
+
+    @torch.no_grad()
+    def init_rate_prior(self, rate: float):
+        """Centre the prior's rate distribution on ``rate`` (used by --acf-init)."""
+        return self.prior_model.init_log_prior(rate, self.walk_spec.tempo_sigma)
+
+    def forward(self, h, mask, y, pos_weight: float = 1.0):
+        """The ELBO and the trajectory diagnostics for one batch."""
+        assert pos_weight == 1.0, \
+            "pos_weight != 1 is a weighted surrogate, not an ELBO; this model has no such term"
+
+        evidence, log_q_rate0, q_joint, log_z = self.posterior_model(
+            h, mask, self.prior_model)
+        q_phase = q_joint.sum(2)
+        q_rate = q_joint.sum(3)
+
+        emission_ll = self.emission_model.loglik(y, mask, self.prior_model.grid)
+        recon = torch.einsum("btn,btn->b", q_phase, emission_ll)
+        if self.emission_model.kind == "band" and self.training:
+            self.emission_model.accumulate(q_phase, y, mask)
+
+        expected_evidence = torch.einsum("btn,btn->b", q_phase, evidence) \
+            + torch.einsum("bc,bc->b", q_rate[:, 0], log_q_rate0)
+
+        kl = expected_evidence - log_z
+        elbo = recon - kl
+
+        phi, cos_sum, sin_sum = self.posterior_model.unwrap(q_phase, self.prior_model.grid)
+        resultant = (cos_sum ** 2 + sin_sum ** 2).sqrt().clamp(1e-6, 1 - 1e-6)
+        kappa = resultant * (2 - resultant ** 2) / (1 - resultant ** 2)
+
+        return {"elbo": elbo, "recon": recon, "kl": kl, "phi": phi, "kappa": kappa}
+
+    @torch.no_grad()
+    def infer_phase(self, h, mask=None):
+        """Label-free deployment: the potentials are functions of x only."""
+        assert not self.training
+        if mask is None:
+            mask = torch.ones(h.shape[:2], device=h.device, dtype=h.dtype)
+        _, _, q_joint, _ = self.posterior_model(h, mask, self.prior_model)
+        return self.posterior_model.unwrap(q_joint.sum(2), self.prior_model.grid)[0]
+
+    @torch.no_grad()
+    def emission_probs(self, h, mask=None):
+        """Per-frame downbeat probability at the inferred phase."""
+        return torch.sigmoid(self.emission_model(self.infer_phase(h, mask)))
+
+
+def on_epoch(model, cfg, epoch: int) -> None:
+    """Base's sharpness floor, plus the enumerated band-width M-step."""
+    base.on_epoch(model, cfg, epoch)
+    if model.emission_model.kind == "band" and epoch > 0:
+        model.emission_model.fit_width()
+
+
+def build_model(cfg, input_dim: int) -> VBPM:
+    """One VBPM from a config: two specs, no loose floats."""
+    rate_spec = RateSpec(grid=cfg.chain_rate_grid, lo=cfg.ar_rate_lo,
+                         hi=cfg.ar_rate_hi, posterior="categorical", resid=0.0)
+    vbpm = VBPM(input_dim, rate=rate_spec, **base.common_kwargs(cfg))
+    return vbpm

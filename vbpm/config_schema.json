@@ -6,14 +6,14 @@
   },
   "emission": {
     "type": "string",
-    "default": "cosine",
+    "default": "band",
     "enum": [
       "cosine",
       "triangle",
-      "bump",
-      "transformer"
+      "band",
+      "bump"
     ],
-    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the champion deviation; bump is the von Mises-shaped narrow peak whose width is emission_bump_kappa; transformer is the learned emission (seed lottery, see vbpm-family-verdict)."
+    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the prior default and the shape band is measured against; band is NeuralDBN 8.2's own rectangular beat window, whose integer width is fitted by the enumerated M-step of 8.4 rather than by gradient; bump is the von Mises-shaped narrow peak whose width is emission_bump_kappa."
   },
   "emission_layers": {
     "type": "integer",
@@ -31,17 +31,6 @@
     "default": 20.0,
     "minimum": 0.001,
     "description": "bump emission only: concentration of the peak. The bump is exp(kappa (cos phi - 1)), so its half-width is about sqrt(2/kappa) radians of bar phase."
-  },
-  "emission_recon": {
-    "type": "string",
-    "default": "event",
-    "enum": [
-      "event",
-      "frame",
-      "class",
-      "tied"
-    ],
-    "description": "the reconstruction term. frame is the tutorial's own eq (57), sum_k log Bernoulli(y_k; pi_k); event is the run-level 'at least one frame in the widened run fired' likelihood, which saturates once any frame of the +-3-frame target has mass and loses restoring gradient past ~300 ms of displacement. class is the tutorial's three-way p(b | phi) over (non-beat, beat, downbeat), which needs the loader's cls target. tied is the frozen pair: the downbeat triangle plus the SAME triangle read at the subdivided phase, two gains learnable and no shape freedom, so a metrical level cannot be reshaped away the way the free class Fourier coefficients were (measured training-free: 145.9 vs 30.5 nats of phase information over ten windows)."
   },
   "target_tol_frames": {
     "type": "integer",
@@ -93,12 +82,6 @@
     "default": 5.0,
     "minimum": 0.0,
     "description": "gradient-norm clip over the params the variant's optimizer hook hands back."
-  },
-  "samples": {
-    "type": "integer",
-    "default": 1,
-    "minimum": 1,
-    "description": "posterior samples per window in the reconstruction term."
   },
   "pos_weight": {
     "type": "number",

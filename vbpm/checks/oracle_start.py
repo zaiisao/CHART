@@ -110,7 +110,7 @@ def main():
     frames = mask.sum(1).clamp(min=1.0)
     for epoch in range(args.epochs):
         hooks.on_epoch(model, cfg, epoch)
-        out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight)
+        out = model(h, mask, y, pos_weight=cfg.pos_weight)
         loss = -(hooks.objective(out, 1.0, cfg) / frames).mean()
         opt.zero_grad()
         loss.backward()

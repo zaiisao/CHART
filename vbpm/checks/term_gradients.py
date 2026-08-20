@@ -76,8 +76,11 @@ def parameter_forces(out, model):
     assembles them), so these norms say which term is writing the step, not merely which
     term is large in value.
     """
-    channels = ("phase_log_kappa", "tempo_log_mu", "tempo_sigma_logit",
-                "phase_mu_offset", "rotation_weight_logit")
+    # Per-head channels used to be broken out from encoder.out; that five-channel
+    # amortized head was deleted with the rest of the regression posterior, so the
+    # breakdown is now by the heads the variants actually own.
+    heads = ("posterior_model.evidence_head", "posterior_model.rate_head",
+             "emission_model")
     rows = {}
     for name in OBJECTIVE_TERMS:
         value = out.get(name)
@@ -87,10 +90,16 @@ def parameter_forces(out, model):
         grads = torch.autograd.grad(value.mean(), params,
                                     retain_graph=True, allow_unused=True)
         total = math.sqrt(sum(float((g ** 2).sum()) for g in grads if g is not None))
-        head = torch.autograd.grad(value.mean(), model.encoder.out.weight,
-                                   retain_graph=True, allow_unused=True)[0]
-        per_channel = ({c: float(head[i].norm()) for i, c in enumerate(channels)}
-                       if head is not None else {})
+        per_channel = {}
+        for tag in heads:
+            sel = [q for n, q in model.named_parameters()
+                   if n.startswith(tag) and q.requires_grad]
+            if not sel:
+                continue
+            g = torch.autograd.grad(value.mean(), sel,
+                                    retain_graph=True, allow_unused=True)
+            per_channel[tag] = math.sqrt(
+                sum(float((q ** 2).sum()) for q in g if q is not None))
         rows[name] = (total, per_channel)
     return rows
 
@@ -133,7 +142,7 @@ def main():
     for epoch in range(args.epochs + 1):
         hooks.on_epoch(model, cfg, epoch)
         extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
-        out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight, **extra)
+        out = model(h, mask, y, pos_weight=cfg.pos_weight, **extra)
         if epoch % args.every == 0:
             phi = out["phi"].detach().requires_grad_(True)
             forces = term_forces(model, phi, raw, mask, device, y, cfg.pos_weight)

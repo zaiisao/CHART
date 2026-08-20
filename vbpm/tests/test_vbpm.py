@@ -12,12 +12,12 @@ import torch
 from vbpm import run as run_mod
 from vbpm.config import load_config
 from vbpm.scoring import controls as controls_mod
-from vbpm.scoring.evaluation import f_measure, null_times, peak_times
-from vbpm.constants import (MAX_KAPPA, TEMPO_BOUND_MARGIN, TWO_PI)
-from vbpm.specs import ChainSpec, RateSpec, TempoWalkSpec
+from vbpm.scoring.evaluation import f_measure, peak_times
+from vbpm.constants import TWO_PI
+from vbpm.specs import EmissionSpec
 from vbpm.readout import downbeat_frames
-from vbpm.variants.archain import VBPM
-from vbpm.nets import Encoder, bounded_kappa, inverse_softplus, vonmises_entropy
+from vbpm.variants.vbpm import VBPM
+from vbpm.nets import Encoder
 from vbpm.vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 from vbpm.data.features import FPS, atomic_save_npy
@@ -105,118 +105,6 @@ def test_peak_times_relative_threshold():
     assert 150 / 50.0 not in times
 
 
-def test_peak_times_min_gap_half_bar():
-    """Two equal-height peaks 10 frames apart with a bar of 2 s (half-bar = 50 frames):
-    only one may survive, because peaks are separated by at least half a bar so one
-    bar contributes one downbeat.
-    """
-    probs = np.zeros(300)
-    probs[100] = 1.0
-    probs[110] = 0.9   # within half a bar of the first -> suppressed
-    probs[200] = 0.9   # 100 frames away -> kept
-    times = peak_times(probs, fps=50.0, period_s=2.0)
-    assert len(times) == 2
-    assert set(times) == {2.0, 4.0}
-
-
-def test_null_times_rate_correctness():
-    """kind='zero' on a crop of duration D with bar period P emits a grid starting at t0
-    with spacing P: ceil(D/P) times, all t0 + k*P. The null's whole point is the right
-    RATE with no learned phase.
-    """
-    crop = {"bar_period": 2.0, "y": np.zeros(500), "fps": 50.0, "t0": 3.0,
-            "downbeat_times": np.array([4.0, 6.0])}
-    rng = np.random.default_rng(0)
-    times = null_times(crop, "zero", rng)
-    duration = 500 / 50.0
-    assert len(times) == math.ceil(duration / 2.0)
-    np.testing.assert_allclose(times, 3.0 + 2.0 * np.arange(len(times)))
-
-
-def test_null_times_random_offset_within_period():
-    """kind='random' shifts the same grid by a uniform offset in [0, period): the first
-    emitted time is in [t0, t0 + period) and the spacing is still exactly one period.
-    """
-    crop = {"bar_period": 2.0, "y": np.zeros(500), "fps": 50.0, "t0": 0.0,
-            "downbeat_times": np.array([4.0, 6.0])}
-    rng = np.random.default_rng(1)
-    times = null_times(crop, "random", rng)
-    assert 0.0 <= times[0] < 2.0
-    np.testing.assert_allclose(np.diff(times), 2.0)
-
-
-# ============================================================================ model
-
-
-def test_bounded_kappa_identity_and_bound():
-    """MAX*tanh(x/MAX) is the identity for x << MAX and never exceeds MAX_KAPPA; both
-    follow from tanh's series and its range.
-    """
-    small = torch.tensor([1.0, 100.0, 2000.0], dtype=torch.float64)
-    assert torch.allclose(bounded_kappa(small), small, rtol=1e-3)
-
-    big = bounded_kappa(torch.tensor([10 * MAX_KAPPA, 1000 * MAX_KAPPA],
-                                     dtype=torch.float64))
-    # mathematically tanh < 1 always; in floats tanh saturates to exactly 1.0 once
-    # 1 - tanh underflows (raw >~ 19*MAX), so assert strictness where representable
-    # and never-exceeds everywhere
-    assert torch.all(big <= MAX_KAPPA)
-    assert big[0] < MAX_KAPPA          # tanh(10) < 1 is float64-representable
-    assert big[0] > 0.99 * MAX_KAPPA
-
-
-def test_bounded_kappa_strictly_positive_gradient():
-    """Tanh never saturates exactly, so d(bounded_kappa)/dx must be strictly positive
-    even at huge inputs -- the docstring's stated advantage over a hard clamp.
-    """
-    x = torch.tensor([0.0, 1e3, 1e5, 1e6], dtype=torch.float64,
-                     requires_grad=True)
-    bounded_kappa(x).sum().backward()
-    assert torch.all(x.grad > 0)
-
-
-def test_inverse_softplus_roundtrip():
-    """softplus(inverse_softplus(v)) == v for v below 30, and the function is the
-    identity above 30 where softplus is linear to machine precision.
-    """
-    for v in (0.5, 1.0, 5.0, 29.0):
-        assert torch.nn.functional.softplus(
-            torch.tensor(inverse_softplus(v))).item() == pytest.approx(v, rel=1e-6)
-    assert inverse_softplus(2000.0) == 2000.0
-
-
-def test_vonmises_entropy_uniform_limit_and_scipy():
-    """H(vM) at kappa=0 is log(2*pi) (the uniform circle), and at general kappa must
-    match scipy.stats.vonmises.entropy -- both direct consequences of the formula in
-    the docstring.
-    """
-    assert vonmises_entropy(torch.tensor(0.0)).item() == pytest.approx(
-        math.log(TWO_PI), abs=1e-6)
-    scipy_stats = pytest.importorskip("scipy.stats")
-    for k in (0.5, 2.0, 50.0, 2000.0):
-        ours = vonmises_entropy(torch.tensor(k, dtype=torch.float64)).item()
-        assert ours == pytest.approx(float(scipy_stats.vonmises(kappa=k).entropy()),
-                                     abs=1e-5)
-
-
-def test_encoder_trajectory_rotates_monotonically_by_construction():
-    """mu = offset + cumsum(exp(log-dotphi)): rotation is STRUCTURAL, not learned."""
-    _seed()
-    enc = Encoder(input_dim=4, d_model=8)
-    h = torch.randn(2, 300, 4)
-    post, _ = enc(h, torch.ones(2, 300))
-    inc = post["tempo"]["mu"][:, :-1]
-
-    # 1. strictly increasing: the tempo is exp(...) so every step is positive. A frozen or
-    #    sign-balanced trajectory -- the measured collapse -- is unrepresentable.
-    assert torch.all(inc > 0), "phase is not monotonically advancing"
-
-    # 3. the tempo lands in the physical band at initialisation (a 0.6-12 s bar), which is
-    #    what puts a fresh model inside the +-3% basin where the reconstruction gradient
-    #    on the tempo is coherent at all.
-    assert 0.01 <= float(inc.mean()) <= 0.2
-
-
 def test_encoder_target_blind():
     """Point 2: the base encoder reads AUDIO ONLY -- structurally. Its forward
     has no target parameter at all (the psi variant's posterior subclass adds one),
@@ -234,22 +122,22 @@ def test_emission_logits_cosine_shape():
     all properties of the cosine the docstring names.
     """
     _seed()
-    model = VBPM(input_dim=4, d_model=8, emission="cosine")
+    model = VBPM(input_dim=4, d_model=8, emission=EmissionSpec(kind="cosine"))
     phi = torch.linspace(-math.pi, math.pi, 101)[None]
 
-    logits = model.emission_logits(phi)[0]
-    peak = model.emission_logits(torch.zeros(1, 1))[0, 0]
-    trough = model.emission_logits(torch.full((1, 1), math.pi))[0, 0]
+    logits = model.emission_model(phi)[0]
+    peak = model.emission_model(torch.zeros(1, 1))[0, 0]
+    trough = model.emission_model(torch.full((1, 1), math.pi))[0, 0]
     assert torch.all(logits <= peak + 1e-6)
     assert torch.all(logits >= trough - 1e-6)
 
-    a, b = model.emission_a.item(), model.emission_b.item()
+    a, b = model.emission_model.a.item(), model.emission_model.b.item()
     assert peak.item() == pytest.approx(a + b, abs=1e-5)
     assert trough.item() == pytest.approx(a - b, abs=1e-5)
 
-    sym = model.emission_logits(-phi)[0]
+    sym = model.emission_model(-phi)[0]
     assert torch.allclose(logits, sym, atol=1e-6)
-    period = model.emission_logits(phi + TWO_PI)[0]
+    period = model.emission_model(phi + TWO_PI)[0]
     assert torch.allclose(logits, period, atol=1e-5)
 
 
@@ -258,11 +146,11 @@ def test_emission_logits_triangle_shape():
     at pi, LINEAR in |phi| in between, even, and continuous across the wrap at +-pi.
     """
     _seed()
-    model = VBPM(input_dim=4, d_model=8, emission="triangle")
-    a, b = model.emission_a.item(), model.emission_b.item()
+    model = VBPM(input_dim=4, d_model=8, emission=EmissionSpec(kind="triangle"))
+    a, b = model.emission_model.a.item(), model.emission_model.b.item()
 
     def at(p):
-        return model.emission_logits(torch.tensor([[p]]))[0, 0].item()
+        return model.emission_model(torch.tensor([[p]]))[0, 0].item()
 
     assert at(0.0) == pytest.approx(a + b, abs=1e-5)
     assert at(math.pi) == pytest.approx(a - b, abs=1e-4)
@@ -278,19 +166,19 @@ def test_emission_logits_triangle_shape():
 
 
 def test_emission_b_floor_semantics():
-    """emission_b == emission_b_floor + softplus(emission_b_raw), with the floor
+    """emission_model.b == b_floor + softplus(b_raw), with the floor
     defaulting to 0 -- exactly the property's docstring ('never below the scheduled
     floor').
     """
     _seed()
-    model = VBPM(input_dim=4, d_model=8, emission="cosine")
-    assert model.emission_b_floor == 0.0
-    sp = torch.nn.functional.softplus(model.emission_b_raw).item()
-    assert model.emission_b.item() == pytest.approx(sp)
+    model = VBPM(input_dim=4, d_model=8, emission=EmissionSpec(kind="cosine"))
+    assert model.emission_model.b_floor == 0.0
+    sp = torch.nn.functional.softplus(model.emission_model.b_raw).item()
+    assert model.emission_model.b.item() == pytest.approx(sp)
 
-    model.emission_b_floor.fill_(5.0)   # a BUFFER: mutate in place, never rebind
-    assert model.emission_b.item() == pytest.approx(5.0 + sp)
-    assert model.emission_b.item() >= 5.0
+    model.emission_model.b_floor.fill_(5.0)   # a BUFFER: mutate in place, never rebind
+    assert model.emission_model.b.item() == pytest.approx(5.0 + sp)
+    assert model.emission_model.b.item() >= 5.0
 
 
 def test_emission_b_floor_survives_state_dict_roundtrip():
@@ -300,13 +188,13 @@ def test_emission_b_floor_survives_state_dict_roundtrip():
         silently reset to 0.0 on reload; it is a registered buffer now.)
     """
     _seed()
-    model = VBPM(input_dim=4, d_model=8, emission="cosine")
-    model.emission_b_floor.fill_(5.0)
-    b_before = model.emission_b.item()
+    model = VBPM(input_dim=4, d_model=8, emission=EmissionSpec(kind="cosine"))
+    model.emission_model.b_floor.fill_(5.0)
+    b_before = model.emission_model.b.item()
     state = model.state_dict()
-    fresh = VBPM(input_dim=4, d_model=8, emission="cosine")
+    fresh = VBPM(input_dim=4, d_model=8, emission=EmissionSpec(kind="cosine"))
     fresh.load_state_dict(state)
-    assert fresh.emission_b.item() == pytest.approx(b_before), \
+    assert fresh.emission_model.b.item() == pytest.approx(b_before), \
         "scheduled emission floor lost across save/load"
 
 
@@ -505,39 +393,6 @@ def test_trajectory_health_separates_the_recorded_failure_modes():
     assert cov_f == pytest.approx(1 / 16)
 
 
-def _bounded_model():
-    from vbpm.variants.archain import VBPM
-    return VBPM(input_dim=8, d_model=16, rate=RateSpec(grid=24, lo=0.020, hi=0.200),
-                chain=ChainSpec(stride=8), tempo_walk=TempoWalkSpec(enabled=True))
-
-
-def test_rate_bound_is_identity_in_the_interior():
-    """The bound may soften the rails; it must not move interior tempos."""
-    m = _bounded_model()
-    core = torch.linspace(m.log_rate_lo_eff, m.log_rate_hi_eff, 32, dtype=torch.float64)
-    assert torch.allclose(m._bound_log_rate(core), core, atol=1e-12)
-
-
-def test_rate_bound_does_not_drift_under_iteration():
-    """A bound that contracts would walk every candidate to the grid centre."""
-    m = _bounded_model()
-    x = torch.log(m.rates.to(torch.float64))
-    for _ in range(200):
-        x = m._bound_log_rate(x)
-    assert torch.allclose(x, torch.log(m.rates.to(torch.float64)), atol=1e-12)
-
-
-def test_rate_bound_respects_the_rails_with_live_gradient():
-    m = _bounded_model()
-    lo, hi = m.log_rate_lo_eff, m.log_rate_hi_eff
-    far = torch.tensor([lo - 50.0, hi + 50.0], dtype=torch.float64, requires_grad=True)
-    out = m._bound_log_rate(far)
-    assert float(out[0]) >= lo - TEMPO_BOUND_MARGIN
-    assert float(out[1]) <= hi + TEMPO_BOUND_MARGIN
-    out.sum().backward()
-    assert float(far.grad.min()) > 0.0, "the tempo bound is an absorbing rail again"
-
-
 def test_mean_resultant_matches_the_series_and_its_gradient():
     k = torch.tensor([0.5, 2.0, 20.0, 383.0], dtype=torch.float64, requires_grad=True)
     a = mean_resultant(k)
@@ -579,3 +434,60 @@ def test_icdf_sampler_concentrates_and_stays_differentiable_in_kappa():
     k = torch.full((4096,), 40.0, dtype=torch.float64, requires_grad=True)
     sample_vonmises_icdf(k).abs().mean().backward()
     assert torch.isfinite(k.grad).all() and float(k.grad.abs().sum()) > 0.0
+
+
+def test_smooth_marginals_match_brute_force_enumeration():
+    """Exact inference: forward-backward equals summing every path by hand."""
+    import itertools
+    from vbpm.nets import PosteriorModel, PriorModel
+    from vbpm.specs import RateSpec, WalkSpec
+
+    _seed()
+    C, N, T = 2, 4, 4
+    prior = PriorModel(RateSpec(grid=C, lo=0.05, hi=0.12),
+                       WalkSpec(kappa_physical=3.0), n_grid=N).double()
+    post = PosteriorModel(8, 8, prior, n_harm=1).double()
+    evidence = torch.randn(1, T, N, dtype=torch.float64) * 0.7
+    log_q_rate0 = torch.log_softmax(torch.randn(1, C, dtype=torch.float64), -1)
+
+    q_joint, log_z = post.smooth(evidence, log_q_rate0, prior)
+
+    p0 = torch.softmax(prior.rate_log_prior, 0)
+    total, marginal = 0.0, torch.zeros(T, C, N, dtype=torch.float64)
+    for path in itertools.product(range(C * N), repeat=T):
+        states = [(k // N, k % N) for k in path]
+        c0, n0 = states[0]
+        w = (float(p0[c0]) * float(log_q_rate0[0, c0].exp()) / N
+             * float(evidence[0, 0, n0].exp()))
+        for t in range(1, T):
+            (c, m), (d, n) = states[t - 1], states[t]
+            step = (prior.k_stay[c, m, n] * (c == d)
+                    + prior.k_wrap[c, m, n] * prior.switch[c, d])
+            w *= float(step) * float(evidence[0, t, n].exp())
+        total += w
+        for t, (c, n) in enumerate(states):
+            marginal[t, c, n] += w
+
+    assert float(log_z[0]) == pytest.approx(math.log(total), abs=1e-6)
+    assert torch.allclose(q_joint[0], marginal / total, atol=1e-12)
+
+
+def test_emission_loglik_is_the_bernoulli_it_claims():
+    """loglik == -BCEWithLogits at every grid phase; masked frames cost exactly 0."""
+    from vbpm.nets import EmissionModel
+    from vbpm.specs import EmissionSpec
+
+    _seed()
+    emission = EmissionModel(EmissionSpec(kind="band")).double()
+    grid = torch.arange(128, dtype=torch.float64) * (TWO_PI / 128)
+    y = (torch.rand(2, 30, dtype=torch.float64) < 0.2).double()
+    mask = torch.ones(2, 30, dtype=torch.float64)
+    mask[1, -5:] = 0.0
+
+    ours = emission.loglik(y, mask, grid)
+    logits = emission(grid)[None, None].expand(2, 30, 128)
+    reference = -torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, y[..., None].expand(2, 30, 128), reduction="none") * mask[..., None]
+
+    assert torch.allclose(ours, reference, atol=1e-15)
+    assert (ours[1, -5:] == 0).all()

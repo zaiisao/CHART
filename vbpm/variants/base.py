@@ -13,17 +13,33 @@ import torch
 from ..specs import EmissionSpec, WalkSpec
 
 
-COMMON_KEYS = ("emission", "emission_layers", "emission_positional", "emission_recon",
-               "kappa_physical")
+class _InlineEmission:
+    """Adapter for the variants that still keep a, b_raw and b_floor flat.
+
+    Delete this, and emission_of(), once schain/tchain/vmchain hold an
+    nets.EmissionModel of their own; every caller below already speaks that shape.
+    """
+
+    def __init__(self, model):
+        self._m = model
+
+    a = property(lambda self: self._m.emission_a)
+    b_raw = property(lambda self: self._m.emission_b_raw)
+    b = property(lambda self: self._m.emission_b)
+    b_floor = property(lambda self: getattr(self._m, "emission_b_floor", None))
+
+
+def emission_of(model):
+    """The object owning the emission: the submodule where the variant has one."""
+    em = getattr(model, "emission_model", None)
+    return em if isinstance(em, torch.nn.Module) else _InlineEmission(model)
 
 
 def common_kwargs(cfg) -> dict:
     """The spec objects every variant is built with."""
     return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
                                      positional=cfg.emission_positional,
-                                     bump_kappa=cfg.emission_bump_kappa,
-                                     recon=getattr(cfg, "emission_recon", "event"),
-                                     subdiv=getattr(cfg, "ar_beat_subdiv", 4)),
+                                     bump_kappa=cfg.emission_bump_kappa),
             "walk": WalkSpec(kappa_physical=cfg.kappa_physical,
                              tempo_mu=cfg.tempo_prior_mu,
                              tempo_sigma=cfg.tempo_prior_sigma,
@@ -43,12 +59,9 @@ def objective(out, beta: float, cfg):
 
 def on_epoch(model, cfg, epoch: int) -> None:
     """Scheduled emission-sharpness floor, where the emission has a gain to raise."""
-    if cfg.emission_sharpness > 0 and getattr(model, "emission_net", None) is None \
-            and hasattr(model, "emission_b_floor"):
+    if cfg.emission_sharpness <= 0:
+        return
+    floor = emission_of(model).b_floor
+    if floor is not None:
         ramp = min(1.0, epoch / max(cfg.sharpness_warmup, 1))
-        model.emission_b_floor.fill_(cfg.emission_sharpness * ramp)
-
-
-def epoch_note(model, probe) -> str:
-    """Extra per-epoch log fields; the base recipe has none beyond run.py's."""
-    return ""
+        floor.fill_(cfg.emission_sharpness * ramp)

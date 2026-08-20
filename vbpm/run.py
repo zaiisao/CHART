@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from .config import load_config
+from .variants import base as hooks_base
 from .scoring.evaluation import (evaluate, print_table, scoring_records,
                                  trajectory_health)
 from .data.dataset import split_songs
@@ -43,8 +44,6 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
     is known to be monotone.
     """
     torch.manual_seed(seed)
-    assert cfg.samples == 1, \
-        "no surviving model averages over posterior samples; samples > 1 is a no-op"
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
 
     loader = torch.utils.data.DataLoader(
@@ -59,8 +58,6 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
         fe = list(frontend._audio2frames.model.parameters())
         opt.add_param_group({"params": fe, "lr": cfg.lr * cfg.frontend_lr_scale})
 
-    probe_raw = collate_excerpts([dataset[i] for i in
-                                  range(min(cfg.batch_size, len(dataset)))])
     best = {"score": -float("inf"), "epoch": -1, "state": None}
 
     for epoch in range(cfg.epochs):
@@ -80,8 +77,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
             y = raw["y"].to(device, non_blocking=True)
 
             extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
-            out = model(h, mask, y, samples=cfg.samples, pos_weight=cfg.pos_weight,
-                        **extra)
+            out = model(h, mask, y, pos_weight=cfg.pos_weight, **extra)
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.
             # clamp: a backstop item (fully-masked window) must cost 0, not produce nan.
@@ -135,18 +131,9 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
             print(f"            select[{select}] {score:.4f}  "
                   f"best {best['score']:.4f} @ epoch {best['epoch']}", flush=True)
 
-        b_note = ("" if getattr(model, "emission_net", None) is not None
-                  or not hasattr(model, "emission_b_raw")
-                  else f"  b {float(model.emission_b):5.2f}")
+        gain = getattr(hooks_base.emission_of(model), "b", None)
+        b_note = "" if gain is None else f"  b {float(gain):5.2f}"
         adv, kap, perr, cov = health / steps
-        # The variant's own diagnostic, on the frozen probe. no_grad covers the frontend
-        # forward too, which is NOT redundant once frontend_lr_scale > 0 -- without it the
-        # probe would build a graph over 20M thawed parameters purely to print a number.
-        with torch.no_grad():
-            note = hooks.epoch_note(model, {
-                "h": frontend.forward_features(probe_raw["input"]),
-                "mask": probe_raw["mask"].to(device),
-                "y": probe_raw["y"].to(device)})
         res, kloff = anchor / steps
         a_note = "" if anchor[0] == 0.0 else f"  res {res:5.3f}  kl_off {kloff:6.2f}"
         print(f"  epoch {epoch:2d}  beta {beta:5.3f}  elbo {totals[0] / steps:9.2f}  "
@@ -154,8 +141,7 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
               f"            advance {adv:7.4f} (true p10-p90 0.042-0.102, med 0.064)  "
               f"kappa {kap:9.1f}  "
               f"phase_err {perr:5.3f} (chance 1.571)  circle {cov:5.1%}  "
-              f"|g| {gnorm / steps:8.2f}{a_note}"
-              f"{note}",
+              f"|g| {gnorm / steps:8.2f}{a_note}",
               flush=True)
 
     if best["state"] is not None:

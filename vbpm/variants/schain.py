@@ -26,7 +26,6 @@ import math
 import torch
 from torch import nn
 
-from .base import epoch_note, objective, on_epoch, optimizer  # noqa: F401
 from ..constants import TWO_PI
 from ..nets import Encoder
 from ..specs import EmissionSpec, WalkSpec
@@ -40,25 +39,22 @@ class ChainVBPM(nn.Module):
     """The tutorial's generative model with a chain-structured posterior."""
 
     wants_raw = False
-    emission_net = None
 
     def __init__(self, input_dim: int, d_model: int = 128, bins: int = 96,
                  rate_grid: int = 24, rate_lo: float = 0.020, rate_hi: float = 0.200,
-                 emission: EmissionSpec | str = "triangle",
+                 emission: EmissionSpec | None = None,
                  walk: WalkSpec | None = None,
                  tempo_prior_mu: float = -2.6827, tempo_prior_sigma: float = 0.3903,
                  posterior: str = "chain", encoder_pe: bool = False):
         super().__init__()
-        emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
         self.bins = int(bins)
         self.posterior = posterior
+        emission = emission or EmissionSpec(kind="triangle")
         self.emission_kind = emission.kind
         self.bump_kappa = float(emission.bump_kappa)
 
-        self.encoder = Encoder(input_dim, d_model,
-                               kappa_physical=self.walk.kappa_physical,
-                               use_pe=encoder_pe)
+        self.encoder = Encoder(input_dim, d_model, use_pe=encoder_pe)
         self.psi_head = nn.Linear(d_model, self.bins)
         nn.init.zeros_(self.psi_head.weight)
         nn.init.zeros_(self.psi_head.bias)
@@ -162,7 +158,7 @@ class ChainVBPM(nn.Module):
         path = torch.cat([wrapped[:, :1], wrapped[:, :1] + torch.cumsum(step, -1)], -1)
         return path, torch.sqrt(re ** 2 + im ** 2 + 1e-12)
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, pos_weight: float = 1.0):
         """One ELBO evaluation: exact expectations under the structured posterior."""
         log_psi, log_T, log_g, logZ = self.posterior_marginals(h, mask)
         gamma = log_g.exp()

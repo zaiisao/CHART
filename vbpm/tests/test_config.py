@@ -29,8 +29,8 @@ def test_shipped_config_loads(path):
     """Every recipe in configs/ validates and names a real hooks module."""
     cfg, hooks = config.load_config(str(path), [])
     assert hooks.__name__ == f"vbpm.variants.{cfg.variant}"
-    for hook in ("build_model", "optimizer", "objective", "on_epoch", "epoch_note"):
-        assert hasattr(hooks, hook), f"{cfg.variant} is missing the {hook} hook"
+    for hook in config.HOOKS:
+        assert callable(getattr(hooks, hook)), f"{cfg.variant}'s {hook} hook is not callable"
 
 
 def test_overrides_apply_and_normalise_dashes():

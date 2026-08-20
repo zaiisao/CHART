@@ -30,7 +30,6 @@ import math
 import torch
 from torch import nn
 
-from .base import epoch_note, objective, on_epoch, optimizer  # noqa: F401
 from ..constants import TWO_PI
 from ..nets import Encoder
 from ..specs import EmissionSpec, WalkSpec
@@ -110,7 +109,6 @@ class TempoChainVBPM(nn.Module):
     """The tutorial's generative model with (phase, tempo) as the chain state."""
 
     wants_raw = False
-    emission_net = None
 
     def __init__(self, input_dim: int, d_model: int = 128, bins: int = 96,
                  tempo_bins: int = 24, tempo_lo: float = 0.030, tempo_hi: float = 0.180,
@@ -118,22 +116,20 @@ class TempoChainVBPM(nn.Module):
                  phase_kernel: str = "vonmises", tempo_kernel: str = "gauss",
                  tempo_revert: bool = True, phase_nu: float = 4.0,
                  use_graphs: bool = False,
-                 emission: EmissionSpec | str = "triangle",
+                 emission: EmissionSpec | None = None,
                  walk: WalkSpec | None = None, encoder_pe: bool = False):
         super().__init__()
-        emission = EmissionSpec.coerce(emission)
         self.walk = walk or WalkSpec()
         self.bins, self.tempo_bins = int(bins), int(tempo_bins)
         self.sigma, self.band = float(sigma), int(band)
         self.phase_kernel, self.tempo_kernel = phase_kernel, tempo_kernel
         self.tempo_revert = bool(tempo_revert)
         self.phase_nu = float(phase_nu)
+        emission = emission or EmissionSpec(kind="triangle")
         self.emission_kind = emission.kind
         self.bump_kappa = float(emission.bump_kappa)
 
-        self.encoder = Encoder(input_dim, d_model,
-                               kappa_physical=self.walk.kappa_physical,
-                               use_pe=encoder_pe)
+        self.encoder = Encoder(input_dim, d_model, use_pe=encoder_pe)
         self.psi_head = nn.Linear(d_model, self.bins)
         nn.init.zeros_(self.psi_head.weight)
         nn.init.zeros_(self.psi_head.bias)
@@ -301,7 +297,7 @@ class TempoChainVBPM(nn.Module):
         path = torch.cat([wrapped[:, :1], wrapped[:, :1] + torch.cumsum(step, -1)], -1)
         return path, torch.sqrt(re ** 2 + im ** 2 + 1e-12)
 
-    def forward(self, h, mask, y, samples: int = 1, pos_weight: float = 1.0):
+    def forward(self, h, mask, y, pos_weight: float = 1.0):
         """One ELBO evaluation: exact expectations under the chain, no sampling."""
         log_psi, log_g, logZ = self.marginals(h, mask)
         gamma = log_g.exp()
@@ -344,9 +340,6 @@ def build_model(cfg, input_dim: int) -> TempoChainVBPM:
     """The hooks entry point: one TempoChainVBPM from a config."""
     from .base import common_kwargs
     kw = common_kwargs(cfg)
-    kw.pop("phase_init", None)
-    kw.pop("phi0_posterior", None)
-    kw.pop("posterior_reads_b", None)
     return TempoChainVBPM(input_dim, bins=cfg.chain_bins, tempo_bins=cfg.tempo_bins,
                           tempo_lo=cfg.tempo_lo, tempo_hi=cfg.tempo_hi,
                           sigma=cfg.chain_sigma, band=cfg.tempo_band,
