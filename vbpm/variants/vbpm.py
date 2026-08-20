@@ -52,8 +52,6 @@ class VBPM(nn.Module):
 
         emission_ll = self.emission_model.loglik(y, mask, self.prior_model.grid)
         recon = torch.einsum("btn,btn->b", q_phase, emission_ll)
-        if self.emission_model.kind == "band" and self.training:
-            self.emission_model.accumulate(q_phase, y, mask)
 
         expected_evidence = torch.einsum("btn,btn->b", q_phase, evidence) \
             + torch.einsum("bc,bc->b", q_rate[:, 0], log_q_rate0)
@@ -65,7 +63,10 @@ class VBPM(nn.Module):
         resultant = (cos_sum ** 2 + sin_sum ** 2).sqrt().clamp(1e-6, 1 - 1e-6)
         kappa = resultant * (2 - resultant ** 2) / (1 - resultant ** 2)
 
-        return {"elbo": elbo, "recon": recon, "kl": kl, "phi": phi, "kappa": kappa}
+        rate_traj = (q_rate * self.prior_model.rates[None, None, :]).sum(-1)
+
+        return {"elbo": elbo, "recon": recon, "kl": kl, "phi": phi, "kappa": kappa,
+                "rate_traj": rate_traj, "rate": rate_traj.mean(-1), "q": q_joint}
 
     @torch.no_grad()
     def infer_phase(self, h, mask=None):
@@ -83,10 +84,8 @@ class VBPM(nn.Module):
 
 
 def on_epoch(model, cfg, epoch: int) -> None:
-    """Base's sharpness floor, plus the enumerated band-width M-step."""
+    """Base's sharpness floor."""
     base.on_epoch(model, cfg, epoch)
-    if model.emission_model.kind == "band" and epoch > 0:
-        model.emission_model.fit_width()
 
 
 def build_model(cfg, input_dim: int) -> VBPM:

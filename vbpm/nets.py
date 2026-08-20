@@ -5,7 +5,7 @@ import math
 import torch
 from torch import nn
 
-from .constants import TWO_PI
+from .constants import FPS, TEMPO_PRIOR_MU, TOLERANCE_SECONDS, TWO_PI
 from .specs import EmissionSpec, RateSpec, WalkSpec
 
 N_HARM = 12             # band limit of the recognition potentials
@@ -171,9 +171,10 @@ class EmissionModel(nn.Module):
 
     The shape is frozen and only a baseline and a gain are learnable, so the
     optimizer cannot grow a second peak and make a wrong metrical level pay as
-    well as the truth. `band` is NeuralDBN 8.2's own rectangular beat window,
-    whose integer width carries no gradient and is fitted by the enumerated
-    M-step of 8.4 (fit_width) off the posterior the model already computes.
+    well as the truth. `band` is NeuralDBN 8.2's own rectangular beat window and
+    `laplace` is that window with an exponential tail in place of its far edge;
+    both reach only forward from the onset, and both take their extent from the
+    scoring tolerance rather than from a fitted integer.
     """
 
     def __init__(self, spec: EmissionSpec, n_grid: int = N_GRID):
@@ -185,9 +186,17 @@ class EmissionModel(nn.Module):
         self.b_raw = nn.Parameter(torch.tensor(1.0))
 
         self.register_buffer("b_floor", torch.tensor(0.0))
-        self.register_buffer("band_w", torch.tensor(n_grid // 8))
-        self.register_buffer("band_pos", torch.zeros(n_grid))
-        self.register_buffer("band_neg", torch.zeros(n_grid))
+
+        # The decay length and the band's width are the same quantity -- how far
+        # past the downbeat the emission still fires -- fixed as a DURATION at the
+        # scoring tolerance and converted to phase at the prior-mean rate.
+        tau = TOLERANCE_SECONDS * FPS * math.exp(TEMPO_PRIOR_MU)
+        self.log_tau = nn.Parameter(torch.tensor(math.log(tau)))
+        # `alaplace` only: the reach BACKWARD from the onset. Starting it equal to
+        # the forward reach starts the shape symmetric, so the asymmetry has to be
+        # earned; a one-sided shape is the tau_back -> 0 corner of the same family.
+        self.log_tau_back = nn.Parameter(torch.tensor(math.log(tau)))
+        self.register_buffer("band_w", torch.tensor(round(tau * n_grid / TWO_PI)))
 
     @property
     def kind(self) -> str:
@@ -206,6 +215,26 @@ class EmissionModel(nn.Module):
             # centred on it -- the activation is a bump that follows the onset.
             inside = torch.remainder(phi, TWO_PI) < float(self.band_w) * (TWO_PI / self.n_grid)
             return self.a + self.b * (2.0 * inside.to(phi.dtype) - 1.0)
+        if self.spec.kind == "laplace":
+            # The band's asymmetry -- decay runs FORWARD from the onset only --
+            # with a tail instead of a cliff, so every phase in the bar still
+            # carries a gradient, and with a continuous scale in place of the
+            # band's integer width.
+            forward = torch.remainder(phi, TWO_PI)
+            decay = torch.exp(-forward / self.log_tau.exp().clamp(1e-3, math.pi))
+            return self.a + self.b * (2.0 * decay - 1.0)
+        if self.spec.kind == "alaplace":
+            # `laplace` is biased late: with mass only ahead of the onset, the
+            # circular mean the read-out takes sits a first moment past the peak
+            # (49 ms predicted at a 1.94 s bar, against 0 for the symmetric tent).
+            # Giving the shape its own backward reach removes that bias without
+            # giving up the asymmetry -- and both endpoints, the tent and the
+            # one-sided band, are corners of this one family.
+            wrapped = torch.atan2(phi.sin(), phi.cos())
+            decay = torch.exp(-wrapped.clamp(min=0.0) / self.log_tau.exp().clamp(1e-3, math.pi)
+                              - (-wrapped).clamp(min=0.0)
+                              / self.log_tau_back.exp().clamp(1e-3, math.pi))
+            return self.a + self.b * (2.0 * decay - 1.0)
         if self.spec.kind == "triangle":
             wrapped = torch.atan2(torch.sin(phi), torch.cos(phi))
             return self.a + self.b * (1.0 - 2.0 * wrapped.abs() / math.pi)
@@ -221,49 +250,6 @@ class EmissionModel(nn.Module):
         ll = (y[..., None] * nn.functional.logsigmoid(e)
               + (1.0 - y)[..., None] * nn.functional.logsigmoid(-e))
         return ll * mask[..., None]
-
-    @torch.no_grad()
-    def accumulate(self, qn, y, mask):
-        """E-step tally: posterior mass at each phase position, split by target.
-
-        The tutorial's h_k(r) is a posterior over "distance past the most recent
-        beat"; with no meter coordinate the bar IS the interval, so r is the grid
-        index. Split by y because our observation is a binary annotation under a
-        Bernoulli, where the tutorial reads a continuous activation under a Beta.
-        """
-        w = (qn * mask[..., None]).detach()
-        self.band_pos += torch.einsum("btn,bt->n", w, y)
-        self.band_neg += torch.einsum("btn,bt->n", w, 1.0 - y)
-
-    @torch.no_grad()
-    def fit_width(self):
-        """M-step, NeuralDBN 8.4: one cumulative sum, take the argmax.
-
-        Moving position r into the band swaps its emission from e_lo to e_hi, so
-        the change in Q is S(r) = A p(r) - B n(r) with A, B the two log-odds gaps
-        -- the Bernoulli counterpart of the tutorial's posterior-weighted
-        log a/(1-a). "Widening the band by one position adds S(w); it is worth
-        doing exactly while that quantity is positive."
-        """
-        if float(self.band_pos.sum() + self.band_neg.sum()) == 0.0:
-            return None
-        lsp = nn.functional.logsigmoid
-        e_hi, e_lo = self.a + self.b, self.a - self.b
-        A = lsp(e_hi) - lsp(e_lo)
-        B = lsp(-e_lo) - lsp(-e_hi)
-        S = A * self.band_pos - B * self.band_neg
-        best = int(torch.cumsum(S, 0)[:-1].argmax()) + 1
-        self.band_pos.zero_()
-        self.band_neg.zero_()
-        # A posterior carrying no phase information makes S a positive constant --
-        # every position looks equally beat-like -- and its running sum is then
-        # monotone, so the argmax is whichever end the sign points at. The width
-        # is UNIDENTIFIED there, not maximal: an interior maximum is the signal
-        # that the posterior distinguishes positions. Refuse rather than rail.
-        if best <= 1 or best >= self.n_grid - 1:
-            return None
-        self.band_w.fill_(best)
-        return best
 
 
 class PriorModel(nn.Module):
