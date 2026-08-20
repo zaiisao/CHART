@@ -125,3 +125,4 @@ class TempoWalkSpec:
 
     enabled: bool = False
     kernel: str = "cauchy"
+    revert: bool = False

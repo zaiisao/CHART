@@ -13,10 +13,12 @@ from vbpm import run as run_mod
 from vbpm.config import load_config
 from vbpm.scoring import controls as controls_mod
 from vbpm.scoring.evaluation import f_measure, null_times, peak_times
-from vbpm.constants import (KAPPA_PHYSICAL, MAX_KAPPA, TWO_PI)
+from vbpm.constants import (MAX_KAPPA, TEMPO_BOUND_MARGIN, TWO_PI)
+from vbpm.specs import ChainSpec, RateSpec, TempoWalkSpec
 from vbpm.readout import downbeat_frames
 from vbpm.variants.archain import VBPM
 from vbpm.nets import Encoder, bounded_kappa, inverse_softplus, vonmises_entropy
+from vbpm.vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 from vbpm.data.features import FPS, atomic_save_npy
 
@@ -503,15 +505,77 @@ def test_trajectory_health_separates_the_recorded_failure_modes():
     assert cov_f == pytest.approx(1 / 16)
 
 
+def _bounded_model():
+    from vbpm.variants.archain import VBPM
+    return VBPM(input_dim=8, d_model=16, rate=RateSpec(grid=24, lo=0.020, hi=0.200),
+                chain=ChainSpec(stride=8), tempo_walk=TempoWalkSpec(enabled=True))
+
+
 def test_rate_bound_is_identity_in_the_interior():
     """The bound may soften the rails; it must not move interior tempos."""
-    for seconds in (1.0, 1.5, 2.0, 3.0, 5.0):
-        x = torch.tensor([[math.log(TWO_PI / (seconds * 50.0))]], dtype=torch.float64)
-        tempo, _ = Encoder._ramp(x)
-        assert float(TWO_PI / (float(tempo) * 50.0)) == pytest.approx(seconds, rel=1e-9)
-    x = torch.tensor([[math.log(TWO_PI / (60.0 * 50.0))]], dtype=torch.float64,
-                     requires_grad=True)
-    Encoder._ramp(x)[0].sum().backward()
-    assert float(x.grad) > 0.0, "the tempo bound is an absorbing rail again"
+    m = _bounded_model()
+    core = torch.linspace(m.log_rate_lo_eff, m.log_rate_hi_eff, 32, dtype=torch.float64)
+    assert torch.allclose(m._bound_log_rate(core), core, atol=1e-12)
 
 
+def test_rate_bound_does_not_drift_under_iteration():
+    """A bound that contracts would walk every candidate to the grid centre."""
+    m = _bounded_model()
+    x = torch.log(m.rates.to(torch.float64))
+    for _ in range(200):
+        x = m._bound_log_rate(x)
+    assert torch.allclose(x, torch.log(m.rates.to(torch.float64)), atol=1e-12)
+
+
+def test_rate_bound_respects_the_rails_with_live_gradient():
+    m = _bounded_model()
+    lo, hi = m.log_rate_lo_eff, m.log_rate_hi_eff
+    far = torch.tensor([lo - 50.0, hi + 50.0], dtype=torch.float64, requires_grad=True)
+    out = m._bound_log_rate(far)
+    assert float(out[0]) >= lo - TEMPO_BOUND_MARGIN
+    assert float(out[1]) <= hi + TEMPO_BOUND_MARGIN
+    out.sum().backward()
+    assert float(far.grad.min()) > 0.0, "the tempo bound is an absorbing rail again"
+
+
+def test_mean_resultant_matches_the_series_and_its_gradient():
+    k = torch.tensor([0.5, 2.0, 20.0, 383.0], dtype=torch.float64, requires_grad=True)
+    a = mean_resultant(k)
+    x = torch.linspace(-math.pi, math.pi, 200001, dtype=torch.float64)[:-1]
+    for i, kv in enumerate([0.5, 2.0, 20.0, 383.0]):
+        w = torch.exp(kv * torch.cos(x) - kv)
+        assert float(a[i]) == pytest.approx(
+            float((w * torch.cos(x)).sum() / w.sum()), rel=1e-6)
+    a.sum().backward()
+    assert torch.isfinite(k.grad).all() and (k.grad > 0).all()
+
+
+def test_kl_vonmises_is_zero_at_identity_and_matches_monte_carlo():
+    k = torch.tensor([4.0, 60.0], dtype=torch.float64)
+    assert torch.allclose(kl_vonmises(torch.zeros(2, dtype=torch.float64), k,
+                                      torch.zeros(2, dtype=torch.float64), k),
+                          torch.zeros(2, dtype=torch.float64), atol=1e-12)
+    mu1, k1, mu2, k2 = 0.3, 30.0, 0.05, 12.0
+    x = torch.linspace(-math.pi, math.pi, 400001, dtype=torch.float64)[:-1]
+
+    def lp(mu, kk):
+        return kk * torch.cos(x - mu) - math.log(TWO_PI) - float(
+            log_i0(torch.tensor(kk, dtype=torch.float64)))
+    w = torch.exp(lp(mu1, k1))
+    ref = float((w * (lp(mu1, k1) - lp(mu2, k2))).sum() / w.sum())
+    got = float(kl_vonmises(torch.tensor(mu1), torch.tensor(k1),
+                            torch.tensor(mu2), torch.tensor(k2)))
+    assert got == pytest.approx(ref, rel=1e-5)
+
+
+def test_icdf_sampler_concentrates_and_stays_differentiable_in_kappa():
+    torch.manual_seed(0)
+    for kv, tol in ((5.0, 0.02), (383.0, 0.002)):
+        k = torch.full((200000,), kv, dtype=torch.float64)
+        s = sample_vonmises_icdf(k)
+        assert float(s.mean().abs()) < tol
+        assert float(torch.cos(s).mean()) == pytest.approx(
+            float(mean_resultant(torch.tensor(kv, dtype=torch.float64))), rel=5e-3)
+    k = torch.full((4096,), 40.0, dtype=torch.float64, requires_grad=True)
+    sample_vonmises_icdf(k).abs().mean().backward()
+    assert torch.isfinite(k.grad).all() and float(k.grad.abs().sum()) > 0.0

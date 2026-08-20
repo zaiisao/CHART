@@ -34,10 +34,9 @@ import torch
 from torch import nn
 
 from .base import epoch_note as _base_note, on_epoch, optimizer  # noqa: F401
-from ..constants import KAPPA_Q_MIN, TWO_PI
+from ..constants import KAPPA_Q_MIN, TEMPO_BOUND_MARGIN, TWO_PI
 from ..nets import Encoder, inverse_softplus
 from ..specs import ChainSpec, EmissionSpec, RateSpec, TempoWalkSpec, WalkSpec
-from ..observation import class_recon
 from ..vonmises import kl_vonmises, log_i0, mean_resultant, sample_vonmises_icdf
 
 
@@ -46,7 +45,8 @@ DEFAULTS = {"chain_rate_grid": 24, "rate_posterior": "categorical",
             "ar_phi0_anchor": False, "ar_rate_resid": 0.0, "ar_stride": 1,
             "ar_rate_lo": 0.020, "ar_rate_hi": 0.200,
             "ar_phase_kernel": "vonmises", "ar_tempo_walk": False,
-            "ar_tempo_kernel": "cauchy", "ar_beat_subdiv": 4,
+            "ar_tempo_kernel": "cauchy", "ar_tempo_revert": False,
+            "ar_beat_subdiv": 4,
             "ar_readout": "head"}
 
 
@@ -103,8 +103,6 @@ class VBPM(nn.Module):
                                kappa_physical=self.walk.kappa_physical,
                                use_pe=encoder_pe)
 
-        assert not (self.chain.phi0 == "anchor" and self.chain.phi0_grid > 0), \
-            "ar_phi0_anchor replaces the phi0 grid; enable one or the other"
         if self.chain.phi0 == "anchor":
             self.evidence_head = nn.Linear(d_model, 1)
             nn.init.zeros_(self.evidence_head.weight)
@@ -280,11 +278,36 @@ class VBPM(nn.Module):
         differentiable everywhere, so a state at the edge still learns which
         way to move.
         """
-        mid = 0.5 * (self.log_rate_lo_eff + self.log_rate_hi_eff)
-        half = 0.5 * (self.log_rate_hi_eff - self.log_rate_lo_eff)
-        return mid + half * torch.tanh((u - mid) / half)
+        lo, hi = self.log_rate_lo_eff, self.log_rate_hi_eff
+        m = TEMPO_BOUND_MARGIN
 
-    def tempo_step_kl(self, w, s_w):
+        def soft(x):
+            return x * torch.rsqrt(1.0 + x * x)
+
+        over = hi + m * soft((u - hi) / m)
+        under = lo - m * soft((lo - u) / m)
+        return torch.where(u > hi, over, torch.where(u < lo, under, u))
+
+    def _revert_center(self, log_rate):
+        """Prior mean of the increment under a mean-reverting log-tempo law.
+
+        tchain's kernel centres the next log rate at mu + a (log r - mu) with
+        a = sqrt(1 - (sigma / s_prior)^2), so the stationary spread IS the
+        corpus spread by construction and the level is priced at every step
+        rather than only at the initial state. In increment coordinates that
+        target becomes a shift of (a - 1)(log r - mu) on w.
+        """
+        S = max(self.chain.stride, 1)
+        s_prior = float(self.walk.tempo_sigma)
+        if self.tempo.kernel == "cauchy":
+            sigma = self.walk.walk_sigma * S
+            a = max(1.0 - sigma / s_prior, 0.0)
+        else:
+            sigma = self.walk.walk_sigma * math.sqrt(S)
+            a = math.sqrt(max(1.0 - min((sigma / s_prior) ** 2, 1.0), 0.0))
+        return (a - 1.0) * (log_rate - float(self.walk.tempo_mu))
+
+    def tempo_step_kl(self, w, s_w, log_rate=None):
         """KL of one tempo increment: exact Gaussian entropy, sampled cross term.
 
         The increment law is where the heavy tail belongs. A ritardando is a
@@ -296,15 +319,16 @@ class VBPM(nn.Module):
         steady path under either.
         """
         S = max(self.chain.stride, 1)
+        d = w if log_rate is None else w - self._revert_center(log_rate)
         if self.tempo.kernel == "cauchy":
             scale = self.walk.walk_sigma * S
-            log_p = -math.log(math.pi * scale) - torch.log1p((w / scale) ** 2)
+            log_p = -math.log(math.pi * scale) - torch.log1p((d / scale) ** 2)
         elif self.tempo.kernel == "laplace":
             scale = self.walk.walk_sigma * math.sqrt(S)
-            log_p = -w.abs() / scale - math.log(2.0 * scale)
+            log_p = -d.abs() / scale - math.log(2.0 * scale)
         else:
             scale = self.walk.walk_sigma * math.sqrt(S)
-            log_p = -0.5 * (w / scale) ** 2 - math.log(scale) \
+            log_p = -0.5 * (d / scale) ** 2 - math.log(scale) \
                 - 0.5 * math.log(TWO_PI)
         entropy = 0.5 * math.log(TWO_PI * math.e) + torch.log(s_w)
         return -entropy - log_p
@@ -403,6 +427,7 @@ class VBPM(nn.Module):
         knots = [phi]
         kls = feats.new_zeros(B, C)
         kappas = []
+        assert T > S, f"a strided window must hold at least one step: T={T}, stride={S}"
         log_rate = torch.log(rates)
         steps = list(range(S, T, S))
         for t in steps:
@@ -420,9 +445,17 @@ class VBPM(nn.Module):
                 # corpus mean is what tchain's kernel does for the same reason:
                 # a driftless walk has a uniform stationary law and expresses no
                 # preference among tempi.
-                log_rate = self._bound_log_rate(log_rate + w)
+                prev = log_rate
+                # mean reversion makes the stationary spread the corpus spread,
+                # so the state cannot run away and needs no bound; the driftless
+                # law has a uniform stationary law and does, which is what the
+                # bound was there for.
+                free = self.tempo.revert and self.tempo.kernel != "cauchy"
+                log_rate = (prev + w if free
+                            else self._bound_log_rate(prev + w))
                 rate_t = log_rate.exp()
-                kls = kls + self.tempo_step_kl(w, s_w) \
+                kls = kls + self.tempo_step_kl(
+                    w, s_w, prev if self.tempo.revert else None) \
                     * (mask[:, t] * mask[:, t - S])[:, None]
             else:
                 d1, d2, u = out.unbind(-1)
@@ -631,7 +664,8 @@ def build_model(cfg, input_dim: int) -> VBPM:
                                 phi0="anchor" if cfg.ar_phi0_anchor else "amortized",
                                 phi0_grid=cfg.ar_phi0_grid),
                 tempo_walk=TempoWalkSpec(enabled=cfg.ar_tempo_walk,
-                                         kernel=cfg.ar_tempo_kernel),
+                                         kernel=cfg.ar_tempo_kernel,
+                                         revert=cfg.ar_tempo_revert),
                 readout=cfg.ar_readout,
                 **common_kwargs(cfg))
 

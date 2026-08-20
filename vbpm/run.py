@@ -43,6 +43,8 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
     is known to be monotone.
     """
     torch.manual_seed(seed)
+    assert cfg.samples == 1, \
+        "no surviving model averages over posterior samples; samples > 1 is a no-op"
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
 
     loader = torch.utils.data.DataLoader(
