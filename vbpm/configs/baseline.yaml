@@ -15,9 +15,10 @@
 # ar_stride is 1 here on purpose: a strided run is a valid ELBO of a DIFFERENT
 # generative model (deterministic within-stride phase), so the reference recipe
 # stays exact and sweeps override it with ar_stride=8 for a 7x screening pass.
-variant: archain
+variant: barchain
 emission: triangle
-emission_recon: class
+emission_recon: tied
+ar_beat_subdiv: 4
 target_tol_frames: 0
 
 ar_phi0_anchor: true
