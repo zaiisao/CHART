@@ -17,6 +17,9 @@ class EmissionSpec:
     dim: int = 64
     positional: bool = False
     bump_kappa: float = 20.0
+    fit_init: bool = False
+    frozen: bool = False
+    floor: float = 0.0
 
 
 @dataclasses.dataclass

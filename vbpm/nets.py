@@ -5,7 +5,9 @@ import math
 import torch
 from torch import nn
 
-from .constants import FPS, TEMPO_PRIOR_MU, TOLERANCE_SECONDS, TWO_PI
+from .constants import (EMISSION_FIT_A, EMISSION_FIT_B, EMISSION_FIT_TAU,
+                        EMISSION_FIT_TAU_BACK, FPS, TEMPO_PRIOR_MU,
+                        TOLERANCE_SECONDS, TWO_PI)
 from .specs import EmissionSpec, RateSpec, WalkSpec
 
 N_HARM = 12             # band limit of the recognition potentials
@@ -182,8 +184,9 @@ class EmissionModel(nn.Module):
         self.spec = spec
         self.n_grid = n_grid
 
-        self.a = nn.Parameter(torch.tensor(-3.0))
-        self.b_raw = nn.Parameter(torch.tensor(1.0))
+        fit = spec.fit_init
+        self.a = nn.Parameter(torch.tensor(EMISSION_FIT_A if fit else -3.0))
+        self.b_raw = nn.Parameter(torch.tensor(EMISSION_FIT_B if fit else 1.0))
 
         self.register_buffer("b_floor", torch.tensor(0.0))
 
@@ -191,12 +194,18 @@ class EmissionModel(nn.Module):
         # past the downbeat the emission still fires -- fixed as a DURATION at the
         # scoring tolerance and converted to phase at the prior-mean rate.
         tau = TOLERANCE_SECONDS * FPS * math.exp(TEMPO_PRIOR_MU)
-        self.log_tau = nn.Parameter(torch.tensor(math.log(tau)))
+        self.log_tau = nn.Parameter(torch.tensor(
+            math.log(EMISSION_FIT_TAU if fit else tau)))
         # `alaplace` only: the reach BACKWARD from the onset. Starting it equal to
         # the forward reach starts the shape symmetric, so the asymmetry has to be
         # earned; a one-sided shape is the tau_back -> 0 corner of the same family.
-        self.log_tau_back = nn.Parameter(torch.tensor(math.log(tau)))
+        self.log_tau_back = nn.Parameter(torch.tensor(
+            math.log(EMISSION_FIT_TAU_BACK if fit else tau)))
         self.register_buffer("band_w", torch.tensor(round(tau * n_grid / TWO_PI)))
+
+        if spec.frozen:
+            for p in (self.a, self.b_raw, self.log_tau, self.log_tau_back):
+                p.requires_grad_(False)
 
     @property
     def kind(self) -> str:
@@ -247,8 +256,14 @@ class EmissionModel(nn.Module):
     def loglik(self, y, mask, grid):
         """[B,T,N]: log p(y_t | phi) for the DOWNBEAT target, at every grid phase."""
         e = self(grid)
-        ll = (y[..., None] * nn.functional.logsigmoid(e)
-              + (1.0 - y)[..., None] * nn.functional.logsigmoid(-e))
+        log_hit, log_miss = nn.functional.logsigmoid(e), nn.functional.logsigmoid(-e)
+        if self.spec.floor > 0.0:
+            keep = math.log1p(-self.spec.floor)
+            log_hit = torch.logaddexp(torch.full_like(log_hit,
+                                                      math.log(self.spec.floor)),
+                                      keep + log_hit)
+            log_miss = keep + log_miss
+        ll = y[..., None] * log_hit + (1.0 - y)[..., None] * log_miss
         return ll * mask[..., None]
 
 

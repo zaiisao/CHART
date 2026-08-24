@@ -39,7 +39,10 @@ def common_kwargs(cfg) -> dict:
     """The spec objects every variant is built with."""
     return {"emission": EmissionSpec(kind=cfg.emission, layers=cfg.emission_layers,
                                      positional=cfg.emission_positional,
-                                     bump_kappa=cfg.emission_bump_kappa),
+                                     bump_kappa=cfg.emission_bump_kappa,
+                                     fit_init=cfg.emission_fit_init,
+                                     frozen=cfg.emission_frozen,
+                                     floor=cfg.emission_floor),
             "walk": WalkSpec(kappa_physical=cfg.kappa_physical,
                              tempo_mu=cfg.tempo_prior_mu,
                              tempo_sigma=cfg.tempo_prior_sigma,

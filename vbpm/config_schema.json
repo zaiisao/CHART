@@ -199,5 +199,21 @@
     "type": "boolean",
     "default": false,
     "description": "q reads the labels as well as the audio, and a second audio-only network becomes the conditional prior p_eta(z | x). The note's asymmetry: x is in every factor, b only in the posterior. Deployment then reads the prior, since b is absent at inference."
+  },
+  "emission_fit_init": {
+    "type": "boolean",
+    "default": false,
+    "description": "initialise the emission's offset, gain and decay scales at the maximum-likelihood fit of p(y|phi) measured on the train folds, instead of at the scoring tolerance."
+  },
+  "emission_frozen": {
+    "type": "boolean",
+    "default": false,
+    "description": "hold the emission's offset, gain and decay scales fixed at their initial values; the rest of the model still trains."
+  },
+  "emission_floor": {
+    "type": "number",
+    "default": 0.0,
+    "minimum": 0.0,
+    "description": "probability that a downbeat annotation is drawn from a phase-independent background rather than from the emission's shape, which bounds what a misplaced downbeat can cost; 0 is the plain Bernoulli emission."
   }
 }
