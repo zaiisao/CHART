@@ -312,7 +312,9 @@ class PriorModel(nn.Module):
 
         lr = torch.log(rates)
         sw = 1.0 / (1.0 + ((lr[None, :] - lr[:, None]) / GAMMA) ** 2)
-        self.register_buffer("switch", sw / sw.sum(dim=1, keepdim=True))
+        sw = sw / sw.sum(dim=1, keepdim=True)
+        self.register_buffer("switch", sw if rate.per_bar
+                             else torch.eye(rates.shape[0], dtype=sw.dtype))
         cell = TWO_PI / n_grid
         wrap = ((grid[None, :] + cell - (TWO_PI - rates[:, None])) / cell).clamp(0.0, 1.0)
         self.register_buffer("k_wrap", k_lin * wrap[:, :, None])

@@ -215,5 +215,10 @@
     "default": 0.0,
     "minimum": 0.0,
     "description": "probability that a downbeat annotation is drawn from a phase-independent background rather than from the emission's shape, which bounds what a misplaced downbeat can cost; 0 is the plain Bernoulli emission."
+  },
+  "tempo_per_bar": {
+    "type": "boolean",
+    "default": true,
+    "description": "the rate may change at a wrapping phase transition, paying the wrapped-Cauchy cost on log-rate; false makes the switch the identity, so one rate carries the whole window -- the rigid control."
   }
 }

@@ -93,6 +93,7 @@ class RateSpec:
     grid: int = 24
     lo: float = 0.020
     hi: float = 0.200
+    per_bar: bool = True
     posterior: str = "categorical"
     resid: float = 0.0
 

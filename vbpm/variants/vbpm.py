@@ -91,6 +91,7 @@ def on_epoch(model, cfg, epoch: int) -> None:
 def build_model(cfg, input_dim: int) -> VBPM:
     """One VBPM from a config: two specs, no loose floats."""
     rate_spec = RateSpec(grid=cfg.chain_rate_grid, lo=cfg.ar_rate_lo,
-                         hi=cfg.ar_rate_hi, posterior="categorical", resid=0.0)
+                         hi=cfg.ar_rate_hi, posterior="categorical", resid=0.0,
+                         per_bar=cfg.tempo_per_bar)
     vbpm = VBPM(input_dim, rate=rate_spec, **base.common_kwargs(cfg))
     return vbpm
