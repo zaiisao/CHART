@@ -173,16 +173,12 @@ class EmissionModel(nn.Module):
 
     The shape is frozen and only a baseline and a gain are learnable, so the
     optimizer cannot grow a second peak and make a wrong metrical level pay as
-    well as the truth. `band` is NeuralDBN 8.2's own rectangular beat window and
-    `laplace` is that window with an exponential tail in place of its far edge;
-    both reach only forward from the onset, and both take their extent from the
-    scoring tolerance rather than from a fitted integer.
+    well as the truth.
     """
 
-    def __init__(self, spec: EmissionSpec, n_grid: int = N_GRID):
+    def __init__(self, spec: EmissionSpec):
         super().__init__()
         self.spec = spec
-        self.n_grid = n_grid
 
         fit = spec.fit_init
         self.a = nn.Parameter(torch.tensor(EMISSION_FIT_A if fit else -3.0))
@@ -201,8 +197,6 @@ class EmissionModel(nn.Module):
         # earned; a one-sided shape is the tau_back -> 0 corner of the same family.
         self.log_tau_back = nn.Parameter(torch.tensor(
             math.log(EMISSION_FIT_TAU_BACK if fit else tau)))
-        self.register_buffer("band_w", torch.tensor(round(tau * n_grid / TWO_PI)))
-
         if spec.frozen:
             for p in (self.a, self.b_raw, self.log_tau, self.log_tau_back):
                 p.requires_grad_(False)
@@ -219,11 +213,6 @@ class EmissionModel(nn.Module):
 
     def forward(self, phi):
         """Downbeat log-odds at phase ``phi``."""
-        if self.spec.kind == "band":
-            # 8.2: the first w positions AFTER the beat point, not a window
-            # centred on it -- the activation is a bump that follows the onset.
-            inside = torch.remainder(phi, TWO_PI) < float(self.band_w) * (TWO_PI / self.n_grid)
-            return self.a + self.b * (2.0 * inside.to(phi.dtype) - 1.0)
         if self.spec.kind == "laplace":
             # The band's asymmetry -- decay runs FORWARD from the onset only --
             # with a tail instead of a cliff, so every phase in the bar still

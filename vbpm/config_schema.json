@@ -6,16 +6,15 @@
   },
   "emission": {
     "type": "string",
-    "default": "band",
+    "default": "triangle",
     "enum": [
       "cosine",
       "triangle",
-      "band",
       "laplace",
       "alaplace",
       "bump"
     ],
-    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the symmetric tent, non-zero across the whole bar; band is NeuralDBN 8.2's rectangular beat window, reaching forward from the onset for the scoring tolerance and flat everywhere else; laplace replaces that window's far edge with an exponential tail, keeping band's asymmetry while restoring a gradient at every phase, and its decay length is a continuous parameter rather than an integer width; alaplace gives that decay a second, independent scale running backward from the onset, which removes laplace's late bias -- the tent and the one-sided band are the two corners of this family -- and lets the data set the asymmetry; bump is the von Mises-shaped narrow peak whose width is emission_bump_kappa."
+    "description": "p(y | phi) shape. cosine is the tutorial's own a + b cos(phi); triangle is the symmetric tent, non-zero across the whole bar; laplace replaces a rectangular window's far edge with an exponential tail, keeping band's asymmetry while restoring a gradient at every phase, and its decay length is a continuous parameter rather than an integer width; alaplace gives that decay a second, independent scale running backward from the onset, which removes laplace's late bias -- the tent and the one-sided band are the two corners of this family -- and lets the data set the asymmetry; bump is the von Mises-shaped narrow peak whose width is emission_bump_kappa."
   },
   "emission_layers": {
     "type": "integer",

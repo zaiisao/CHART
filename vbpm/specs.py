@@ -12,7 +12,7 @@ from .constants import (KAPPA_PHYSICAL, TEMPO_PRIOR_MU, TEMPO_PRIOR_SIGMA,
 class EmissionSpec:
     """p(y_t | phi_t): which shape reads the latent, and how big it is."""
 
-    kind: str = "band"
+    kind: str = "triangle"
     layers: int = 2
     dim: int = 64
     positional: bool = False

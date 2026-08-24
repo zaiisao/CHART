@@ -224,8 +224,7 @@ def main() -> None:
         # generalisation to fail, so if this does not grow the anchor mechanism itself
         # is broken rather than merely untrained.
         res = f"  res {float(out['resultant'].mean()):5.3f}" if "resultant" in out else ""
-        bw = (f"  w {int(model.emission_model.band_w):3d}"
-              if hasattr(getattr(model, "emission_model", None), "band_w") else "")
+        bw = ""
         if True:
             phi_w = torch.atan2(torch.sin(mu_t[0]), torch.cos(mu_t[0]))
             prox = (1.0 - phi_w.abs() / math.pi).float().cpu().numpy()

@@ -478,7 +478,7 @@ def test_emission_loglik_is_the_bernoulli_it_claims():
     from vbpm.specs import EmissionSpec
 
     _seed()
-    emission = EmissionModel(EmissionSpec(kind="band")).double()
+    emission = EmissionModel(EmissionSpec(kind="triangle")).double()
     grid = torch.arange(128, dtype=torch.float64) * (TWO_PI / 128)
     y = (torch.rand(2, 30, dtype=torch.float64) < 0.2).double()
     mask = torch.ones(2, 30, dtype=torch.float64)
