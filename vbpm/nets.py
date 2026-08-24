@@ -313,10 +313,10 @@ class PriorModel(nn.Module):
         lr = torch.log(rates)
         sw = 1.0 / (1.0 + ((lr[None, :] - lr[:, None]) / GAMMA) ** 2)
         self.register_buffer("switch", sw / sw.sum(dim=1, keepdim=True))
-        n = torch.arange(n_grid)
-        wrap = (n[None, :] < n[:, None]).to(k_lin.dtype)
-        self.register_buffer("k_wrap", k_lin * wrap)
-        self.register_buffer("k_stay", k_lin - k_lin * wrap)
+        cell = TWO_PI / n_grid
+        wrap = ((grid[None, :] + cell - (TWO_PI - rates[:, None])) / cell).clamp(0.0, 1.0)
+        self.register_buffer("k_wrap", k_lin * wrap[:, :, None])
+        self.register_buffer("k_stay", k_lin - k_lin * wrap[:, :, None])
 
     @property
     def n_rates(self) -> int:
