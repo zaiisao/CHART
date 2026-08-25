@@ -9,7 +9,7 @@ from ..nets import EmissionModel, PosteriorModel, PriorModel
 from ..specs import EmissionSpec, RateSpec, WalkSpec
 
 DEFAULTS = {"chain_rate_grid": 36, "ar_rate_lo": 0.012, "ar_rate_hi": 0.200,
-            "meters": [], "meter_prior": "uniform"}
+            "meters": [], "meter_prior": "corpus"}
 
 
 class VBPM(nn.Module):
@@ -88,6 +88,17 @@ class VBPM(nn.Module):
         out = self.posterior_model(h, mask, self.prior_model)
         q_phase = out[3] if out[5] is None else out[3].sum(2)
         return self.posterior_model.unwrap(q_phase, self.prior_model.grid)[0]
+
+    @torch.no_grad()
+    def infer_meter(self, h, mask=None):
+        """[B] the posterior's most likely beats-per-bar, or None without meter."""
+        if not self.prior_model.meters:
+            return None
+        if mask is None:
+            mask = torch.ones(h.shape[:2], device=h.device, dtype=h.dtype)
+        q_meter = self.posterior_model(h, mask, self.prior_model)[5]
+        idx = q_meter.mean(1).argmax(-1)
+        return self.prior_model.meter_values[idx]
 
     @torch.no_grad()
     def emission_probs(self, h, mask=None):

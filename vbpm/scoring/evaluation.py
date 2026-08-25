@@ -121,9 +121,10 @@ def null_times(crop, kind: str, rng):
     return crop["t0"] + offset + np.arange(0.0, max(duration, 0.0), period)
 
 
-def rule_g_times(mu, mask, raw):
-    """Rule-g downbeat TIMES per crop: wrap frames of ``mu`` -> seconds from t0."""
-    wraps = [w.cpu().numpy() for w in downbeat_times(mu, mask)]
+def rule_g_times(mu, mask, raw, meter=None):
+    """Rule-g event TIMES per crop; ``meter`` scales the phase to read BEATS."""
+    phase = mu if meter is None else mu * meter.reshape(-1, 1)
+    wraps = [w.cpu().numpy() for w in downbeat_times(phase, mask)]
     return [wraps[i][wraps[i] < len(c["y"]) - 1] / c["fps"] + c["t0"]
             for i, c in enumerate(raw)]
 
@@ -139,6 +140,7 @@ def scoring_records(raw) -> list:
         records.append({"y": raw["y"][i, :valid].numpy(),
                         "fps": float(raw["fps"][i]), "t0": float(raw["t0"][i]),
                         "downbeat_times": np.asarray(raw["downbeat_times"][i]),
+                        "beat_times": np.asarray(raw.get("beat_times", [[]] * len(raw["y"]))[i]),
                         "anchors": np.asarray(raw["anchors"][i]),
                         "dataset": raw["dataset"][i], "song_id": raw["song_id"][i]})
     return records
@@ -166,6 +168,9 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
 
             mu = model.infer_phase(h, mask)[keep]
             times = rule_g_times(mu, mask[keep], crops)
+            meter = model.infer_meter(h, mask)
+            beats = (None if meter is None else
+                     rule_g_times(mu, mask[keep], crops, meter=meter[keep]))
             probs = model.emission_probs(h, mask)[keep].cpu().numpy()
 
             # the peak picker and the nulls need a bar period; take the model's OWN
@@ -187,6 +192,15 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
 
                 alt_d = peak_times(probs[i, :t], crop["fps"], crop["bar_period"]) + crop["t0"]
                 per["emission-D"].append(f_measure(alt_d, truth)[0])
+
+                if beats is not None and len(crop["beat_times"]):
+                    bt = np.asarray(crop["beat_times"])
+                    per["beat F"].append(f_measure(beats[i], bt)[0])
+                    bc, ba = continuity_scores(bt, beats[i])
+                    per["beat CMLt"].append(bc)
+                    per["beat AMLt"].append(ba)
+                    per["beat est/ref"].append(len(beats[i]) / max(len(bt), 1))
+                    per["meter"].append(float(meter[keep][i]))
 
                 for kind in ("random", "zero"):
                     per[f"null-{kind}"].append(

@@ -96,7 +96,7 @@ class RateSpec:
     hi: float = 0.200
     per_bar: bool = True
     meters: tuple = ()
-    meter_prior: str = "uniform"
+    meter_prior: str = "corpus"
     posterior: str = "categorical"
     resid: float = 0.0
 

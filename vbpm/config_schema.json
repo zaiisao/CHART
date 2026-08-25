@@ -227,11 +227,11 @@
   },
   "meter_prior": {
     "type": "string",
-    "default": "uniform",
+    "default": "corpus",
     "enum": [
       "uniform",
       "corpus"
     ],
-    "description": "p(m): uniform keeps every meter equally likely a priori, so evidence alone decides; corpus uses the song-weighted share, which is 0.83 on m=4 and charges 4.4 nats to prefer a rare meter."
+    "description": "p(m): corpus is the song-weighted share measured over 4,900 songs in sixteen corpora -- 0.831 on m=4, 0.012 on m=8. uniform is available as an ablation, and charges nothing for a meter the corpus almost never contains."
   }
 }
