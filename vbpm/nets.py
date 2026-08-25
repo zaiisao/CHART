@@ -391,14 +391,24 @@ class PriorModel(nn.Module):
         self.register_buffer("kernel", (stay + moved).contiguous(), persistent=False)
 
         self.meters = tuple(int(v) for v in rate.meters)
+        assert all(v >= 2 for v in self.meters), \
+            f"meters {self.meters}: m=1 makes the beat channel identical to the " \
+            "downbeat channel, so it predicts no pattern and is a faster copy of " \
+            "every rate already in the grid"
+        assert len(set(self.meters)) == len(self.meters), f"repeated meter in {self.meters}"
         if self.meters:
             M = len(self.meters)
             self.register_buffer("meter_values",
                                  torch.tensor(self.meters, dtype=k_lin.dtype))
-            move = torch.full((M, M), (1.0 - METER_STAY) / (M - 1), dtype=k_lin.dtype)
-            move.fill_diagonal_(METER_STAY)
+            off = (1.0 - METER_STAY) / (M - 1) if M > 1 else 0.0
+            move = torch.full((M, M), off, dtype=k_lin.dtype)
+            move.fill_diagonal_(METER_STAY if M > 1 else 1.0)
             self.register_buffer("meter_switch", move)
             if rate.meter_prior == "corpus":
+                unknown = [v for v in self.meters if v not in METER_SONG_SHARE]
+                assert not unknown, \
+                    f"meter_prior 'corpus' has no measured share for {unknown}; " \
+                    f"measured meters are {sorted(METER_SONG_SHARE)}"
                 share = torch.tensor([METER_SONG_SHARE[v] for v in self.meters],
                                      dtype=k_lin.dtype)
                 lp = share.log()
