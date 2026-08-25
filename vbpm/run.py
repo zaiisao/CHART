@@ -34,7 +34,7 @@ def _seed_worker(_worker_id: int) -> None:
 
 
 def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
-          val_set=None, select: str = "none"):
+          val_set=None, select: str = "none", init_from: str = None):
     """One seed: run the controls, then fit the objective the hooks define.
 
     ``select`` names a CHECKPOINT RULE, declared before the run rather than chosen
@@ -51,6 +51,16 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
         collate_fn=collate_excerpts, pin_memory=True, worker_init_fn=_seed_worker,
         persistent_workers=workers > 0,
         generator=torch.Generator().manual_seed(seed))
+
+    if init_from:
+        blob = torch.load(init_from, map_location="cpu", weights_only=False)
+        report = model.load_state_dict(
+            {k: v for k, v in blob["model"].items()
+             if k not in hooks_base.RETIRED_KEYS}, strict=False)
+        frontend._audio2frames.model.load_state_dict(blob["frontend"])
+        print(f"warm start from {init_from}\n"
+              f"  fresh parameters: {sorted(report.missing_keys)}\n"
+              f"  unused in checkpoint: {sorted(report.unexpected_keys)}", flush=True)
 
     opt, clip_params = hooks.optimizer(model, cfg)
 
@@ -170,6 +180,9 @@ def parse_args():
                         "none keeps the last epoch.")
     p.add_argument("--workers", type=int, default=4,
                    help="DataLoader workers (window draws + mmap reads)")
+    p.add_argument("--init-from", default=None,
+                   help="warm-start model and frontend weights from a checkpoint; "
+                        "parameters absent from it keep their fresh initialisation")
     p.add_argument("--save-dir", default=None,
                    help="save the model to <save-dir>/seed<k>.pt")
     return p.parse_args()
@@ -207,7 +220,8 @@ def main() -> None:
           f"per epoch, rejects {len(train_set.rejects)}")
 
     model = train(train_set, frontend, device, cfg, hooks, args.seed, args.workers,
-                  val_set=val_set, select=args.select)
+                  val_set=val_set, select=args.select,
+                  init_from=args.init_from)
 
     if getattr(model, "_selected", None) is None and args.select != "none":
         pass
