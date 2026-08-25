@@ -29,7 +29,8 @@ class _InlineEmission:
     b_floor = property(lambda self: getattr(self._m, "emission_b_floor", None))
 
 
-RETIRED_KEYS = ("emission_model.band_w",)
+RETIRED_KEYS = ("emission_model.band_w", "prior_model.meter_values",
+                "prior_model.meter_switch", "prior_model.meter_log_prior")
 
 
 def load_model_state(model, state):

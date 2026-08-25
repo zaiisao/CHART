@@ -399,11 +399,12 @@ class PriorModel(nn.Module):
         if self.meters:
             M = len(self.meters)
             self.register_buffer("meter_values",
-                                 torch.tensor(self.meters, dtype=k_lin.dtype))
+                                 torch.tensor(self.meters, dtype=k_lin.dtype),
+                                 persistent=False)
             off = (1.0 - METER_STAY) / (M - 1) if M > 1 else 0.0
             move = torch.full((M, M), off, dtype=k_lin.dtype)
             move.fill_diagonal_(METER_STAY if M > 1 else 1.0)
-            self.register_buffer("meter_switch", move)
+            self.register_buffer("meter_switch", move, persistent=False)
             if rate.meter_prior == "corpus":
                 unknown = [v for v in self.meters if v not in METER_SONG_SHARE]
                 assert not unknown, \
@@ -414,7 +415,8 @@ class PriorModel(nn.Module):
                 lp = share.log()
             else:
                 lp = torch.zeros(M, dtype=k_lin.dtype)
-            self.register_buffer("meter_log_prior", lp - torch.logsumexp(lp, 0))
+            self.register_buffer("meter_log_prior", lp - torch.logsumexp(lp, 0),
+                                 persistent=False)
 
     @property
     def n_rates(self) -> int:
