@@ -6,14 +6,13 @@ import torch
 from torch import nn
 
 from .constants import (EMISSION_FIT_A, EMISSION_FIT_B, EMISSION_FIT_TAU,
-                        EMISSION_FIT_TAU_BACK, FPS, TEMPO_PRIOR_MU,
-                        TOLERANCE_SECONDS, TWO_PI)
+                        EMISSION_FIT_TAU_BACK, FPS, METER_SONG_SHARE, METER_STAY,
+                        TEMPO_PRIOR_MU, TOLERANCE_SECONDS, TWO_PI)
 from .specs import EmissionSpec, RateSpec, WalkSpec
 
 N_HARM = 12             # band limit of the recognition potentials
 GAMMA = 0.0363          # corpus median per-bar |dlog rate|, the Cauchy scale
 N_GRID = 128            # quadrature nodes on the phase circle
-METER_STAY = 0.999      # mass a meter keeps across a bar line
 
 
 def sinusoidal_encoding(length: int, dim: int) -> torch.Tensor:
@@ -399,8 +398,13 @@ class PriorModel(nn.Module):
             move = torch.full((M, M), (1.0 - METER_STAY) / (M - 1), dtype=k_lin.dtype)
             move.fill_diagonal_(METER_STAY)
             self.register_buffer("meter_switch", move)
-            self.register_buffer("meter_log_prior",
-                                 torch.full((M,), -math.log(M), dtype=k_lin.dtype))
+            if rate.meter_prior == "corpus":
+                share = torch.tensor([METER_SONG_SHARE[v] for v in self.meters],
+                                     dtype=k_lin.dtype)
+                lp = share.log()
+            else:
+                lp = torch.zeros(M, dtype=k_lin.dtype)
+            self.register_buffer("meter_log_prior", lp - torch.logsumexp(lp, 0))
 
     @property
     def n_rates(self) -> int:

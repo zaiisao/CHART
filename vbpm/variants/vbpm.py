@@ -9,7 +9,7 @@ from ..nets import EmissionModel, PosteriorModel, PriorModel
 from ..specs import EmissionSpec, RateSpec, WalkSpec
 
 DEFAULTS = {"chain_rate_grid": 36, "ar_rate_lo": 0.012, "ar_rate_hi": 0.200,
-            "meters": []}
+            "meters": [], "meter_prior": "uniform"}
 
 
 class VBPM(nn.Module):
@@ -104,6 +104,7 @@ def build_model(cfg, input_dim: int) -> VBPM:
     """One VBPM from a config: two specs, no loose floats."""
     rate_spec = RateSpec(grid=cfg.chain_rate_grid, lo=cfg.ar_rate_lo,
                          hi=cfg.ar_rate_hi, posterior="categorical", resid=0.0,
-                         per_bar=cfg.tempo_per_bar, meters=tuple(cfg.meters))
+                         per_bar=cfg.tempo_per_bar, meters=tuple(cfg.meters),
+                         meter_prior=cfg.meter_prior)
     vbpm = VBPM(input_dim, rate=rate_spec, **base.common_kwargs(cfg))
     return vbpm

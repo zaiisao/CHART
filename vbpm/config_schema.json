@@ -224,5 +224,14 @@
     "type": "array",
     "default": [],
     "description": "beats-per-bar values the chain enumerates; empty keeps the downbeat-only model. Meter joins rate in the state and may change only at a wrapping phase transition."
+  },
+  "meter_prior": {
+    "type": "string",
+    "default": "uniform",
+    "enum": [
+      "uniform",
+      "corpus"
+    ],
+    "description": "p(m): uniform keeps every meter equally likely a priori, so evidence alone decides; corpus uses the song-weighted share, which is 0.83 on m=4 and charges 4.4 nats to prefer a rare meter."
   }
 }
