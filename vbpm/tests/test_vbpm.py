@@ -450,7 +450,7 @@ def test_smooth_marginals_match_brute_force_enumeration():
     evidence = torch.randn(1, T, N, dtype=torch.float64) * 0.7
     log_q_rate0 = torch.log_softmax(torch.randn(1, C, dtype=torch.float64), -1)
 
-    q_joint, log_z = post.smooth(evidence, log_q_rate0, prior)
+    q_phase, q_rate, _, log_z = post.smooth(evidence, log_q_rate0, prior)
 
     p0 = torch.softmax(prior.rate_log_prior, 0)
     total, marginal = 0.0, torch.zeros(T, C, N, dtype=torch.float64)
@@ -469,7 +469,9 @@ def test_smooth_marginals_match_brute_force_enumeration():
             marginal[t, c, n] += w
 
     assert float(log_z[0]) == pytest.approx(math.log(total), abs=1e-6)
-    assert torch.allclose(q_joint[0], marginal / total, atol=1e-12)
+    ref = marginal / total
+    assert torch.allclose(q_phase[0], ref.sum(1), atol=1e-12)
+    assert torch.allclose(q_rate[0], ref.sum(2), atol=1e-12)
 
 
 def test_emission_loglik_is_the_bernoulli_it_claims():

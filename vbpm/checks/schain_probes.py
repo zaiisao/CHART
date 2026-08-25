@@ -24,6 +24,7 @@ import numpy as np
 import torch
 
 from ..config import load_config
+from ..variants.base import load_model_state
 from ..data.dataset import split_songs
 from ..data.excerpts import ExcerptDataset, collate_excerpts
 from ..scoring.evaluation import (continuity_scores, f_measure, peak_times,
@@ -38,7 +39,7 @@ def load(checkpoint: str, config: str, gpu: int):
         checkpoint=cfg.frontend_checkpoint, device=f"cuda:{gpu}", output="features")
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
-    model.load_state_dict(state["model"])
+    load_model_state(model, state["model"])
     model.eval()
     if "frontend" in state:
         frontend._audio2frames.model.load_state_dict(state["frontend"])

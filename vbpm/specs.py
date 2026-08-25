@@ -20,6 +20,7 @@ class EmissionSpec:
     fit_init: bool = False
     frozen: bool = False
     floor: float = 0.0
+    beat_channel: bool = False
 
 
 @dataclasses.dataclass
@@ -94,6 +95,7 @@ class RateSpec:
     lo: float = 0.020
     hi: float = 0.200
     per_bar: bool = True
+    meters: tuple = ()
     posterior: str = "categorical"
     resid: float = 0.0
 

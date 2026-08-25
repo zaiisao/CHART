@@ -29,6 +29,15 @@ class _InlineEmission:
     b_floor = property(lambda self: getattr(self._m, "emission_b_floor", None))
 
 
+RETIRED_KEYS = ("emission_model.band_w",)
+
+
+def load_model_state(model, state):
+    """load_state_dict, minus buffers that belonged to since-deleted components."""
+    return model.load_state_dict({k: v for k, v in state.items()
+                                  if k not in RETIRED_KEYS})
+
+
 def emission_of(model):
     """The object owning the emission: the submodule where the variant has one."""
     em = getattr(model, "emission_model", None)
@@ -42,7 +51,8 @@ def common_kwargs(cfg) -> dict:
                                      bump_kappa=cfg.emission_bump_kappa,
                                      fit_init=cfg.emission_fit_init,
                                      frozen=cfg.emission_frozen,
-                                     floor=cfg.emission_floor),
+                                     floor=cfg.emission_floor,
+                                     beat_channel=bool(cfg.meters)),
             "walk": WalkSpec(kappa_physical=cfg.kappa_physical,
                              tempo_mu=cfg.tempo_prior_mu,
                              tempo_sigma=cfg.tempo_prior_sigma,

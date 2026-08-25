@@ -219,5 +219,10 @@
     "type": "boolean",
     "default": true,
     "description": "the rate may change at a wrapping phase transition, paying the wrapped-Cauchy cost on log-rate; false makes the switch the identity, so one rate carries the whole window -- the rigid control."
+  },
+  "meters": {
+    "type": "array",
+    "default": [],
+    "description": "beats-per-bar values the chain enumerates; empty keeps the downbeat-only model. Meter joins rate in the state and may change only at a wrapping phase transition."
   }
 }

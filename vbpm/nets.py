@@ -13,6 +13,7 @@ from .specs import EmissionSpec, RateSpec, WalkSpec
 N_HARM = 12             # band limit of the recognition potentials
 GAMMA = 0.0363          # corpus median per-bar |dlog rate|, the Cauchy scale
 N_GRID = 128            # quadrature nodes on the phase circle
+METER_STAY = 0.999      # mass a meter keeps across a bar line
 
 
 def sinusoidal_encoding(length: int, dim: int) -> torch.Tensor:
@@ -66,6 +67,40 @@ class Encoder(nn.Module):
         return self.features(h, mask)
 
 
+USE_COMPILE = False
+
+
+def _fwd_step(a, kernel, e, floor):
+    """One forward propagation, tilt, and renormalisation."""
+    a = (a.reshape(a.shape[0], -1) @ kernel).view_as(a) * e
+    s = a.sum(dim=(1, 2), keepdim=True).clamp_min(floor)
+    return a / s, s.squeeze(-1).squeeze(-1).log()
+
+
+def _bwd_step(b, kernel, e, floor):
+    """One backward propagation and renormalisation."""
+    b = ((b * e).reshape(b.shape[0], -1) @ kernel.T).view_as(b)
+    return b / b.sum(dim=(1, 2), keepdim=True).clamp_min(floor)
+
+
+_STEPS = None
+
+
+def chain_steps():
+    """(fwd_step, bwd_step), compiled once if the backend accepts them."""
+    global _STEPS
+    if _STEPS is None:
+        if USE_COMPILE:
+            try:
+                _STEPS = (torch.compile(_fwd_step, dynamic=False),
+                          torch.compile(_bwd_step, dynamic=False))
+            except Exception:
+                _STEPS = (_fwd_step, _bwd_step)
+        else:
+            _STEPS = (_fwd_step, _bwd_step)
+    return _STEPS
+
+
 class PosteriorModel(nn.Module):
     """q(path | x) = p_prior(path) exp(sum_t evidence_t(phi_t) + head(c_0)) / Z.
 
@@ -91,6 +126,11 @@ class PosteriorModel(nn.Module):
         self.rate_head = nn.Linear(d_model, prior.n_rates)
         nn.init.zeros_(self.rate_head.weight)
         nn.init.zeros_(self.rate_head.bias)
+        self.meter_head = (nn.Linear(d_model, len(prior.meters))
+                           if prior.meters else None)
+        if self.meter_head is not None:
+            nn.init.zeros_(self.meter_head.weight)
+            nn.init.zeros_(self.meter_head.bias)
         self.evidence_head = nn.Linear(d_model, 2 * n_harm)
         nn.init.zeros_(self.evidence_head.weight)
         nn.init.zeros_(self.evidence_head.bias)
@@ -100,16 +140,19 @@ class PosteriorModel(nn.Module):
                                         torch.sin(prior.grid[:, None] * j)], dim=1))
 
     def forward(self, h, mask, prior):
-        """(evidence, log_q_rate0, q_joint, log_z) for one window."""
-        evidence, log_q_rate0 = self.potentials(h, mask)
-        q_joint, log_z = self.smooth(evidence, log_q_rate0, prior)
-        return evidence, log_q_rate0, q_joint, log_z
+        """(evidence, rate/meter logits, marginals, log_z) for one window."""
+        evidence, log_q_rate0, log_q_meter = self.potentials(h, mask)
+        marginals = self.smooth(evidence, log_q_rate0, prior, log_q_meter)
+        return (evidence, log_q_rate0, log_q_meter) + marginals
 
     def potentials(self, h, mask):
         """(evidence [B,T,N], head [B,C]): the local evidence, and the initial rate."""
         feats = self.encoder.features(h, mask)
-        return self._evidence(feats, mask), \
-            torch.log_softmax(self.rate_head(self._pooled(feats, mask)), dim=-1)
+        pooled = self._pooled(feats, mask)
+        meter = (torch.log_softmax(self.meter_head(pooled), dim=-1)
+                 if self.meter_head is not None else None)
+        return (self._evidence(feats, mask),
+                torch.log_softmax(self.rate_head(pooled), dim=-1), meter)
 
     def _pooled(self, feats, mask):
         w = mask[..., None]
@@ -129,34 +172,50 @@ class PosteriorModel(nn.Module):
         evidence = evidence - evidence.max(dim=-1, keepdim=True).values
         return evidence * mask[..., None]
 
-    def smooth(self, evidence, log_q_rate0, prior):
-        """Exact forward-backward over the prior's quadrature."""
+    def smooth(self, evidence, log_q_rate0, prior, log_q_meter=None):
+        """(q_phase, q_rate, q_meter, log_z): marginals only, never the joint."""
         B, T, N = evidence.shape
-        C = prior.rates.shape[0]
+        M = len(prior.meters)
         FL = 1e-30
         E = evidence.exp()
-        p0 = torch.softmax(prior.rate_log_prior, 0)[None, :, None]
-        a = p0 * log_q_rate0.exp()[:, :, None] * E[:, 0][:, None, :] / N
-        s = a.sum(dim=(1, 2), keepdim=True).clamp_min(FL)
-        logz = s.squeeze(-1).squeeze(-1).log()
+        red = (1, 2, 3) if M else (1, 2)
+        tilt = (slice(None), None, None, slice(None)) if M else (slice(None), None, slice(None))
+        a = torch.softmax(prior.rate_log_prior, 0)[None, :, None] \
+            * log_q_rate0.exp()[:, :, None] * E[:, 0][:, None, :] / N
+        if M:
+            a = a[:, None] * torch.softmax(prior.meter_log_prior, 0)[None, :, None, None]
+            if log_q_meter is not None:
+                a = a * log_q_meter.exp()[:, :, None, None]
+        s = a.sum(dim=red, keepdim=True).clamp_min(FL)
+        logz = s.reshape(B).log()
         a = a / s
         A = [a]
         for t in range(1, T):
-            a = prior.fwd(a) * E[:, t][:, None, :]
-            s = a.sum(dim=(1, 2), keepdim=True).clamp_min(FL)
-            logz = logz + s.squeeze(-1).squeeze(-1).log()
+            a = prior.fwd(a) * E[:, t][tilt]
+            s = a.sum(dim=red, keepdim=True).clamp_min(FL)
+            logz = logz + s.reshape(B).log()
             a = a / s
             A.append(a)
-        b = torch.ones_like(a) / (C * N)
+        b = torch.ones_like(a) / a[0].numel()
         Bl = [b]
         for t in range(T - 1, 0, -1):
-            b = prior.bwd(b * E[:, t][:, None, :])
-            b = b / b.sum(dim=(1, 2), keepdim=True).clamp_min(FL)
+            b = prior.bwd(b * E[:, t][tilt])
+            b = b / b.sum(dim=red, keepdim=True).clamp_min(FL)
             Bl.append(b)
         Bl.reverse()
-        post = torch.stack(A, 1) * torch.stack(Bl, 1)               # [B,T,C,N]
-        post = post / post.sum(dim=(2, 3), keepdim=True).clamp_min(FL)
-        return post, logz
+        phase, rate, meter = [], [], []
+        for t in range(T):
+            post = A[t] * Bl[t]
+            post = post / post.sum(dim=red, keepdim=True).clamp_min(FL)
+            if M:
+                phase.append(post.sum(2))
+                rate.append(post.sum((1, 3)))
+                meter.append(post.sum((2, 3)))
+            else:
+                phase.append(post.sum(1))
+                rate.append(post.sum(2))
+        return (torch.stack(phase, 1), torch.stack(rate, 1),
+                torch.stack(meter, 1) if M else None, logz)
 
     def unwrap(self, qn, grid):
         """[B,T,N] marginals -> [B,T] unwrapped circular-mean phase."""
@@ -242,9 +301,9 @@ class EmissionModel(nn.Module):
         assert self.spec.kind == "cosine", f"unknown emission kind {self.spec.kind!r}"
         return self.a + self.b * torch.cos(phi)
 
-    def loglik(self, y, mask, grid):
-        """[B,T,N]: log p(y_t | phi) for the DOWNBEAT target, at every grid phase."""
-        e = self(grid)
+    def channel_loglik(self, y, mask, phi):
+        """[B,T,...]: log p(y_t | phi) for one Bernoulli channel at phases ``phi``."""
+        e = self(phi)
         log_hit, log_miss = nn.functional.logsigmoid(e), nn.functional.logsigmoid(-e)
         if self.spec.floor > 0.0:
             keep = math.log1p(-self.spec.floor)
@@ -252,8 +311,21 @@ class EmissionModel(nn.Module):
                                                       math.log(self.spec.floor)),
                                       keep + log_hit)
             log_miss = keep + log_miss
-        ll = y[..., None] * log_hit + (1.0 - y)[..., None] * log_miss
-        return ll * mask[..., None]
+        extra = (1,) * (e.dim())
+        ll = y.reshape(y.shape + extra) * log_hit \
+            + (1.0 - y).reshape(y.shape + extra) * log_miss
+        return ll * mask.reshape(mask.shape + extra)
+
+    def loglik(self, y, mask, grid, meters=None, cls=None):
+        """[B,T,N] downbeats, or [B,T,M,N] with the beat channel added per meter."""
+        down = self.channel_loglik(y, mask, grid)
+        if meters is None or not self.spec.beat_channel:
+            return down
+        m = meters.reshape(-1, 1).to(grid.dtype)
+        beat_phase = torch.remainder(m * grid.reshape(1, -1), TWO_PI)
+        beat_y = (cls >= 1).to(y.dtype)
+        beat = self.channel_loglik(beat_y, mask, beat_phase)
+        return down.unsqueeze(2) + beat
 
 
 class PriorModel(nn.Module):
@@ -306,8 +378,29 @@ class PriorModel(nn.Module):
                              else torch.eye(rates.shape[0], dtype=sw.dtype))
         cell = TWO_PI / n_grid
         wrap = ((grid[None, :] + cell - (TWO_PI - rates[:, None])) / cell).clamp(0.0, 1.0)
-        self.register_buffer("k_wrap", k_lin * wrap[:, :, None])
-        self.register_buffer("k_stay", k_lin - k_lin * wrap[:, :, None])
+        k_wrap = k_lin * wrap[:, :, None]
+        k_stay = k_lin - k_wrap
+        self.register_buffer("k_wrap", k_wrap)
+        self.register_buffer("k_stay", k_stay)
+
+        c, g = rates.shape[0], n_grid
+        eye = torch.eye(c, dtype=k_lin.dtype)
+        stay = torch.einsum("cmn,cd->cmdn", k_stay, eye).reshape(c * g, c * g)
+        moved = torch.einsum("cmn,cd->cmdn", k_wrap, self.switch).reshape(c * g, c * g)
+        self.register_buffer("kernel_stay", stay.contiguous(), persistent=False)
+        self.register_buffer("kernel_wrap", moved.contiguous(), persistent=False)
+        self.register_buffer("kernel", (stay + moved).contiguous(), persistent=False)
+
+        self.meters = tuple(int(v) for v in rate.meters)
+        if self.meters:
+            M = len(self.meters)
+            self.register_buffer("meter_values",
+                                 torch.tensor(self.meters, dtype=k_lin.dtype))
+            move = torch.full((M, M), (1.0 - METER_STAY) / (M - 1), dtype=k_lin.dtype)
+            move.fill_diagonal_(METER_STAY)
+            self.register_buffer("meter_switch", move)
+            self.register_buffer("meter_log_prior",
+                                 torch.full((M,), -math.log(M), dtype=k_lin.dtype))
 
     @property
     def n_rates(self) -> int:
@@ -315,16 +408,22 @@ class PriorModel(nn.Module):
         return self.rates.shape[0]
 
     def fwd(self, a):
-        """[B,C,N] -> propagated forward. Rate may change only through a wrap."""
-        stay = torch.einsum("bcm,cmn->bcn", a, self.k_stay)
-        wm = torch.einsum("bcm,cmn->bcn", a, self.k_wrap)
-        return stay + torch.einsum("bdn,dc->bcn", wm, self.switch)
+        """Propagate forward. Rate and meter may change only through a wrap."""
+        if not self.meters:
+            return (a.reshape(a.shape[0], -1) @ self.kernel).view_as(a)
+        flat = a.reshape(-1, self.kernel.shape[0])
+        stay = (flat @ self.kernel_stay).view_as(a)
+        moved = (flat @ self.kernel_wrap).view_as(a)
+        return stay + torch.einsum("bmcn,mp->bpcn", moved, self.meter_switch)
 
     def bwd(self, b):
-        """[B,C,N] -> propagated backward, the transpose of fwd."""
-        stay = torch.einsum("bcn,cmn->bcm", b, self.k_stay)
-        sw = torch.einsum("bcn,dc->bdn", b, self.switch)
-        return stay + torch.einsum("bdn,dmn->bdm", sw, self.k_wrap)
+        """Propagate backward, the transpose of fwd."""
+        if not self.meters:
+            return (b.reshape(b.shape[0], -1) @ self.kernel.T).view_as(b)
+        stay = (b.reshape(-1, self.kernel.shape[0]) @ self.kernel_stay.T).view_as(b)
+        pre = torch.einsum("bpcn,mp->bmcn", b, self.meter_switch)
+        moved = (pre.reshape(-1, self.kernel.shape[0]) @ self.kernel_wrap.T).view_as(b)
+        return stay + moved
 
     @torch.no_grad()
     def init_log_prior(self, rate: float, tempo_sigma: float):

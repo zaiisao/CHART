@@ -77,6 +77,8 @@ def train(dataset, frontend, device, cfg, hooks, seed: int, workers: int,
             y = raw["y"].to(device, non_blocking=True)
 
             extra = {"raw": raw} if getattr(model, "wants_raw", False) else {}
+            if cfg.meters:
+                extra["cls"] = raw["cls"].to(device, non_blocking=True)
             out = model(h, mask, y, pos_weight=cfg.pos_weight, **extra)
 
             # per-frame normalisation and beta-annealed loss; reported elbo is beta=1.

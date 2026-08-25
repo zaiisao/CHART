@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from ..config import load_config
+from ..variants.base import load_model_state
 from ..data.dataset import split_songs
 from ..data.excerpts import ExcerptDataset, collate_excerpts
 from ..run import VAL_FOLD
@@ -47,7 +48,7 @@ def main():
         checkpoint=cfg.frontend_checkpoint, device=device, output="features")
     frontend._audio2frames.model.load_state_dict(blob["frontend"])
     model = hooks.build_model(cfg, frontend.num_channels).to(device)
-    model.load_state_dict(blob["model"])
+    load_model_state(model, blob["model"])
     model.eval()
 
     _tr, val_songs, test_songs = split_songs(VAL_FOLD, None)

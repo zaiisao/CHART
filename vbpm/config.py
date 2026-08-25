@@ -20,6 +20,7 @@ TYPES = {
     "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
     "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
     "string": lambda v: isinstance(v, str),
+    "array": lambda v: isinstance(v, (list, tuple)),
 }
 
 
