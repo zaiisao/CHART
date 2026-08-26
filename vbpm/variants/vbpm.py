@@ -41,7 +41,8 @@ class VBPM(nn.Module):
         """Centre the prior's rate distribution on ``rate`` (used by --acf-init)."""
         return self.prior_model.init_log_prior(rate, self.walk_spec.tempo_sigma)
 
-    def forward(self, h, mask, y, pos_weight: float = 1.0, cls=None):
+    def forward(self, h, mask, y, pos_weight: float = 1.0, cls=None,
+                has_downbeats=None):
         """The ELBO and the trajectory diagnostics for one batch."""
         assert pos_weight == 1.0, \
             "pos_weight != 1 is a weighted surrogate, not an ELBO; this model has no such term"
@@ -51,7 +52,8 @@ class VBPM(nn.Module):
         meters = getattr(self.prior_model, "meter_values", None)
 
         emission_ll = self.emission_model.loglik(
-            y, mask, self.prior_model.grid, meters=meters, cls=cls)
+            y, mask, self.prior_model.grid, meters=meters, cls=cls,
+            has_downbeats=has_downbeats)
         if q_meter is None:
             recon = torch.einsum("btn,btn->b", q_phase, emission_ll)
             phase_marginal = q_phase

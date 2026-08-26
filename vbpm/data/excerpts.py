@@ -32,7 +32,7 @@ class ExcerptDataset(torch.utils.data.Dataset):
 
     def __init__(self, songs, frontend, excerpt_seconds: float = 45.0,
                  deterministic: bool = False, cache_root: str = INPUT_CACHE_DIR,
-                 target_tol_frames: int = 0):
+                 target_tol_frames: int = 0, beat_only: bool = False):
         self.frontend_name = frontend.name
         self.fps = float(frontend.FPS)
         self.excerpt_frames = int(round(excerpt_seconds * self.fps))
@@ -45,7 +45,9 @@ class ExcerptDataset(torch.utils.data.Dataset):
         for song in songs:
             beat_times, downbeat_times = song.beats()
             downbeat_times = np.asarray(downbeat_times, dtype=np.float64)
-            if len(downbeat_times) < MIN_DOWNBEATS:
+            enough = (len(np.asarray(beat_times)) >= MIN_DOWNBEATS if beat_only
+                      else len(downbeat_times) >= MIN_DOWNBEATS)
+            if not enough:
                 self.rejects.append(song.song_id)
                 continue
             path = input_cache_path(self.frontend_name, song, cache_root)
@@ -81,7 +83,8 @@ class ExcerptDataset(torch.utils.data.Dataset):
                                 target_tol_frames=self.target_tol_frames)
 
         window = np.array(array[start:start + frames], dtype=np.float32)
-        labeled = len(targets["downbeat_times"]) > 0
+        labeled = (len(targets["downbeat_times"]) > 0
+                   or len(targets["beat_times"]) > 0)
         mask = np.full(frames, float(labeled), dtype=np.float32)
 
         pad = self.excerpt_frames - frames
@@ -144,7 +147,8 @@ def collate_excerpts(batch: list) -> dict:
     700-song smokes.
     """
     batch = [item for item in batch
-             if float(item["mask"].sum()) > 0 and len(item["downbeat_times"]) > 0]
+             if float(item["mask"].sum()) > 0
+             and (len(item["downbeat_times"]) > 0 or len(item["beat_times"]) > 0)]
     if not batch:
         raise ValueError("collate_excerpts: every item in the batch was empty")
     out = {}

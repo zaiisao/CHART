@@ -315,9 +315,15 @@ class EmissionModel(nn.Module):
             + (1.0 - y).reshape(y.shape + extra) * log_miss
         return ll * mask.reshape(mask.shape + extra)
 
-    def loglik(self, y, mask, grid, meters=None, cls=None):
-        """[B,T,N] downbeats, or [B,T,M,N] with the beat channel added per meter."""
+    def loglik(self, y, mask, grid, meters=None, cls=None, has_downbeats=None):
+        """[B,T,N] downbeats, or [B,T,M,N] with the beat channel added per meter.
+
+        ``has_downbeats`` masks the downbeat channel per item, so a corpus annotated
+        with beats alone does not train it on all-negatives.
+        """
         down = self.channel_loglik(y, mask, grid)
+        if has_downbeats is not None:
+            down = down * has_downbeats.reshape(-1, *([1] * (down.dim() - 1)))
         if meters is None or not self.spec.beat_channel:
             return down
         m = meters.reshape(-1, 1).to(grid.dtype)

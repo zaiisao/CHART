@@ -184,6 +184,16 @@ def evaluate(model, dataset, frontend, device, batch_size: int, seed: int = 0):
                 truth = np.asarray(crop["downbeat_times"])
                 rule_g = times[i]
                 per = rows[crop["dataset"]]
+                if len(truth) == 0:
+                    if beats is not None and len(crop["beat_times"]):
+                        bt = np.asarray(crop["beat_times"])
+                        per["beat F"].append(f_measure(beats[i], bt)[0])
+                        bc, ba = continuity_scores(bt, beats[i])
+                        per["beat CMLt"].append(bc)
+                        per["beat AMLt"].append(ba)
+                        per["beat est/ref"].append(len(beats[i]) / max(len(bt), 1))
+                        per["meter"].append(float(meter[keep][i]))
+                    continue
                 per["rule-g"].append(f_measure(rule_g, truth)[0])
                 cmlt, amlt = continuity_scores(truth, rule_g)
                 per["rule-g CMLt"].append(cmlt)
